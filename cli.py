@@ -1,0 +1,353 @@
+import argparse
+
+from .features import HASH_VIEW_PRESETS
+from .routing import list_retrieval_route_tags
+from .runner import run_adaptive_simulation
+
+def build_parser():
+    parser = argparse.ArgumentParser(
+        description="Compact paper-style runner for graph hash reuse experiments."
+    )
+
+    parser.add_argument("--datasets", nargs="+", default=["cora"], choices=["cora", "pubmed", "arxiv"])
+    parser.add_argument("--runs", type=int, default=1)
+    parser.add_argument("--max_test", type=int, default=None, help="Override test split size for faster debugging")
+
+    parser.add_argument("--radius", type=int, default=2)
+    parser.add_argument("--sketch_bits", type=int, default=14)
+    parser.add_argument(
+        "--hash_view",
+        type=str,
+        default="self_1hop_2hop",
+        choices=sorted(HASH_VIEW_PRESETS.keys()),
+        help="Primary retrieval view preset; overridden by --hash_mix_weights for the main route",
+    )
+    parser.add_argument(
+        "--hash_mix_weights",
+        type=float,
+        nargs=3,
+        default=[0.3, 0.7, 0.0],
+        metavar=("SELF_W", "HOP1_W", "HOP2_W"),
+        help="Main-route self/1hop/2hop mixing weights. Default mainline is 0.3 0.7 0.0",
+    )
+    parser.add_argument(
+        "--union_hash_views",
+        nargs="+",
+        default=[],
+        choices=sorted(HASH_VIEW_PRESETS.keys()),
+        help="Optional auxiliary retrieval views unioned with the primary view",
+    )
+    parser.add_argument("--cosine_tau", type=float, default=0.59)
+
+    parser.add_argument("--cache_size", type=int, default=None)
+    parser.add_argument("--memo_k", type=int, default=3)
+    parser.add_argument("--vote_top_m", type=int, default=4)
+    parser.add_argument("--vote_relax_margin", type=float, default=0.05)
+
+    parser.add_argument("--learned_hash_projection", dest="learned_hash_projection", action="store_true")
+    parser.add_argument("--no_learned_hash_projection", dest="learned_hash_projection", action="store_false")
+    parser.set_defaults(learned_hash_projection=True)
+    parser.add_argument("--learned_hash_dim", type=int, default=256)
+    parser.add_argument("--learned_hash_epochs", type=int, default=80)
+    parser.add_argument("--learned_hash_lr", type=float, default=1e-3)
+    parser.add_argument("--learned_hash_weight_decay", type=float, default=1e-4)
+    parser.add_argument("--learned_hash_batch_size", type=int, default=512)
+    parser.add_argument(
+        "--learned_hash_supervision",
+        type=str,
+        default="train_val",
+        choices=["train", "train_val"],
+    )
+    parser.add_argument("--learned_hash_supervision_limit", type=int, default=2048)
+    parser.add_argument("--learned_hash_topk", type=int, default=48)
+    parser.add_argument("--learned_hash_pos_per_anchor", type=int, default=4)
+    parser.add_argument("--learned_hash_neg_per_anchor", type=int, default=8)
+    parser.add_argument("--learned_hash_pos_tau", type=float, default=0.95)
+    parser.add_argument("--learned_hash_neg_tau", type=float, default=0.85)
+    parser.add_argument("--learned_hash_neg_margin", type=float, default=0.30)
+    parser.add_argument("--learned_hash_balance_lambda", type=float, default=0.05)
+    parser.add_argument(
+        "--shared_hash_projection_heads",
+        action="store_true",
+        help="Train one learned projection per base route and reuse it across hash heads",
+    )
+    parser.add_argument(
+        "--hash_heads_per_route",
+        "--hash_tables_per_route",
+        dest="hash_heads_per_route",
+        type=int,
+        default=4,
+        help="Number of learned hash heads per base retrieval view",
+    )
+    parser.add_argument(
+        "--hash_head_seed",
+        "--hash_table_seed",
+        dest="hash_head_seed",
+        type=int,
+        default=12345,
+        help="Base seed used to diversify learned hash heads",
+    )
+    parser.add_argument(
+        "--hash_head_bits",
+        type=int,
+        nargs="+",
+        default=None,
+        help="Optional per-head hash bit schedule, e.g. 14 16 14 12",
+    )
+    parser.add_argument(
+        "--main_hash_head_bits",
+        type=int,
+        nargs="+",
+        default=[16, 16, 16, 16],
+        help="Optional main-route head bit schedule. Overrides --hash_head_bits for the primary route",
+    )
+    parser.add_argument(
+        "--union_hash_head_bits",
+        type=int,
+        nargs="+",
+        default=None,
+        help="Optional union-route head bit schedule. Overrides --hash_head_bits for auxiliary routes",
+    )
+    parser.add_argument(
+        "--enable_topology_retrieval_route",
+        action="store_true",
+        help="Append a topology-context retrieval route so semantic and topology chunks can be matched together",
+    )
+    parser.add_argument(
+        "--topology_hash_head_bits",
+        type=int,
+        nargs="+",
+        default=[16, 16],
+        help="Optional topology-route head bit schedule. Used only when --enable_topology_retrieval_route is set",
+    )
+
+    parser.add_argument("--route_score_weights", type=float, nargs="+", default=None)
+    parser.add_argument("--union_route_weight", type=float, default=0.94)
+    parser.add_argument("--table_route_weight_decay", type=float, default=0.95)
+    parser.add_argument("--route_accept_tau_offsets", type=float, nargs="+", default=None)
+    parser.add_argument("--union_accept_tau_bonus", type=float, default=0.01)
+    parser.add_argument("--route_min_accept_votes", type=int, nargs="+", default=None)
+    parser.add_argument("--union_min_accept_votes", type=int, default=1)
+    parser.add_argument("--route_min_support_hits", type=int, nargs="+", default=None)
+    parser.add_argument("--union_min_support_hits", type=int, default=1)
+    parser.add_argument(
+        "--min_base_route_hits",
+        type=int,
+        default=1,
+        help="Require the accepted candidate to be supported by at least this many distinct route groups",
+    )
+
+    parser.add_argument("--max_candidates_per_route", type=int, default=96)
+    parser.add_argument("--max_total_candidates", type=int, default=640)
+    parser.add_argument("--max_structure_checks", type=int, default=16)
+
+    parser.add_argument("--coarse_union_bits_max", type=int, default=None)
+
+    parser.add_argument("--structure_neighbor_tau", type=float, default=0.45)
+    parser.add_argument("--structure_degree_ratio_max", type=float, default=4.0)
+    parser.add_argument("--structure_homophily_gap_max", type=float, default=None)
+    parser.add_argument(
+        "--structure_check_mode",
+        type=str,
+        default="sketch",
+        choices=["cosine", "sketch"],
+    )
+    parser.add_argument(
+        "--enable_topology_sketch_guard",
+        action="store_true",
+        help="Enable topology-sketch Hamming filtering in the backend guard. Default mainline keeps only homophily buckets.",
+    )
+    parser.add_argument("--topology_sketch_bits", type=int, default=16)
+    parser.add_argument("--topology_sketch_radius", type=int, default=5)
+    parser.add_argument("--topology_degree_bucket_gap", type=int, default=None)
+    parser.add_argument("--topology_homophily_bins", type=int, default=8)
+    parser.add_argument("--topology_homophily_bucket_gap", type=int, default=2)
+    parser.add_argument("--topology_sketch_seed", type=int, default=424242)
+    parser.add_argument(
+        "--disable_structure_check",
+        action="store_true",
+        help="Ablate local topology checks during candidate acceptance",
+    )
+
+    parser.add_argument("--exact_guard_low_bits", type=int, default=16)
+    parser.add_argument("--exact_guard_min_bucket_size", type=int, default=2)
+    parser.add_argument("--exact_guard_large_bucket_size", type=int, default=4)
+    parser.add_argument("--exact_guard_min_margin", type=float, default=0.03)
+    parser.add_argument("--exact_guard_cosine_bonus", type=float, default=0.02)
+
+    parser.add_argument(
+        "--hamming_only_acceptor",
+        action="store_true",
+        help="Use only Hamming distance and multi-head support for candidate acceptance; disables cheap-feature cosine reranking",
+    )
+    parser.add_argument(
+        "--disable_score_gate",
+        action="store_true",
+        help="Disable degree/context/rare-leaf risk gate after retrieval",
+    )
+    parser.add_argument("--score_reuse_threshold", type=int, default=120)
+    parser.add_argument("--score_hub_threshold", type=int, default=12)
+    parser.add_argument("--score_rare_threshold", type=int, default=10)
+    parser.add_argument(
+        "--score_protect_hub_exact",
+        action="store_true",
+        help="Also reject exact hash reuse for high-propagation nodes",
+    )
+    parser.add_argument(
+        "--allow_rare_fuzzy",
+        action="store_true",
+        help="Allow fuzzy reuse for low-degree rare nodes; by default it is blocked",
+    )
+    parser.add_argument("--score_rarity_bits", type=int, default=16)
+    parser.add_argument("--score_rarity_seed", type=int, default=98765)
+    parser.add_argument("--score_propagation_weight", type=int, default=3)
+    parser.add_argument("--score_graph_context_weight", type=int, default=2)
+    parser.add_argument("--score_low_unique_weight", type=int, default=2)
+    parser.add_argument("--llm_name", type=str, default="ST")
+    parser.add_argument("--emb_dim", type=int, default=768)
+    return parser
+
+
+def validate_args(parser, args):
+    if args.sketch_bits <= 0:
+        parser.error("--sketch_bits must be a positive integer")
+    if args.radius < 0 or args.radius > args.sketch_bits:
+        parser.error("--radius must be between 0 and --sketch_bits")
+    if args.runs <= 0:
+        parser.error("--runs must be positive")
+    if args.max_test is not None and args.max_test <= 0:
+        parser.error("--max_test must be a positive integer")
+    if args.memo_k <= 0:
+        parser.error("--memo_k must be a positive integer")
+    if args.vote_top_m <= 0:
+        parser.error("--vote_top_m must be a positive integer")
+    if args.vote_relax_margin < 0:
+        parser.error("--vote_relax_margin must be non-negative")
+    if len(args.hash_mix_weights) != 3:
+        parser.error("--hash_mix_weights must provide exactly 3 values")
+    if sum(float(weight) for weight in args.hash_mix_weights) <= 0:
+        parser.error("--hash_mix_weights must sum to a positive value")
+    if args.learned_hash_dim <= 0:
+        parser.error("--learned_hash_dim must be positive")
+    if args.learned_hash_epochs <= 0:
+        parser.error("--learned_hash_epochs must be positive")
+    if args.learned_hash_lr <= 0:
+        parser.error("--learned_hash_lr must be positive")
+    if args.learned_hash_weight_decay < 0:
+        parser.error("--learned_hash_weight_decay must be non-negative")
+    if args.learned_hash_batch_size <= 0:
+        parser.error("--learned_hash_batch_size must be positive")
+    if args.learned_hash_supervision_limit is not None and args.learned_hash_supervision_limit <= 0:
+        parser.error("--learned_hash_supervision_limit must be positive")
+    if args.learned_hash_topk <= 0:
+        parser.error("--learned_hash_topk must be positive")
+    if args.learned_hash_pos_per_anchor <= 0:
+        parser.error("--learned_hash_pos_per_anchor must be positive")
+    if args.learned_hash_neg_per_anchor <= 0:
+        parser.error("--learned_hash_neg_per_anchor must be positive")
+    if not (0.0 <= args.learned_hash_pos_tau <= 1.0):
+        parser.error("--learned_hash_pos_tau must be within [0, 1]")
+    if not (0.0 <= args.learned_hash_neg_tau <= 1.0):
+        parser.error("--learned_hash_neg_tau must be within [0, 1]")
+    if args.learned_hash_neg_margin < 0 or args.learned_hash_neg_margin > 1.0:
+        parser.error("--learned_hash_neg_margin must be within [0, 1]")
+    if args.learned_hash_balance_lambda < 0:
+        parser.error("--learned_hash_balance_lambda must be non-negative")
+    if args.hash_heads_per_route <= 0:
+        parser.error("--hash_heads_per_route must be positive")
+    if args.hash_head_bits is not None:
+        if len(args.hash_head_bits) not in (1, args.hash_heads_per_route):
+            parser.error(f"--hash_head_bits expects 1 or {args.hash_heads_per_route} values")
+        if any(bit <= 0 for bit in args.hash_head_bits):
+            parser.error("--hash_head_bits values must be positive")
+    if args.main_hash_head_bits is not None:
+        if any(bit <= 0 for bit in args.main_hash_head_bits):
+            parser.error("--main_hash_head_bits values must be positive")
+    if args.union_hash_head_bits is not None:
+        if any(bit <= 0 for bit in args.union_hash_head_bits):
+            parser.error("--union_hash_head_bits values must be positive")
+    if args.topology_hash_head_bits is not None:
+        if any(bit <= 0 for bit in args.topology_hash_head_bits):
+            parser.error("--topology_hash_head_bits values must be positive")
+    if args.structure_degree_ratio_max < 1.0:
+        parser.error("--structure_degree_ratio_max must be at least 1.0")
+    if args.structure_homophily_gap_max is not None and args.structure_homophily_gap_max < 0:
+        parser.error("--structure_homophily_gap_max must be non-negative")
+    if args.topology_sketch_bits <= 0:
+        parser.error("--topology_sketch_bits must be positive")
+    if args.topology_sketch_radius < 0 or args.topology_sketch_radius > args.topology_sketch_bits:
+        parser.error("--topology_sketch_radius must be between 0 and --topology_sketch_bits")
+    if args.topology_degree_bucket_gap is not None and args.topology_degree_bucket_gap < 0:
+        parser.error("--topology_degree_bucket_gap must be non-negative when provided")
+    if args.topology_homophily_bins < 2:
+        parser.error("--topology_homophily_bins must be at least 2")
+    if args.topology_homophily_bucket_gap < 0:
+        parser.error("--topology_homophily_bucket_gap must be non-negative")
+    route_tags = list_retrieval_route_tags(
+        args.hash_view,
+        args.union_hash_views,
+        include_topology=args.enable_topology_retrieval_route,
+    )
+    if args.route_score_weights is not None and len(args.route_score_weights) != len(route_tags):
+        parser.error(f"--route_score_weights expects {len(route_tags)} values for the configured routes")
+    if args.route_score_weights is not None and any(weight <= 0 for weight in args.route_score_weights):
+        parser.error("--route_score_weights values must be positive")
+    if args.union_route_weight <= 0:
+        parser.error("--union_route_weight must be positive")
+    if args.table_route_weight_decay <= 0:
+        parser.error("--table_route_weight_decay must be positive")
+    if args.route_accept_tau_offsets is not None and len(args.route_accept_tau_offsets) != len(route_tags):
+        parser.error(f"--route_accept_tau_offsets expects {len(route_tags)} values for the configured routes")
+    if args.route_min_accept_votes is not None and len(args.route_min_accept_votes) != len(route_tags):
+        parser.error(f"--route_min_accept_votes expects {len(route_tags)} values for the configured routes")
+    if args.route_min_support_hits is not None and len(args.route_min_support_hits) != len(route_tags):
+        parser.error(f"--route_min_support_hits expects {len(route_tags)} values for the configured routes")
+    if args.union_accept_tau_bonus < 0:
+        parser.error("--union_accept_tau_bonus must be non-negative")
+    if args.route_min_accept_votes is not None and any(vote < 1 for vote in args.route_min_accept_votes):
+        parser.error("--route_min_accept_votes values must be at least 1")
+    if args.route_min_support_hits is not None and any(hit < 1 for hit in args.route_min_support_hits):
+        parser.error("--route_min_support_hits values must be at least 1")
+    if args.union_min_accept_votes < 1:
+        parser.error("--union_min_accept_votes must be at least 1")
+    if args.union_min_support_hits < 1:
+        parser.error("--union_min_support_hits must be at least 1")
+    if args.min_base_route_hits < 1:
+        parser.error("--min_base_route_hits must be at least 1")
+    if args.max_candidates_per_route < 1:
+        parser.error("--max_candidates_per_route must be at least 1")
+    if args.max_total_candidates < 1:
+        parser.error("--max_total_candidates must be at least 1")
+    if args.max_total_candidates < args.max_candidates_per_route:
+        parser.error("--max_total_candidates must be >= --max_candidates_per_route")
+    if args.max_structure_checks is not None and args.max_structure_checks < 1:
+        parser.error("--max_structure_checks must be at least 1")
+    if args.coarse_union_bits_max is not None and args.coarse_union_bits_max <= 0:
+        parser.error("--coarse_union_bits_max must be positive")
+    if args.exact_guard_low_bits < 0:
+        parser.error("--exact_guard_low_bits must be non-negative")
+    if args.exact_guard_min_bucket_size < 1:
+        parser.error("--exact_guard_min_bucket_size must be at least 1")
+    if args.exact_guard_large_bucket_size < args.exact_guard_min_bucket_size:
+        parser.error("--exact_guard_large_bucket_size must be >= --exact_guard_min_bucket_size")
+    if args.exact_guard_min_margin < 0:
+        parser.error("--exact_guard_min_margin must be non-negative")
+    if args.exact_guard_cosine_bonus < 0:
+        parser.error("--exact_guard_cosine_bonus must be non-negative")
+    if args.score_reuse_threshold < 0:
+        parser.error("--score_reuse_threshold must be non-negative")
+    if not (0 <= args.score_hub_threshold <= 15):
+        parser.error("--score_hub_threshold must be in [0, 15]")
+    if not (0 <= args.score_rare_threshold <= 15):
+        parser.error("--score_rare_threshold must be in [0, 15]")
+    if args.score_rarity_bits <= 0:
+        parser.error("--score_rarity_bits must be positive")
+    if args.score_propagation_weight < 0 or args.score_graph_context_weight < 0 or args.score_low_unique_weight < 0:
+        parser.error("score weights must be non-negative")
+
+
+def main():
+    parser = build_parser()
+    args = parser.parse_args()
+    validate_args(parser, args)
+    run_adaptive_simulation(args)
