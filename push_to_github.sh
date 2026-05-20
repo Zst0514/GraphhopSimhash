@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-REPO_URL="${REPO_URL:-git@github.com:Zst0514/GraphhopSimhash.git}"
+REPO_URL="${REPO_URL:-git@github-zst0514:Zst0514/GraphhopSimhash.git}"
 BRANCH="${BRANCH:-main}"
 COMMIT_MSG="${1:-Update GraphhopSimhash}"
 
