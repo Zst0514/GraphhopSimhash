@@ -102,11 +102,16 @@ def resolve_route_min_support_hits(
     default_union_hits=1,
 ):
     if configured_hits is not None:
-        if len(configured_hits) != len(route_tags):
+        if len(configured_hits) == 1 and len(route_tags) > 1:
+            hits = [int(configured_hits[0])] + [int(default_union_hits)] * max(0, len(route_tags) - 1)
+        elif len(configured_hits) == 1 and len(route_tags) == 1:
+            hits = [int(configured_hits[0])]
+        elif len(configured_hits) != len(route_tags):
             raise ValueError(
-                f"route_min_support_hits expects {len(route_tags)} values, got {len(configured_hits)}"
+                f"route_min_support_hits expects 1 or {len(route_tags)} values, got {len(configured_hits)}"
             )
-        hits = [int(hit) for hit in configured_hits]
+        else:
+            hits = [int(hit) for hit in configured_hits]
     else:
         hits = [int(default_main_hits)] + [int(default_union_hits)] * max(0, len(route_tags) - 1)
 

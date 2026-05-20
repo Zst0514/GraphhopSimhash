@@ -118,15 +118,26 @@ def build_node_risk_scores(
     }
 
 
-def reuse_error_q(hamming_dist):
+def reuse_error_q(hamming_dist, route_hit_count=1, support_discount=True):
     hamming_dist = int(hamming_dist)
     if hamming_dist <= 0:
         return 1
     if hamming_dist == 1:
-        return 2
-    if hamming_dist == 2:
-        return 4
-    return max(4, 2 * hamming_dist)
+        error = 2
+    elif hamming_dist == 2:
+        error = 4
+    else:
+        error = max(4, 2 * hamming_dist)
+
+    if not support_discount:
+        return error
+
+    support = max(1, int(route_hit_count))
+    if support >= 4:
+        return max(1, error - 2)
+    if support >= 2:
+        return max(1, error - 1)
+    return error
 
 
 @dataclass
@@ -136,7 +147,18 @@ class RiskGateConfig:
     hub_threshold: int = 12
     rare_threshold: int = 10
     protect_hub_exact: bool = False
+    protect_hub_fuzzy: bool = True
     forbid_rare_fuzzy: bool = True
+    support_discount: bool = True
+
+
+@dataclass
+class QuantPolicyConfig:
+    enabled: bool = False
+    int4_threshold: int = 90
+    int8_threshold: int = 45
+    int4_error: int = 3
+    int8_error: int = 1
 
 
 class ReuseRiskGate:
@@ -144,14 +166,18 @@ class ReuseRiskGate:
         self.scores = scores
         self.config = config or RiskGateConfig()
 
-    def evaluate(self, node_idx, hamming_dist):
+    def evaluate(self, node_idx, hamming_dist, route_hit_count=1):
         dist = int(hamming_dist)
         sensitivity = int(self.scores["sensitivity_q"][node_idx])
         propagation = int(self.scores["propagation_q"][node_idx])
         graph_context = int(self.scores["graph_context_q"][node_idx])
         low_unique = int(self.scores["low_degree_unique_q"][node_idx])
         rarity = int(self.scores["rarity_q"][node_idx])
-        error = reuse_error_q(dist)
+        error = reuse_error_q(
+            dist,
+            route_hit_count=route_hit_count,
+            support_discount=self.config.support_discount,
+        )
         risk = sensitivity * error
 
         result = {
@@ -164,11 +190,18 @@ class ReuseRiskGate:
             "graph_context": graph_context,
             "low_unique": low_unique,
             "rarity": rarity,
+            "route_hit_count": int(route_hit_count),
         }
         if not self.config.enabled:
             return result
 
-        if propagation >= self.config.hub_threshold and (dist > 0 or self.config.protect_hub_exact):
+        if (
+            propagation >= self.config.hub_threshold
+            and (
+                (dist > 0 and self.config.protect_hub_fuzzy)
+                or (dist == 0 and self.config.protect_hub_exact)
+            )
+        ):
             result["allow"] = False
             result["reason"] = "hub_protect"
             return result
@@ -188,6 +221,51 @@ class ReuseRiskGate:
             return result
 
         return result
+
+
+class QuantExecutionPolicy:
+    def __init__(self, scores, config=None):
+        self.scores = scores
+        self.config = config or QuantPolicyConfig()
+
+    def decide(self, node_idx):
+        sensitivity = int(self.scores["sensitivity_q"][node_idx])
+        propagation = int(self.scores["propagation_q"][node_idx])
+        graph_context = int(self.scores["graph_context_q"][node_idx])
+        low_unique = int(self.scores["low_degree_unique_q"][node_idx])
+        rarity = int(self.scores["rarity_q"][node_idx])
+
+        int4_error = max(1, int(self.config.int4_error))
+        int8_error = max(1, int(self.config.int8_error))
+        int4_risk = sensitivity * int4_error
+        int8_risk = sensitivity * int8_error
+
+        if not self.config.enabled:
+            action = "full_precision"
+            reason = "quant_disabled"
+        elif int4_risk <= int(self.config.int4_threshold):
+            action = "int4"
+            reason = "int4_safe"
+        elif int8_risk <= int(self.config.int8_threshold):
+            action = "int8"
+            reason = "int8_safe"
+        else:
+            action = "protected"
+            reason = "risk_protect"
+
+        return {
+            "action": action,
+            "reason": reason,
+            "sensitivity": sensitivity,
+            "propagation": propagation,
+            "graph_context": graph_context,
+            "low_unique": low_unique,
+            "rarity": rarity,
+            "int4_error": int4_error,
+            "int8_error": int8_error,
+            "int4_risk": int4_risk,
+            "int8_risk": int8_risk,
+        }
 
 
 def summarize_scores(scores):

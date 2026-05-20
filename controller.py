@@ -7,6 +7,8 @@ import torch.nn.functional as F
 from .features import _compute_neighbor_mean
 from .projections import build_hash_random_matrix
 from .scoring import (
+    QuantExecutionPolicy,
+    QuantPolicyConfig,
     ReuseRiskGate,
     RiskGateConfig,
     build_node_risk_scores,
@@ -14,12 +16,14 @@ from .scoring import (
 )
 
 class HeatPlusPlus_NDP_Controller:
-    def __init__(self, input_dim, sketch_bits=64, device="cuda", hamming_radius=2):
+    def __init__(self, input_dim, sketch_bits=64, device="cuda", hamming_radius=2, random_seed=42):
         self.sketch_bits = sketch_bits
         self.device = device
         self.hamming_radius = hamming_radius
-        torch.manual_seed(42)
-        self.R = torch.randn(input_dim, sketch_bits, device=device)
+        self.random_seed = int(random_seed)
+        generator = torch.Generator(device="cpu")
+        generator.manual_seed(self.random_seed)
+        self.R = torch.randn(input_dim, sketch_bits, generator=generator).to(device)
         self.memo_table = {}
         self.seen_nodes = set()
         self.mih_enabled = sketch_bits >= 32 and hamming_radius > 0
@@ -28,7 +32,10 @@ class HeatPlusPlus_NDP_Controller:
             self.chunk_len = (sketch_bits + 3) // 4
             self.mih_tables = [{} for _ in range(self.num_chunks)]
 
-        print(f"[Heat++] Bits={sketch_bits}, Radius={self.hamming_radius}, MIH Accelerated={self.mih_enabled}")
+        print(
+            f"[Heat++] Bits={sketch_bits}, Radius={self.hamming_radius}, "
+            f"InitSeed={self.random_seed}, MIH Accelerated={self.mih_enabled}"
+        )
 
         self.use_segments = True
         if self.use_segments:
@@ -100,12 +107,22 @@ class PaperHashReuseController(HeatPlusPlus_NDP_Controller):
         score_hub_threshold=12,
         score_rare_threshold=10,
         score_protect_hub_exact=False,
+        score_protect_hub_fuzzy=True,
         score_forbid_rare_fuzzy=True,
+        score_support_discount=True,
         score_rarity_bits=16,
         score_rarity_seed=98765,
         score_propagation_weight=3,
         score_graph_context_weight=2,
         score_low_unique_weight=2,
+        quant_policy_enabled=False,
+        quant_int4_threshold=90,
+        quant_int8_threshold=45,
+        quant_int4_error=3,
+        quant_int8_error=1,
+        quant_int4_bits=4,
+        quant_int8_bits=8,
+        hash_init_seed=42,
     ):
         self.max_cache_size = max_cache_size
         self.second_stage_tau = second_stage_tau
@@ -137,19 +154,32 @@ class PaperHashReuseController(HeatPlusPlus_NDP_Controller):
             hub_threshold=int(score_hub_threshold),
             rare_threshold=int(score_rare_threshold),
             protect_hub_exact=bool(score_protect_hub_exact),
+            protect_hub_fuzzy=bool(score_protect_hub_fuzzy),
             forbid_rare_fuzzy=bool(score_forbid_rare_fuzzy),
+            support_discount=bool(score_support_discount),
         )
         self.score_rarity_bits = int(score_rarity_bits)
         self.score_rarity_seed = int(score_rarity_seed)
         self.score_propagation_weight = int(score_propagation_weight)
         self.score_graph_context_weight = int(score_graph_context_weight)
         self.score_low_unique_weight = int(score_low_unique_weight)
+        self.quant_policy_config = QuantPolicyConfig(
+            enabled=bool(quant_policy_enabled),
+            int4_threshold=int(quant_int4_threshold),
+            int8_threshold=int(quant_int8_threshold),
+            int4_error=int(quant_int4_error),
+            int8_error=int(quant_int8_error),
+        )
+        self.quant_int4_bits = int(quant_int4_bits)
+        self.quant_int8_bits = int(quant_int8_bits)
+        self.hash_init_seed = int(hash_init_seed)
         self.node_risk_scores = None
         self.risk_gate = None
+        self.quant_policy = None
         self.score_summary = None
         self._time_counter = 0
 
-        super().__init__(input_dim, sketch_bits, device, hamming_radius)
+        super().__init__(input_dim, sketch_bits, device, hamming_radius, random_seed=self.hash_init_seed)
 
         self.memo_table = OrderedDict()
         self.hash_population = {}
@@ -463,6 +493,14 @@ class PaperHashReuseController(HeatPlusPlus_NDP_Controller):
         self.node_topology_sketch = self._compute_fingerprint_with_matrix(self.node_context_signature, sketch_matrix)
 
     def _precompute_risk_scores(self):
+        if not self.score_gate_config.enabled and not self.quant_policy_config.enabled:
+            print("[RiskGate] disabled")
+            self.node_risk_scores = None
+            self.risk_gate = None
+            self.quant_policy = None
+            self.score_summary = None
+            return
+
         self.node_risk_scores = build_node_risk_scores(
             verify_features=self.full_verify_features,
             hash_features=self.full_hash_features,
@@ -476,22 +514,46 @@ class PaperHashReuseController(HeatPlusPlus_NDP_Controller):
             graph_context_weight=self.score_graph_context_weight,
             low_unique_weight=self.score_low_unique_weight,
         )
-        self.risk_gate = ReuseRiskGate(self.node_risk_scores, self.score_gate_config)
+        self.risk_gate = (
+            ReuseRiskGate(self.node_risk_scores, self.score_gate_config)
+            if self.score_gate_config.enabled
+            else None
+        )
+        self.quant_policy = (
+            QuantExecutionPolicy(self.node_risk_scores, self.quant_policy_config)
+            if self.quant_policy_config.enabled
+            else None
+        )
         self.score_summary = summarize_scores(self.node_risk_scores)
         gate_status = "enabled" if self.score_gate_config.enabled else "disabled"
+        quant_status = "enabled" if self.quant_policy_config.enabled else "disabled"
         print(
-            "[RiskGate] "
-            f"{gate_status} | T_reuse={self.score_gate_config.reuse_threshold} "
+            "[RiskScore] "
+            f"reuse_gate={gate_status} | quant_policy={quant_status} "
+            f"| T_reuse={self.score_gate_config.reuse_threshold} "
             f"| T_hub={self.score_gate_config.hub_threshold} "
             f"| T_rare={self.score_gate_config.rare_threshold}"
         )
+        if self.quant_policy_config.enabled:
+            print(
+                "[QuantPolicy] "
+                f"T_int4={self.quant_policy_config.int4_threshold} "
+                f"| T_int8={self.quant_policy_config.int8_threshold} "
+                f"| E_int4={self.quant_policy_config.int4_error} "
+                f"| E_int8={self.quant_policy_config.int8_error} "
+                f"| fake_bits={self.quant_int4_bits}/{self.quant_int8_bits}"
+            )
         for name, (vmin, vmean, vmax) in self.score_summary.items():
-            print(f"[RiskGate] {name}: min={vmin:.1f}, mean={vmean:.1f}, max={vmax:.1f}")
+            print(f"[RiskScore] {name}: min={vmin:.1f}, mean={vmean:.1f}, max={vmax:.1f}")
 
     def _score_gate_allows(self, query_node_id, item):
         if self.risk_gate is None:
             return True, None
-        decision = self.risk_gate.evaluate(query_node_id, item["dist"])
+        decision = self.risk_gate.evaluate(
+            query_node_id,
+            item["dist"],
+            route_hit_count=item.get("route_hit_count", 1),
+        )
         self.stats["score_checked"] += 1
         self.stats["score_risk_sum"] += decision["risk"]
         self.stats["score_sensitivity_sum"] += decision["sensitivity"]
@@ -503,6 +565,48 @@ class PaperHashReuseController(HeatPlusPlus_NDP_Controller):
                 self.stats[reason_key] += 1
             return False, decision
         return True, decision
+
+    def _fake_quantize_embedding(self, emb, bits):
+        bits = int(bits)
+        if bits >= 16:
+            return emb
+        levels = max(1, (1 << max(1, bits - 1)) - 1)
+        max_abs = emb.detach().abs().max().clamp(min=1e-8)
+        scale = max_abs / float(levels)
+        quantized = torch.round(emb / scale).clamp(-levels, levels) * scale
+        return quantized
+
+    def _materialize_computed_embedding(self, node_idx, real_emb):
+        if self.quant_policy is None:
+            self.stats["full_precision"] += 1
+            return real_emb, {
+                "action": "full_precision",
+                "reason": "quant_disabled",
+                "sensitivity": 0,
+                "int4_risk": 0,
+                "int8_risk": 0,
+            }
+
+        decision = self.quant_policy.decide(node_idx)
+        self.stats["quant_checked"] += 1
+        self.stats["quant_sensitivity_sum"] += decision["sensitivity"]
+
+        action = decision["action"]
+        if action == "int4":
+            self.stats["quant_int4"] += 1
+            self.stats["quant_risk_sum"] += decision["int4_risk"]
+            return self._fake_quantize_embedding(real_emb, self.quant_int4_bits), decision
+        if action == "int8":
+            self.stats["quant_int8"] += 1
+            self.stats["quant_risk_sum"] += decision["int8_risk"]
+            return self._fake_quantize_embedding(real_emb, self.quant_int8_bits), decision
+        if action == "protected":
+            self.stats["protected"] += 1
+            self.stats["quant_risk_sum"] += decision["int8_risk"]
+            return real_emb, decision
+
+        self.stats["full_precision"] += 1
+        return real_emb, decision
 
     def find_fuzzy_candidate_hashes_adaptive(self, h, allowed_r, route_idx=0, max_candidates=64):
         if allowed_r == 0:
@@ -1059,6 +1163,13 @@ class PaperHashReuseController(HeatPlusPlus_NDP_Controller):
             "score_risk_sum": 0.0,
             "score_sensitivity_sum": 0.0,
             "score_count": 0,
+            "quant_checked": 0,
+            "quant_int4": 0,
+            "quant_int8": 0,
+            "full_precision": 0,
+            "protected": 0,
+            "quant_risk_sum": 0.0,
+            "quant_sensitivity_sum": 0.0,
         }
 
         print(f"[Adaptive] Starting Full Batch Simulation on {num_nodes} nodes...")
@@ -1120,15 +1231,16 @@ class PaperHashReuseController(HeatPlusPlus_NDP_Controller):
 
             indices_compute.append(node_idx)
             real_emb = oracle_embs[node_idx]
+            produced_emb, _quant_decision = self._materialize_computed_embedding(node_idx, real_emb)
             entry = {
                 "node_id": int(node_idx),
                 "cheap_feat": verify_features[node_idx].detach().clone(),
-                "cached_emb": real_emb.detach().clone(),
+                "cached_emb": produced_emb.detach().clone(),
                 "timestamp": self._time_counter,
             }
             self._time_counter += 1
             self._cache_computed_entry(query_hashes, entry)
-            final_embs_list[node_idx] = real_emb
+            final_embs_list[node_idx] = produced_emb
 
         self.stats["total_queries"] = num_nodes
         self.stats["computed"] = len(indices_compute)
@@ -1144,6 +1256,25 @@ class PaperHashReuseController(HeatPlusPlus_NDP_Controller):
         self.stats["avg_score_sensitivity"] = (
             self.stats["score_sensitivity_sum"] / self.stats["score_count"]
             if self.stats["score_count"] > 0
+            else 0.0
+        )
+        self.stats["quantized"] = self.stats["quant_int4"] + self.stats["quant_int8"]
+        self.stats["execution_accounted_queries"] = (
+            self.stats["reuse"]
+            + self.stats["quant_int4"]
+            + self.stats["quant_int8"]
+            + self.stats["full_precision"]
+            + self.stats["protected"]
+        )
+        self.stats["execution_consistency_ok"] = self.stats["execution_accounted_queries"] == num_nodes
+        self.stats["avg_quant_risk"] = (
+            self.stats["quant_risk_sum"] / self.stats["quant_checked"]
+            if self.stats["quant_checked"] > 0
+            else 0.0
+        )
+        self.stats["avg_quant_sensitivity"] = (
+            self.stats["quant_sensitivity_sum"] / self.stats["quant_checked"]
+            if self.stats["quant_checked"] > 0
             else 0.0
         )
 

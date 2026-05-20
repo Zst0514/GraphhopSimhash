@@ -11,6 +11,24 @@ def build_parser():
 
     parser.add_argument("--datasets", nargs="+", default=["cora"], choices=["cora", "pubmed", "arxiv"])
     parser.add_argument("--runs", type=int, default=1)
+    parser.add_argument(
+        "--experiment_suite",
+        type=str,
+        default="single",
+        choices=[
+            "single",
+            "score_ablation",
+            "quant_ablation",
+            "real_quant_ablation",
+        ],
+        help="Run one config, score-gate ablations, quantization ablations, or real-quantization ablations.",
+    )
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=42,
+        help="Unified base seed. Each run uses --seed + run_idx unless a specific seed override is provided.",
+    )
     parser.add_argument("--max_test", type=int, default=None, help="Override test split size for faster debugging")
 
     parser.add_argument("--radius", type=int, default=2)
@@ -85,7 +103,7 @@ def build_parser():
         dest="hash_head_seed",
         type=int,
         default=12345,
-        help="Base seed used to diversify learned hash heads",
+        help="Base seed for learned hash heads. Default 12345 preserves the original experiment setting.",
     )
     parser.add_argument(
         "--hash_head_bits",
@@ -128,7 +146,7 @@ def build_parser():
     parser.add_argument("--union_accept_tau_bonus", type=float, default=0.01)
     parser.add_argument("--route_min_accept_votes", type=int, nargs="+", default=None)
     parser.add_argument("--union_min_accept_votes", type=int, default=1)
-    parser.add_argument("--route_min_support_hits", type=int, nargs="+", default=None)
+    parser.add_argument("--route_min_support_hits", type=int, nargs="+", default=[2])
     parser.add_argument("--union_min_support_hits", type=int, default=1)
     parser.add_argument(
         "--min_base_route_hits",
@@ -162,7 +180,12 @@ def build_parser():
     parser.add_argument("--topology_degree_bucket_gap", type=int, default=None)
     parser.add_argument("--topology_homophily_bins", type=int, default=8)
     parser.add_argument("--topology_homophily_bucket_gap", type=int, default=2)
-    parser.add_argument("--topology_sketch_seed", type=int, default=424242)
+    parser.add_argument(
+        "--topology_sketch_seed",
+        type=int,
+        default=None,
+        help="Advanced override for topology sketch generation. If omitted, uses the effective run seed.",
+    )
     parser.add_argument(
         "--disable_structure_check",
         action="store_true",
@@ -181,10 +204,18 @@ def build_parser():
         help="Use only Hamming distance and multi-head support for candidate acceptance; disables cheap-feature cosine reranking",
     )
     parser.add_argument(
-        "--disable_score_gate",
-        action="store_true",
-        help="Disable degree/context/rare-leaf risk gate after retrieval",
+        "--enable_score_gate",
+        dest="disable_score_gate",
+        action="store_false",
+        help="Enable the degree/context/rare-leaf risk gate after retrieval.",
     )
+    parser.add_argument(
+        "--disable_score_gate",
+        dest="disable_score_gate",
+        action="store_true",
+        help="Disable degree/context/rare-leaf risk gate after retrieval.",
+    )
+    parser.set_defaults(disable_score_gate=True)
     parser.add_argument("--score_reuse_threshold", type=int, default=120)
     parser.add_argument("--score_hub_threshold", type=int, default=12)
     parser.add_argument("--score_rare_threshold", type=int, default=10)
@@ -194,15 +225,88 @@ def build_parser():
         help="Also reject exact hash reuse for high-propagation nodes",
     )
     parser.add_argument(
+        "--allow_hub_fuzzy",
+        action="store_true",
+        help="Do not hard-block fuzzy reuse for high-propagation nodes; leave them to the risk threshold.",
+    )
+    parser.add_argument(
         "--allow_rare_fuzzy",
         action="store_true",
         help="Allow fuzzy reuse for low-degree rare nodes; by default it is blocked",
+    )
+    parser.add_argument(
+        "--disable_score_support_discount",
+        action="store_true",
+        help="Do not reduce approximation error when a candidate is supported by multiple hash heads.",
     )
     parser.add_argument("--score_rarity_bits", type=int, default=16)
     parser.add_argument("--score_rarity_seed", type=int, default=98765)
     parser.add_argument("--score_propagation_weight", type=int, default=3)
     parser.add_argument("--score_graph_context_weight", type=int, default=2)
     parser.add_argument("--score_low_unique_weight", type=int, default=2)
+    parser.add_argument(
+        "--enable_quant_policy",
+        action="store_true",
+        help="After reuse misses, choose INT4/INT8/protected execution using the same sensitivity score.",
+    )
+    parser.add_argument("--quant_int4_threshold", type=int, default=90)
+    parser.add_argument("--quant_int8_threshold", type=int, default=45)
+    parser.add_argument("--quant_int4_error", type=int, default=3)
+    parser.add_argument("--quant_int8_error", type=int, default=1)
+    parser.add_argument("--quant_int4_bits", type=int, default=4)
+    parser.add_argument("--quant_int8_bits", type=int, default=8)
+    parser.add_argument("--real_quant_model_name", type=str, default="llama2_7b")
+    parser.add_argument("--real_quant_fp_tag", type=str, default="FP16")
+    parser.add_argument("--real_quant_int8_tag", type=str, default="INT8")
+    parser.add_argument("--real_quant_int4_tag", type=str, default="INT4")
+    parser.add_argument("--real_quant_fp_path", type=str, default=None)
+    parser.add_argument("--real_quant_int8_path", type=str, default=None)
+    parser.add_argument("--real_quant_int4_path", type=str, default=None)
+    parser.add_argument(
+        "--real_quant_error_space",
+        type=str,
+        default="encoded",
+        choices=["raw", "encoded"],
+        help="Compute policy quantization error in raw LLM-embedding space or after the trained GNN input projection.",
+    )
+    parser.add_argument(
+        "--real_quant_error_norm",
+        type=float,
+        default=0.20,
+        help="Cosine-error value that maps to quantized error 15 for real quant policy.",
+    )
+    parser.add_argument("--real_quant_int4_threshold", type=int, default=120)
+    parser.add_argument("--real_quant_int8_threshold", type=int, default=80)
+    parser.add_argument(
+        "--real_quant_fp_ratio",
+        type=float,
+        default=0.10,
+        help="FP/protected ratio for DegreeTopK/TSERTopK and cascade real-quant policies.",
+    )
+    parser.add_argument(
+        "--real_quant_int8_ratio",
+        type=float,
+        default=0.20,
+        help="INT8 ratio for DegreeCascade/TSERCascade. Tail nodes use INT4.",
+    )
+    parser.add_argument(
+        "--real_quant_tail_precision",
+        type=str,
+        default="int4",
+        choices=["int4", "int8"],
+        help="Tail precision for TopK real-quant policies.",
+    )
+    parser.add_argument(
+        "--controller_seed",
+        type=int,
+        default=None,
+        help="Advanced override for hash controller init. If omitted, uses the effective run seed.",
+    )
+    parser.add_argument(
+        "--standard_eval_baseline",
+        action="store_true",
+        help="Use eval-mode validation when selecting the baseline checkpoint. Default keeps legacy GraphAdaptiveMask behavior.",
+    )
     parser.add_argument("--llm_name", type=str, default="ST")
     parser.add_argument("--emb_dim", type=int, default=768)
     return parser
@@ -215,6 +319,8 @@ def validate_args(parser, args):
         parser.error("--radius must be between 0 and --sketch_bits")
     if args.runs <= 0:
         parser.error("--runs must be positive")
+    if args.seed < 0:
+        parser.error("--seed must be >= 0")
     if args.max_test is not None and args.max_test <= 0:
         parser.error("--max_test must be a positive integer")
     if args.memo_k <= 0:
@@ -300,8 +406,8 @@ def validate_args(parser, args):
         parser.error(f"--route_accept_tau_offsets expects {len(route_tags)} values for the configured routes")
     if args.route_min_accept_votes is not None and len(args.route_min_accept_votes) != len(route_tags):
         parser.error(f"--route_min_accept_votes expects {len(route_tags)} values for the configured routes")
-    if args.route_min_support_hits is not None and len(args.route_min_support_hits) != len(route_tags):
-        parser.error(f"--route_min_support_hits expects {len(route_tags)} values for the configured routes")
+    if args.route_min_support_hits is not None and len(args.route_min_support_hits) not in (1, len(route_tags)):
+        parser.error(f"--route_min_support_hits expects 1 or {len(route_tags)} values for the configured routes")
     if args.union_accept_tau_bonus < 0:
         parser.error("--union_accept_tau_bonus must be non-negative")
     if args.route_min_accept_votes is not None and any(vote < 1 for vote in args.route_min_accept_votes):
@@ -344,6 +450,30 @@ def validate_args(parser, args):
         parser.error("--score_rarity_bits must be positive")
     if args.score_propagation_weight < 0 or args.score_graph_context_weight < 0 or args.score_low_unique_weight < 0:
         parser.error("score weights must be non-negative")
+    if args.quant_int4_threshold < 0 or args.quant_int8_threshold < 0:
+        parser.error("quant thresholds must be non-negative")
+    if args.quant_int4_error <= 0 or args.quant_int8_error <= 0:
+        parser.error("quant approximation errors must be positive")
+    if args.quant_int4_bits < 2 or args.quant_int8_bits < 2:
+        parser.error("quant fake bits must be at least 2")
+    if args.quant_int4_bits > args.quant_int8_bits:
+        parser.error("--quant_int4_bits should be <= --quant_int8_bits")
+    if args.real_quant_error_norm <= 0:
+        parser.error("--real_quant_error_norm must be positive")
+    if args.real_quant_int4_threshold < 0 or args.real_quant_int8_threshold < 0:
+        parser.error("real quant thresholds must be non-negative")
+    if not (0.0 <= args.real_quant_fp_ratio <= 1.0):
+        parser.error("--real_quant_fp_ratio must be in [0, 1]")
+    if not (0.0 <= args.real_quant_int8_ratio <= 1.0):
+        parser.error("--real_quant_int8_ratio must be in [0, 1]")
+    if args.real_quant_fp_ratio + args.real_quant_int8_ratio > 1.0:
+        parser.error("--real_quant_fp_ratio + --real_quant_int8_ratio must be <= 1")
+    if args.controller_seed is not None and args.controller_seed < 0:
+        parser.error("--controller_seed must be >= 0")
+    if args.hash_head_seed is not None and args.hash_head_seed < 0:
+        parser.error("--hash_head_seed must be >= 0")
+    if args.topology_sketch_seed is not None and args.topology_sketch_seed < 0:
+        parser.error("--topology_sketch_seed must be >= 0")
 
 
 def main():
