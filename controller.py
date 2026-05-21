@@ -88,6 +88,7 @@ class PaperHashReuseController(HeatPlusPlus_NDP_Controller):
         structure_degree_ratio_max=4.0,
         structure_homophily_gap_max=None,
         structure_check_mode="sketch",
+        enable_homophily_bucket_guard=False,
         topology_sketch_bits=32,
         topology_sketch_radius=10,
         enable_topology_sketch_guard=False,
@@ -134,6 +135,7 @@ class PaperHashReuseController(HeatPlusPlus_NDP_Controller):
         self.max_structure_checks = None if max_structure_checks is None else int(max_structure_checks)
         self.coarse_union_bits_max = None if coarse_union_bits_max is None else int(coarse_union_bits_max)
         self.structure_check_mode = str(structure_check_mode)
+        self.enable_homophily_bucket_guard = bool(enable_homophily_bucket_guard)
         self.topology_sketch_bits = int(topology_sketch_bits)
         self.topology_sketch_radius = int(topology_sketch_radius)
         self.enable_topology_sketch_guard = bool(enable_topology_sketch_guard)
@@ -467,7 +469,9 @@ class PaperHashReuseController(HeatPlusPlus_NDP_Controller):
         degree_plus_one = self.node_total_degree + 1.0
         self.node_degree_bucket = torch.floor(torch.log2(degree_plus_one)).to(torch.int16)
 
-        if self.node_avg_homophily is None:
+        if not self.enable_homophily_bucket_guard:
+            self.node_homophily_bucket = None
+        elif self.node_avg_homophily is None:
             self.node_homophily_bucket = torch.zeros_like(self.node_degree_bucket)
         else:
             num_bins = max(2, int(self.topology_homophily_bins))

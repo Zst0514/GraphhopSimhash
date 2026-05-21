@@ -12,6 +12,7 @@ the score gate is available but disabled unless `--enable_score_gate` is passed.
 - `controller.py`: SimHash cache, multi-route retrieval, structure checks, optional score gate.
 - `scoring.py`: degree/context/rare-leaf sensitivity scoring and quantization policy.
 - `real_quant.py`: real pre-generated FP/INT8/INT4 feature-pool policy evaluation.
+- `internal_split_calibration.py`: high-bit/low-bit node split and per-split calibration sampling.
 - `features.py`: self/1-hop/2-hop hash feature construction.
 - `projections.py`: raw and learned multi-head hash projections.
 - `data.py`: OFA data loading and cheap-feature loading.
@@ -87,6 +88,12 @@ Risk-aware reuse plus quantization:
 python -m GraphhopSimhash --datasets cora --runs 1 --learned_hash_epochs 10 --learned_hash_dim 128 --hamming_only_acceptor --enable_score_gate --enable_quant_policy
 ```
 
+Build only the internal high-bit/low-bit calibration split:
+
+```bash
+python -m GraphhopSimhash --datasets cora --runs 1 --internal_split_calibration_only --internal_calib_samples 512 --internal_split_priority degree
+```
+
 One-command ablation under the same trained baseline:
 
 ```bash
@@ -97,6 +104,12 @@ Real quantized feature-pool ablation:
 
 ```bash
 python -m GraphhopSimhash --datasets cora pubmed --runs 3 --experiment_suite real_quant_ablation --real_quant_model_name llama2_7b --real_quant_fp_ratio 0.10 --real_quant_int8_ratio 0.20
+```
+
+W4A4/W4A8 fixed-budget ablation with the internal split row:
+
+```bash
+python -m GraphhopSimhash --datasets cora --runs 3 --experiment_suite real_quant_ablation --real_quant_policy_suite w4a8_budget --real_quant_model_name llama2_7b --real_quant_fp_tag W4A16 --real_quant_int8_tag W4A8 --real_quant_int4_tag W4A4 --real_quant_fp_ratio 0.0 --real_quant_int8_ratio 0.90 --internal_split_calibration --internal_split_priority degree --internal_split_topk_ratio 0.90
 ```
 
 See `REAL_QUANT.md` for required cache files and the exact DegreeTopK/TSERTopK

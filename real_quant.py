@@ -169,6 +169,87 @@ def get_rank_score(policy_name, scores):
     raise ValueError(f"Unknown ranking policy: {policy_name}")
 
 
+def _map_calibration_bit_to_action(bit):
+    bit = int(bit)
+    if bit >= 16:
+        return 16
+    if bit >= 8:
+        return 8
+    return 4
+
+
+def select_random_int8_budget_actions(scores, args):
+    num_nodes = int(scores["sensitivity_q"].numel())
+    device = scores["sensitivity_q"].device
+    actions = torch.full((num_nodes,), 4, dtype=torch.int64, device=device)
+    int8_count = int(round(float(args.real_quant_int8_ratio) * num_nodes))
+    int8_count = max(0, min(num_nodes, int8_count))
+    if int8_count <= 0:
+        return actions
+
+    seed = int(getattr(args, "run_seed", getattr(args, "seed", 0)))
+    generator = torch.Generator(device="cpu")
+    generator.manual_seed(seed)
+    order = torch.randperm(num_nodes, generator=generator, device="cpu").to(device)
+    actions[order[:int8_count]] = 8
+    return actions
+
+
+def select_ranked_int8_budget_actions(policy_name, scores, args):
+    num_nodes = int(scores["sensitivity_q"].numel())
+    device = scores["sensitivity_q"].device
+    actions = torch.full((num_nodes,), 4, dtype=torch.int64, device=device)
+    rank_score = get_rank_score(policy_name, scores)
+    order = torch.argsort(rank_score, descending=True)
+
+    int8_count = int(round(float(args.real_quant_int8_ratio) * num_nodes))
+    int8_count = max(0, min(num_nodes, int8_count))
+    if int8_count > 0:
+        actions[order[:int8_count]] = 8
+    return actions
+
+
+def select_internal_split_actions(scores, args):
+    bundle = getattr(args, "_internal_split_calibration_bundle", None)
+    if bundle is None:
+        raise ValueError("internal_split policy requires --internal_split_calibration")
+
+    num_nodes = int(scores["sensitivity_q"].numel())
+    device = scores["sensitivity_q"].device
+    low_bit = int(getattr(args, "internal_calib_low_a_bit", 4))
+    actions = torch.full(
+        (num_nodes,),
+        _map_calibration_bit_to_action(low_bit),
+        dtype=torch.int64,
+        device=device,
+    )
+
+    assignment = bundle.get("assignment", {})
+    activation_bits = assignment.get("activation_bits")
+    if activation_bits is not None:
+        bit_tensor = torch.as_tensor(activation_bits, dtype=torch.long, device=device)
+        if bit_tensor.numel() != num_nodes:
+            raise ValueError(
+                f"internal_split activation_bits length must match node count {num_nodes}, got {bit_tensor.numel()}"
+            )
+        actions.fill_(4)
+        actions[bit_tensor >= 8] = 8
+        actions[bit_tensor >= 16] = 16
+        return actions
+
+    for pass_spec in bundle.get("passes", []):
+        node_indices = pass_spec.get("node_indices", [])
+        if not node_indices:
+            continue
+        idx = torch.as_tensor(node_indices, dtype=torch.long, device=device)
+        idx = idx[(idx >= 0) & (idx < num_nodes)]
+        if idx.numel() == 0:
+            continue
+        bit = int(pass_spec.get("bit", low_bit))
+        actions[idx] = _map_calibration_bit_to_action(bit)
+    return actions
+
+
 def select_ranked_budget_actions(policy_name, scores, args, mode):
     num_nodes = int(scores["sensitivity_q"].numel())
     device = scores["sensitivity_q"].device
@@ -199,6 +280,14 @@ def select_ranked_budget_actions(policy_name, scores, args, mode):
 def select_real_quant_policy_actions(policy_name, scores, errors, args):
     if policy_name in ("degree", "tser", "all_fp", "all_int8", "all_int4"):
         return select_real_quant_actions(policy_name, scores, errors, args)
+    if policy_name == "random_int8_budget":
+        return select_random_int8_budget_actions(scores, args)
+    if policy_name == "degree_int8_budget":
+        return select_ranked_int8_budget_actions("degree", scores, args)
+    if policy_name == "tser_int8_budget":
+        return select_ranked_int8_budget_actions("tser", scores, args)
+    if policy_name == "internal_split":
+        return select_internal_split_actions(scores, args)
     if policy_name == "degree_topk":
         return select_ranked_budget_actions("degree", scores, args, mode="topk")
     if policy_name == "tser_topk":

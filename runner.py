@@ -9,6 +9,10 @@ from .config import DATASET_CONFIGS
 from .controller import PaperHashReuseController
 from .data import load_run_state, maybe_limit_test_mask
 from .features import build_hash_feature_routes, build_topology_hash_features, format_hash_route_specs
+from .internal_split_calibration import (
+    build_internal_split_calibration,
+    save_internal_split_calibration,
+)
 from .models import GNN_LLM_Model
 from .projections import fit_multihead_hash_projection
 from .real_quant import (
@@ -388,6 +392,7 @@ def build_controller(
         structure_degree_ratio_max=args.structure_degree_ratio_max,
         structure_homophily_gap_max=args.structure_homophily_gap_max,
         structure_check_mode=args.structure_check_mode,
+        enable_homophily_bucket_guard=args.enable_homophily_bucket_guard,
         topology_sketch_bits=args.topology_sketch_bits,
         topology_sketch_radius=args.topology_sketch_radius,
         enable_topology_sketch_guard=args.enable_topology_sketch_guard,
@@ -494,10 +499,71 @@ def evaluate_gnn_embeddings(model, data, node_embs):
     return float(acc)
 
 
-def run_real_quant_ablation(args):
-    target_datasets = args.datasets if args.datasets else ["cora"]
-    log_dir = os.path.join("output", "graph_simhash")
-    os.makedirs(log_dir, exist_ok=True)
+def run_internal_split_calibration_step(
+    ds_key,
+    data,
+    verify_features,
+    args,
+    device,
+    dataset_log_dir,
+    log_important,
+):
+    if not bool(args.internal_split_calibration):
+        return None, None
+
+    bundle, report = build_internal_split_calibration(ds_key, data, verify_features, args, device)
+    report_dir = args.internal_calib_report_dir or dataset_log_dir
+    report_path = save_internal_split_calibration(
+        bundle=bundle,
+        report=report,
+        out_dir=report_dir,
+        ds_key=ds_key,
+        seed=getattr(args, "run_seed", args.seed),
+    )
+
+    assignment = report["assignment"]
+    sampling = report["sampling"]
+    high_sampling = sampling["high_sampling"]
+    low_sampling = sampling["low_sampling"]
+    log_important(
+        "[InternalSplitCalib] "
+        f"priority={assignment['priority_policy']} "
+        f"| high={assignment['high_count']}/{assignment['node_count']} "
+        f"({assignment['topk_ratio']:.1%}) "
+        f"| degree_mass={assignment['degree_mass']:.1%} "
+        f"| priority_mass={assignment['priority_mass']:.1%} "
+        f"| bits={assignment['high_bit']}/{assignment['low_bit']}"
+    )
+    log_important(
+        "[InternalSplitCalib] "
+        f"budget={report['node_budget']} "
+        f"| prompt=0 "
+        f"| high_samples={high_sampling['selected_count']}/{report['high_node_budget']} "
+        f"| low_samples={low_sampling['selected_count']}/{report['low_node_budget']} "
+        f"| strategy={sampling['base_strategy']} "
+        f"| report={report_path}"
+    )
+    if report.get("text_error"):
+        log_important(f"[InternalSplitCalib] Warning: raw texts unavailable: {report['text_error']}")
+    return bundle, report
+
+
+def build_real_quant_policy_configs(args):
+    if args.real_quant_policy_suite == "w4a8_budget":
+        int8_tag = str(args.real_quant_int8_tag)
+        int4_tag = str(args.real_quant_int4_tag)
+        configs = [
+            ("AllFP", "all_fp"),
+            (f"Uniform{int8_tag}", "all_int8"),
+            (f"Uniform{int4_tag}", "all_int4"),
+            (f"RandomTopK_{int8_tag}", "random_int8_budget"),
+            (f"DegreeTopK_{int8_tag}", "degree_int8_budget"),
+            (f"TSERTopK_{int8_tag}", "tser_int8_budget"),
+        ]
+        if bool(args.internal_split_calibration):
+            configs.append((f"InternalSplitCalib_{int8_tag}", "internal_split"))
+        return configs
+
     configs = [
         ("AllFP", "all_fp"),
         ("AllINT8", "all_int8"),
@@ -509,6 +575,57 @@ def run_real_quant_ablation(args):
         ("DegreeRiskThreshold", "degree"),
         ("TSERRiskThreshold", "tser"),
     ]
+    if bool(args.internal_split_calibration):
+        configs.append(("InternalSplitCalib", "internal_split"))
+    return configs
+
+
+def run_internal_split_calibration_only(args):
+    target_datasets = args.datasets if args.datasets else ["cora"]
+    log_dir = os.path.join("output", "graph_simhash")
+    os.makedirs(log_dir, exist_ok=True)
+
+    for ds_key in target_datasets:
+        if ds_key not in DATASET_CONFIGS:
+            continue
+
+        dataset_log_dir = os.path.join(log_dir, ds_key)
+        os.makedirs(dataset_log_dir, exist_ok=True)
+        log_path = os.path.join(dataset_log_dir, f"{ds_key}_internal_split_calibration.log")
+
+        with open(log_path, "w", encoding="utf-8") as summary_file:
+            def log_important(msg):
+                print(msg)
+                summary_file.write(msg + "\n")
+                summary_file.flush()
+
+            log_important(f"\n{'=' * 72}")
+            log_important(f"Running Internal Split Calibration on {ds_key.upper()}")
+            log_important(f"{'=' * 72}")
+
+            seeds = [int(args.seed) + run_idx for run_idx in range(args.runs)]
+            for run_idx, seed in enumerate(seeds):
+                log_important(f"\n--- Run {run_idx + 1}/{args.runs} (Seed {seed}) ---")
+                run_args = make_run_args(args, seed)
+                _conf, data, verify_features, device = load_run_state(ds_key, run_args, seed)
+                run_internal_split_calibration_step(
+                    ds_key=ds_key,
+                    data=data,
+                    verify_features=verify_features,
+                    args=run_args,
+                    device=device,
+                    dataset_log_dir=dataset_log_dir,
+                    log_important=log_important,
+                )
+
+            log_important(f"{'=' * 72}\n")
+
+
+def run_real_quant_ablation(args):
+    target_datasets = args.datasets if args.datasets else ["cora"]
+    log_dir = os.path.join("output", "graph_simhash")
+    os.makedirs(log_dir, exist_ok=True)
+    configs = build_real_quant_policy_configs(args)
 
     for ds_key in target_datasets:
         if ds_key not in DATASET_CONFIGS:
@@ -546,6 +663,18 @@ def run_real_quant_ablation(args):
                 log_important(f"\n--- Run {run_idx + 1}/{args.runs} (Seed {seed}) ---")
                 run_args = make_run_args(args, seed)
                 _conf, data, verify_features, device = load_run_state(ds_key, run_args, seed)
+                internal_bundle, internal_report = run_internal_split_calibration_step(
+                    ds_key=ds_key,
+                    data=data,
+                    verify_features=verify_features,
+                    args=run_args,
+                    device=device,
+                    dataset_log_dir=dataset_log_dir,
+                    log_important=log_important,
+                )
+                if internal_bundle is not None:
+                    run_args._internal_split_calibration_bundle = internal_bundle
+                    run_args._internal_split_calibration_report = internal_report
                 pools = load_real_quant_pools(ds_key, run_args, data, device)
                 log_important(
                     "[RealQuantPools] "
@@ -607,7 +736,8 @@ def run_real_quant_ablation(args):
                     results[name]["cost"].append(rel_cost)
 
                     log_important(
-                        f"[{name}] I4={stats['int4_rate']:.1%} | I8={stats['int8_rate']:.1%} "
+                        f"[{name}] {run_args.real_quant_int4_tag}={stats['int4_rate']:.1%} "
+                        f"| {run_args.real_quant_int8_tag}={stats['int8_rate']:.1%} "
                         f"| FP={stats['fp_rate']:.1%} | Cost={rel_cost:.3f} "
                         f"| Acc={acc:.4f} | Drop={drop:.2%} "
                         f"| AvgErr={stats['avg_selected_error']:.5f}"
@@ -618,12 +748,14 @@ def run_real_quant_ablation(args):
             log_important(f"{'=' * 72}")
             base_mean = float(np.mean(results["baseline"]))
             log_important(f"Baseline Acc: {base_mean:.4f}")
-            log_important("-" * 104)
+            int4_header = f"{args.real_quant_int4_tag} %"
+            int8_header = f"{args.real_quant_int8_tag} %"
+            log_important("-" * 120)
             log_important(
-                f"{'Config':<18} | {'I4 %':<8} | {'I8 %':<8} | {'FP %':<8} | "
+                f"{'Config':<26} | {int4_header:<8} | {int8_header:<8} | {'FP %':<8} | "
                 f"{'Cost':<8} | {'Acc':<10} | {'Drop %':<10} | {'AvgErr':<10}"
             )
-            log_important("-" * 104)
+            log_important("-" * 120)
             for name, _policy in configs:
                 i4 = float(np.mean(results[name]["int4"]))
                 i8 = float(np.mean(results[name]["int8"]))
@@ -633,13 +765,16 @@ def run_real_quant_ablation(args):
                 drop = float(np.mean(results[name]["drop"]))
                 avg_err = float(np.mean(results[name]["avg_err"]))
                 log_important(
-                    f"{name:<18} | {i4:<8.1%} | {i8:<8.1%} | {fp:<8.1%} | "
+                    f"{name:<26} | {i4:<8.1%} | {i8:<8.1%} | {fp:<8.1%} | "
                     f"{cost:<8.3f} | {acc:<10.4f} | {drop:<10.2%} | {avg_err:<10.5f}"
                 )
             log_important(f"{'=' * 72}\n")
 
 
 def run_adaptive_simulation(args):
+    if bool(args.internal_split_calibration_only):
+        return run_internal_split_calibration_only(args)
+
     if args.experiment_suite == "real_quant_ablation":
         return run_real_quant_ablation(args)
 
@@ -696,6 +831,15 @@ def run_adaptive_simulation(args):
                     f"[Seed] run={int(seed)} | controller={int(run_args.controller_seed)} "
                     f"| hash_head={int(run_args.hash_head_seed)} "
                     f"| topology_sketch={int(run_args.topology_sketch_seed)}"
+                )
+                run_internal_split_calibration_step(
+                    ds_key=ds_key,
+                    data=data,
+                    verify_features=verify_features,
+                    args=run_args,
+                    device=device,
+                    dataset_log_dir=dataset_log_dir,
+                    log_important=log_important,
                 )
                 model, base_acc, oracle_embs, oracle_logits = train_baseline_model(data, run_args, device)
                 results_collector["baseline"].append(base_acc)

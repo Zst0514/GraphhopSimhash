@@ -194,6 +194,7 @@ def make_retrieval_tag(args):
         f"struct{int(not bool(args.disable_structure_check))}",
     ]
     if args.structure_check_mode == "sketch":
+        parts.append(f"hbg{int(bool(args.enable_homophily_bucket_guard))}")
         parts.append(f"tsg{int(bool(args.enable_topology_sketch_guard))}")
         if args.enable_topology_sketch_guard:
             parts.extend(
@@ -241,6 +242,19 @@ def build_log_path(dataset_log_dir, ds_key, args):
     retrieval_tag = make_retrieval_tag(args)
     tau_tag = make_tau_tag(args.cosine_tau)
     config_tag = f"r{int(args.radius)}"
+    if getattr(args, "experiment_suite", None) == "real_quant_ablation":
+        config_tag += (
+            f"_rq{getattr(args, 'real_quant_policy_suite', 'standard')}"
+            f"_{getattr(args, 'real_quant_fp_tag', 'FP')}"
+            f"_{getattr(args, 'real_quant_int8_tag', 'INT8')}"
+            f"_{getattr(args, 'real_quant_int4_tag', 'INT4')}"
+            f"_i8r{float(getattr(args, 'real_quant_int8_ratio', 0.0)):.2f}".replace(".", "p")
+        )
+        if bool(getattr(args, "internal_split_calibration", False)):
+            config_tag += (
+                f"_is{getattr(args, 'internal_split_priority', 'degree')}"
+                f"{float(getattr(args, 'internal_split_topk_ratio', 0.0)):.2f}".replace(".", "p")
+            )
     filename = (
         f"{ds_key}_paper_R{args.radius}_bits_{args.sketch_bits}_"
         f"{hash_route_tag}_{projection_tag}_{route_weight_tag}_"

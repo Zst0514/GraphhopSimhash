@@ -171,9 +171,14 @@ def build_parser():
         choices=["cosine", "sketch"],
     )
     parser.add_argument(
+        "--enable_homophily_bucket_guard",
+        action="store_true",
+        help="Enable homophily-bucket filtering in sketch structure checks. Default is disabled.",
+    )
+    parser.add_argument(
         "--enable_topology_sketch_guard",
         action="store_true",
-        help="Enable topology-sketch Hamming filtering in the backend guard. Default mainline keeps only homophily buckets.",
+        help="Enable topology-sketch Hamming filtering in the backend guard.",
     )
     parser.add_argument("--topology_sketch_bits", type=int, default=16)
     parser.add_argument("--topology_sketch_radius", type=int, default=5)
@@ -255,6 +260,65 @@ def build_parser():
     parser.add_argument("--quant_int8_error", type=int, default=1)
     parser.add_argument("--quant_int4_bits", type=int, default=4)
     parser.add_argument("--quant_int8_bits", type=int, default=8)
+    parser.add_argument(
+        "--internal_split_calibration",
+        "--enable_internal_split_calibration",
+        dest="internal_split_calibration",
+        action="store_true",
+        help="Build a high-bit/low-bit node calibration split before the run.",
+    )
+    parser.add_argument(
+        "--disable_internal_split_calibration",
+        dest="internal_split_calibration",
+        action="store_false",
+        help="Disable internal split calibration.",
+    )
+    parser.set_defaults(internal_split_calibration=False)
+    parser.add_argument(
+        "--internal_split_calibration_only",
+        action="store_true",
+        help="Only build and save internal split calibration reports, then exit.",
+    )
+    parser.add_argument("--internal_calib_samples", type=int, default=512)
+    parser.add_argument("--internal_calib_high_ratio", type=float, default=0.5)
+    parser.add_argument(
+        "--internal_split_priority",
+        type=str,
+        default="degree",
+        choices=["degree", "tser", "random", "bottom_degree"],
+        help="Node priority used to assign the high-bit calibration group.",
+    )
+    parser.add_argument("--internal_split_topk_ratio", type=float, default=0.10)
+    parser.add_argument(
+        "--internal_split_mass_target",
+        type=float,
+        default=-1.0,
+        help="If >= 0, choose the smallest high-bit set whose priority mass reaches this value.",
+    )
+    parser.add_argument(
+        "--internal_calib_strategy",
+        type=str,
+        default="topology",
+        choices=["uniform", "topology"],
+        help="Sampling strategy used separately inside the high-bit and low-bit groups.",
+    )
+    parser.add_argument(
+        "--internal_calib_bucket_mode",
+        type=str,
+        default="degree_quantile",
+        choices=["degree_quantile", "degree_topk"],
+    )
+    parser.add_argument("--internal_calib_bucket_count", type=int, default=4)
+    parser.add_argument("--internal_calib_bucket_topk_ratio", type=float, default=-1.0)
+    parser.add_argument("--internal_calib_uniform_ratio", type=float, default=0.5)
+    parser.add_argument("--internal_calib_high_a_bit", type=int, default=8)
+    parser.add_argument("--internal_calib_low_a_bit", type=int, default=4)
+    parser.add_argument(
+        "--internal_calib_report_dir",
+        type=str,
+        default=None,
+        help="Directory for internal split calibration JSON reports. Defaults to the dataset log directory.",
+    )
     parser.add_argument("--real_quant_model_name", type=str, default="llama2_7b")
     parser.add_argument("--real_quant_fp_tag", type=str, default="FP16")
     parser.add_argument("--real_quant_int8_tag", type=str, default="INT8")
@@ -262,6 +326,13 @@ def build_parser():
     parser.add_argument("--real_quant_fp_path", type=str, default=None)
     parser.add_argument("--real_quant_int8_path", type=str, default=None)
     parser.add_argument("--real_quant_int4_path", type=str, default=None)
+    parser.add_argument(
+        "--real_quant_policy_suite",
+        type=str,
+        default="standard",
+        choices=["standard", "w4a8_budget"],
+        help="Policy set for real-quant ablation. w4a8_budget matches W4A4/W4A8/FP table-style comparisons.",
+    )
     parser.add_argument(
         "--real_quant_error_space",
         type=str,
@@ -458,6 +529,26 @@ def validate_args(parser, args):
         parser.error("quant fake bits must be at least 2")
     if args.quant_int4_bits > args.quant_int8_bits:
         parser.error("--quant_int4_bits should be <= --quant_int8_bits")
+    if args.internal_calib_samples < 0:
+        parser.error("--internal_calib_samples must be >= 0")
+    if not (0.0 <= args.internal_calib_high_ratio <= 1.0):
+        parser.error("--internal_calib_high_ratio must be in [0, 1]")
+    if not (0.0 <= args.internal_split_topk_ratio <= 1.0):
+        parser.error("--internal_split_topk_ratio must be in [0, 1]")
+    if not (args.internal_split_mass_target < 0.0 or 0.0 <= args.internal_split_mass_target <= 1.0):
+        parser.error("--internal_split_mass_target must be negative or in [0, 1]")
+    if args.internal_calib_bucket_count <= 0:
+        parser.error("--internal_calib_bucket_count must be positive")
+    if not (args.internal_calib_bucket_topk_ratio < 0.0 or 0.0 <= args.internal_calib_bucket_topk_ratio <= 1.0):
+        parser.error("--internal_calib_bucket_topk_ratio must be negative or in [0, 1]")
+    if not (0.0 <= args.internal_calib_uniform_ratio <= 1.0):
+        parser.error("--internal_calib_uniform_ratio must be in [0, 1]")
+    if args.internal_calib_high_a_bit <= 0 or args.internal_calib_low_a_bit <= 0:
+        parser.error("--internal_calib_high_a_bit/--internal_calib_low_a_bit must be positive")
+    if args.internal_calib_high_a_bit < args.internal_calib_low_a_bit:
+        parser.error("--internal_calib_high_a_bit must be >= --internal_calib_low_a_bit")
+    if args.internal_split_calibration_only and not args.internal_split_calibration:
+        args.internal_split_calibration = True
     if args.real_quant_error_norm <= 0:
         parser.error("--real_quant_error_norm must be positive")
     if args.real_quant_int4_threshold < 0 or args.real_quant_int8_threshold < 0:
