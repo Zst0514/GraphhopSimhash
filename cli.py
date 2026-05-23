@@ -20,8 +20,9 @@ def build_parser():
             "score_ablation",
             "quant_ablation",
             "real_quant_ablation",
+            "reuse_real_quant",
         ],
-        help="Run one config, score-gate ablations, quantization ablations, or real-quantization ablations.",
+        help="Run one config, score-gate ablations, quantization ablations, real-quantization ablations, or joint reuse+real-quantization.",
     )
     parser.add_argument(
         "--seed",
@@ -221,7 +222,7 @@ def build_parser():
         help="Disable degree/context/rare-leaf risk gate after retrieval.",
     )
     parser.set_defaults(disable_score_gate=True)
-    parser.add_argument("--score_reuse_threshold", type=int, default=120)
+    parser.add_argument("--score_reuse_threshold", type=int, default=45)
     parser.add_argument("--score_hub_threshold", type=int, default=12)
     parser.add_argument("--score_rare_threshold", type=int, default=10)
     parser.add_argument(
@@ -244,6 +245,21 @@ def build_parser():
         action="store_true",
         help="Do not reduce approximation error when a candidate is supported by multiple hash heads.",
     )
+    parser.add_argument(
+        "--score_rare_gate_mode",
+        type=str,
+        default="support",
+        choices=["hard", "support", "risk"],
+        help="How to handle low-degree rare fuzzy candidates: old hard block, support-aware block, or risk-only.",
+    )
+    parser.add_argument("--score_rare_min_dist", type=int, default=2)
+    parser.add_argument("--score_rare_min_route_hits", type=int, default=2)
+    parser.add_argument("--score_rare_min_base_hits", type=int, default=2)
+    parser.add_argument("--score_pair_confidence_discount", type=int, default=1)
+    parser.add_argument("--score_pair_confidence_max_dist", type=int, default=1)
+    parser.add_argument("--score_pair_confidence_min_route_hits", type=int, default=2)
+    parser.add_argument("--score_pair_confidence_min_base_hits", type=int, default=2)
+    parser.add_argument("--score_pair_confidence_min_cos_margin", type=float, default=0.02)
     parser.add_argument("--score_rarity_bits", type=int, default=16)
     parser.add_argument("--score_rarity_seed", type=int, default=98765)
     parser.add_argument("--score_propagation_weight", type=int, default=3)
@@ -260,6 +276,22 @@ def build_parser():
     parser.add_argument("--quant_int8_error", type=int, default=1)
     parser.add_argument("--quant_int4_bits", type=int, default=4)
     parser.add_argument("--quant_int8_bits", type=int, default=8)
+    parser.add_argument("--quant_tser_propagation_weight", type=float, default=4.0)
+    parser.add_argument("--quant_tser_graph_context_weight", type=float, default=1.0)
+    parser.add_argument("--quant_tser_low_unique_weight", type=float, default=0.0)
+    parser.add_argument(
+        "--quant_error_bias",
+        type=float,
+        default=1.0,
+        help="Bias added to quantized INT4 error for error-aware TopK ranking.",
+    )
+    parser.add_argument(
+        "--quant_error_rank_source",
+        type=str,
+        default="continuous",
+        choices=["continuous", "quantized"],
+        help="Error signal used by DegreeErrorTopK/TSERErrorTopK ranking.",
+    )
     parser.add_argument(
         "--internal_split_calibration",
         "--enable_internal_split_calibration",
@@ -519,6 +551,16 @@ def validate_args(parser, args):
         parser.error("--score_rare_threshold must be in [0, 15]")
     if args.score_rarity_bits <= 0:
         parser.error("--score_rarity_bits must be positive")
+    if args.score_rare_min_dist < 1:
+        parser.error("--score_rare_min_dist must be positive")
+    if args.score_rare_min_route_hits < 1 or args.score_rare_min_base_hits < 1:
+        parser.error("score rare support thresholds must be positive")
+    if args.score_pair_confidence_discount < 0:
+        parser.error("--score_pair_confidence_discount must be non-negative")
+    if args.score_pair_confidence_max_dist < 0:
+        parser.error("--score_pair_confidence_max_dist must be non-negative")
+    if args.score_pair_confidence_min_route_hits < 1 or args.score_pair_confidence_min_base_hits < 1:
+        parser.error("score pair confidence support thresholds must be positive")
     if args.score_propagation_weight < 0 or args.score_graph_context_weight < 0 or args.score_low_unique_weight < 0:
         parser.error("score weights must be non-negative")
     if args.quant_int4_threshold < 0 or args.quant_int8_threshold < 0:
@@ -529,6 +571,14 @@ def validate_args(parser, args):
         parser.error("quant fake bits must be at least 2")
     if args.quant_int4_bits > args.quant_int8_bits:
         parser.error("--quant_int4_bits should be <= --quant_int8_bits")
+    if (
+        args.quant_tser_propagation_weight < 0
+        or args.quant_tser_graph_context_weight < 0
+        or args.quant_tser_low_unique_weight < 0
+    ):
+        parser.error("quant TSER weights must be non-negative")
+    if args.quant_error_bias < 0:
+        parser.error("--quant_error_bias must be non-negative")
     if args.internal_calib_samples < 0:
         parser.error("--internal_calib_samples must be >= 0")
     if not (0.0 <= args.internal_calib_high_ratio <= 1.0):

@@ -130,17 +130,32 @@ def compute_real_quant_errors(fp_embs, int8_embs, int4_embs, args):
     }
 
 
-def select_real_quant_actions(policy_name, scores, errors, args):
+def resolve_eligible_mask(scores, eligible_mask=None):
     num_nodes = int(scores["sensitivity_q"].numel())
     device = scores["sensitivity_q"].device
+    if eligible_mask is None:
+        return torch.ones(num_nodes, dtype=torch.bool, device=device)
+
+    mask = torch.as_tensor(eligible_mask, dtype=torch.bool, device=device)
+    if mask.numel() != num_nodes:
+        raise ValueError(
+            f"eligible_mask length must match node count {num_nodes}, got {mask.numel()}"
+        )
+    return mask
+
+
+def select_real_quant_actions(policy_name, scores, errors, args, eligible_mask=None):
+    num_nodes = int(scores["sensitivity_q"].numel())
+    device = scores["sensitivity_q"].device
+    eligible = resolve_eligible_mask(scores, eligible_mask)
     actions = torch.full((num_nodes,), 16, dtype=torch.int64, device=device)
     if policy_name == "all_fp":
         return actions
     if policy_name == "all_int8":
-        actions.fill_(8)
+        actions[eligible] = 8
         return actions
     if policy_name == "all_int4":
-        actions.fill_(4)
+        actions[eligible] = 4
         return actions
 
     if policy_name == "degree":
@@ -154,14 +169,48 @@ def select_real_quant_actions(policy_name, scores, errors, args):
 
     int4_risk = sensitivity * errors["int4_err_q"]
     int8_risk = sensitivity * errors["int8_err_q"]
-    int4_mask = int4_risk <= int(args.real_quant_int4_threshold)
-    int8_mask = (~int4_mask) & (int8_risk <= int(args.real_quant_int8_threshold))
+    int4_mask = eligible & (int4_risk <= int(args.real_quant_int4_threshold))
+    int8_mask = eligible & (~int4_mask) & (int8_risk <= int(args.real_quant_int8_threshold))
     actions[int4_mask] = 4
     actions[int8_mask] = 8
     return actions
 
 
-def get_rank_score(policy_name, scores):
+def get_quant_tser_score(scores, args):
+    propagation_weight = float(getattr(args, "quant_tser_propagation_weight", 4.0))
+    graph_context_weight = float(getattr(args, "quant_tser_graph_context_weight", 1.0))
+    low_unique_weight = float(getattr(args, "quant_tser_low_unique_weight", 0.0))
+    return (
+        propagation_weight * scores["propagation_q"].float()
+        + graph_context_weight * scores["graph_context_q"].float()
+        + low_unique_weight * scores["low_degree_unique_q"].float()
+    )
+
+
+def get_error_multiplier(errors, args):
+    bias = float(getattr(args, "quant_error_bias", 1.0))
+    source = str(getattr(args, "quant_error_rank_source", "continuous")).lower()
+    if source == "quantized":
+        return errors["int4_err_q"].float() + bias
+    if source != "continuous":
+        raise ValueError(f"Unknown quant_error_rank_source={source}")
+
+    err = errors["int4_err"].float()
+    scale = err.mean().clamp(min=1e-8)
+    return err / scale + bias
+
+
+def get_rank_score(policy_name, scores, args=None, errors=None):
+    if policy_name.startswith("degree_error"):
+        if errors is None:
+            raise ValueError("degree_error ranking requires quantization errors")
+        return scores["propagation_q"].float() * get_error_multiplier(errors, args)
+    if policy_name.startswith("tser_error"):
+        if errors is None:
+            raise ValueError("tser_error ranking requires quantization errors")
+        return get_quant_tser_score(scores, args) * get_error_multiplier(errors, args)
+    if policy_name.startswith("quant_tser"):
+        return get_quant_tser_score(scores, args)
     if policy_name.startswith("degree"):
         return scores["propagation_q"].float()
     if policy_name.startswith("tser"):
@@ -178,51 +227,63 @@ def _map_calibration_bit_to_action(bit):
     return 4
 
 
-def select_random_int8_budget_actions(scores, args):
+def select_random_int8_budget_actions(scores, args, eligible_mask=None):
     num_nodes = int(scores["sensitivity_q"].numel())
     device = scores["sensitivity_q"].device
-    actions = torch.full((num_nodes,), 4, dtype=torch.int64, device=device)
-    int8_count = int(round(float(args.real_quant_int8_ratio) * num_nodes))
-    int8_count = max(0, min(num_nodes, int8_count))
+    eligible = resolve_eligible_mask(scores, eligible_mask)
+    eligible_idx = torch.nonzero(eligible, as_tuple=False).flatten()
+    actions = torch.full((num_nodes,), 16, dtype=torch.int64, device=device)
+    actions[eligible_idx] = 4
+    eligible_count = int(eligible_idx.numel())
+    int8_count = int(round(float(args.real_quant_int8_ratio) * eligible_count))
+    int8_count = max(0, min(eligible_count, int8_count))
     if int8_count <= 0:
         return actions
 
     seed = int(getattr(args, "run_seed", getattr(args, "seed", 0)))
     generator = torch.Generator(device="cpu")
     generator.manual_seed(seed)
-    order = torch.randperm(num_nodes, generator=generator, device="cpu").to(device)
-    actions[order[:int8_count]] = 8
+    order = torch.randperm(eligible_count, generator=generator, device="cpu").to(device)
+    actions[eligible_idx[order[:int8_count]]] = 8
     return actions
 
 
-def select_ranked_int8_budget_actions(policy_name, scores, args):
+def select_ranked_int8_budget_actions(policy_name, scores, args, eligible_mask=None):
     num_nodes = int(scores["sensitivity_q"].numel())
     device = scores["sensitivity_q"].device
-    actions = torch.full((num_nodes,), 4, dtype=torch.int64, device=device)
-    rank_score = get_rank_score(policy_name, scores)
-    order = torch.argsort(rank_score, descending=True)
+    eligible = resolve_eligible_mask(scores, eligible_mask)
+    eligible_idx = torch.nonzero(eligible, as_tuple=False).flatten()
+    actions = torch.full((num_nodes,), 16, dtype=torch.int64, device=device)
+    actions[eligible_idx] = 4
+    rank_score = get_rank_score(policy_name, scores, args=args)
+    eligible_count = int(eligible_idx.numel())
+    if eligible_count <= 0:
+        return actions
+    order = eligible_idx[torch.argsort(rank_score[eligible_idx], descending=True)]
 
-    int8_count = int(round(float(args.real_quant_int8_ratio) * num_nodes))
-    int8_count = max(0, min(num_nodes, int8_count))
+    int8_count = int(round(float(args.real_quant_int8_ratio) * eligible_count))
+    int8_count = max(0, min(eligible_count, int8_count))
     if int8_count > 0:
         actions[order[:int8_count]] = 8
     return actions
 
 
-def select_internal_split_actions(scores, args):
+def select_internal_split_actions(scores, args, eligible_mask=None):
     bundle = getattr(args, "_internal_split_calibration_bundle", None)
     if bundle is None:
         raise ValueError("internal_split policy requires --internal_split_calibration")
 
     num_nodes = int(scores["sensitivity_q"].numel())
     device = scores["sensitivity_q"].device
+    eligible = resolve_eligible_mask(scores, eligible_mask)
     low_bit = int(getattr(args, "internal_calib_low_a_bit", 4))
     actions = torch.full(
         (num_nodes,),
-        _map_calibration_bit_to_action(low_bit),
+        16,
         dtype=torch.int64,
         device=device,
     )
+    actions[eligible] = _map_calibration_bit_to_action(low_bit)
 
     assignment = bundle.get("assignment", {})
     activation_bits = assignment.get("activation_bits")
@@ -232,9 +293,9 @@ def select_internal_split_actions(scores, args):
             raise ValueError(
                 f"internal_split activation_bits length must match node count {num_nodes}, got {bit_tensor.numel()}"
             )
-        actions.fill_(4)
-        actions[bit_tensor >= 8] = 8
-        actions[bit_tensor >= 16] = 16
+        actions[eligible] = 4
+        actions[eligible & (bit_tensor >= 8)] = 8
+        actions[eligible & (bit_tensor >= 16)] = 16
         return actions
 
     for pass_spec in bundle.get("passes", []):
@@ -243,6 +304,7 @@ def select_internal_split_actions(scores, args):
             continue
         idx = torch.as_tensor(node_indices, dtype=torch.long, device=device)
         idx = idx[(idx >= 0) & (idx < num_nodes)]
+        idx = idx[eligible[idx]]
         if idx.numel() == 0:
             continue
         bit = int(pass_spec.get("bit", low_bit))
@@ -250,15 +312,40 @@ def select_internal_split_actions(scores, args):
     return actions
 
 
-def select_ranked_budget_actions(policy_name, scores, args, mode):
+def select_ranked_int8_budget_actions_by_score(rank_score, scores, args, eligible_mask=None):
     num_nodes = int(scores["sensitivity_q"].numel())
     device = scores["sensitivity_q"].device
-    actions = torch.full((num_nodes,), 4, dtype=torch.int64, device=device)
-    rank_score = get_rank_score(policy_name, scores)
-    order = torch.argsort(rank_score, descending=True)
+    eligible = resolve_eligible_mask(scores, eligible_mask)
+    eligible_idx = torch.nonzero(eligible, as_tuple=False).flatten()
+    actions = torch.full((num_nodes,), 16, dtype=torch.int64, device=device)
+    actions[eligible_idx] = 4
+    eligible_count = int(eligible_idx.numel())
+    if eligible_count <= 0:
+        return actions
+    order = eligible_idx[torch.argsort(rank_score[eligible_idx], descending=True)]
 
-    fp_count = int(round(float(args.real_quant_fp_ratio) * num_nodes))
-    fp_count = max(0, min(num_nodes, fp_count))
+    int8_count = int(round(float(args.real_quant_int8_ratio) * eligible_count))
+    int8_count = max(0, min(eligible_count, int8_count))
+    if int8_count > 0:
+        actions[order[:int8_count]] = 8
+    return actions
+
+
+def select_ranked_budget_actions(policy_name, scores, errors, args, mode, eligible_mask=None):
+    num_nodes = int(scores["sensitivity_q"].numel())
+    device = scores["sensitivity_q"].device
+    eligible = resolve_eligible_mask(scores, eligible_mask)
+    eligible_idx = torch.nonzero(eligible, as_tuple=False).flatten()
+    actions = torch.full((num_nodes,), 16, dtype=torch.int64, device=device)
+    actions[eligible_idx] = 4
+    rank_score = get_rank_score(policy_name, scores, args=args, errors=errors)
+    eligible_count = int(eligible_idx.numel())
+    if eligible_count <= 0:
+        return actions
+    order = eligible_idx[torch.argsort(rank_score[eligible_idx], descending=True)]
+
+    fp_count = int(round(float(args.real_quant_fp_ratio) * eligible_count))
+    fp_count = max(0, min(eligible_count, fp_count))
     if fp_count > 0:
         actions[order[:fp_count]] = 16
 
@@ -270,32 +357,46 @@ def select_ranked_budget_actions(policy_name, scores, args, mode):
     if mode != "cascade":
         raise ValueError(f"Unknown ranked budget mode: {mode}")
 
-    int8_count = int(round(float(args.real_quant_int8_ratio) * num_nodes))
-    int8_count = max(0, min(num_nodes - fp_count, int8_count))
+    int8_count = int(round(float(args.real_quant_int8_ratio) * eligible_count))
+    int8_count = max(0, min(eligible_count - fp_count, int8_count))
     if int8_count > 0:
         actions[order[fp_count : fp_count + int8_count]] = 8
     return actions
 
 
-def select_real_quant_policy_actions(policy_name, scores, errors, args):
+def select_real_quant_policy_actions(policy_name, scores, errors, args, eligible_mask=None):
     if policy_name in ("degree", "tser", "all_fp", "all_int8", "all_int4"):
-        return select_real_quant_actions(policy_name, scores, errors, args)
+        return select_real_quant_actions(policy_name, scores, errors, args, eligible_mask=eligible_mask)
     if policy_name == "random_int8_budget":
-        return select_random_int8_budget_actions(scores, args)
+        return select_random_int8_budget_actions(scores, args, eligible_mask=eligible_mask)
     if policy_name == "degree_int8_budget":
-        return select_ranked_int8_budget_actions("degree", scores, args)
+        return select_ranked_int8_budget_actions("degree", scores, args, eligible_mask=eligible_mask)
     if policy_name == "tser_int8_budget":
-        return select_ranked_int8_budget_actions("tser", scores, args)
+        return select_ranked_int8_budget_actions("tser", scores, args, eligible_mask=eligible_mask)
+    if policy_name == "quant_tser_int8_budget":
+        return select_ranked_int8_budget_actions("quant_tser", scores, args, eligible_mask=eligible_mask)
+    if policy_name == "degree_error_int8_budget":
+        rank_score = get_rank_score("degree_error", scores, args=args, errors=errors)
+        return select_ranked_int8_budget_actions_by_score(rank_score, scores, args, eligible_mask=eligible_mask)
+    if policy_name == "tser_error_int8_budget":
+        rank_score = get_rank_score("tser_error", scores, args=args, errors=errors)
+        return select_ranked_int8_budget_actions_by_score(rank_score, scores, args, eligible_mask=eligible_mask)
     if policy_name == "internal_split":
-        return select_internal_split_actions(scores, args)
+        return select_internal_split_actions(scores, args, eligible_mask=eligible_mask)
     if policy_name == "degree_topk":
-        return select_ranked_budget_actions("degree", scores, args, mode="topk")
+        return select_ranked_budget_actions("degree", scores, errors, args, mode="topk", eligible_mask=eligible_mask)
     if policy_name == "tser_topk":
-        return select_ranked_budget_actions("tser", scores, args, mode="topk")
+        return select_ranked_budget_actions("tser", scores, errors, args, mode="topk", eligible_mask=eligible_mask)
+    if policy_name == "quant_tser_topk":
+        return select_ranked_budget_actions("quant_tser", scores, errors, args, mode="topk", eligible_mask=eligible_mask)
+    if policy_name == "degree_error_topk":
+        return select_ranked_budget_actions("degree_error", scores, errors, args, mode="topk", eligible_mask=eligible_mask)
+    if policy_name == "tser_error_topk":
+        return select_ranked_budget_actions("tser_error", scores, errors, args, mode="topk", eligible_mask=eligible_mask)
     if policy_name == "degree_cascade":
-        return select_ranked_budget_actions("degree", scores, args, mode="cascade")
+        return select_ranked_budget_actions("degree", scores, errors, args, mode="cascade", eligible_mask=eligible_mask)
     if policy_name == "tser_cascade":
-        return select_ranked_budget_actions("tser", scores, args, mode="cascade")
+        return select_ranked_budget_actions("tser", scores, errors, args, mode="cascade", eligible_mask=eligible_mask)
     raise ValueError(f"Unknown real quant policy: {policy_name}")
 
 

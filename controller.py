@@ -104,13 +104,22 @@ class PaperHashReuseController(HeatPlusPlus_NDP_Controller):
         hamming_only_acceptor=False,
         disable_structure_check=False,
         score_gate_enabled=True,
-        score_reuse_threshold=120,
+        score_reuse_threshold=45,
         score_hub_threshold=12,
         score_rare_threshold=10,
         score_protect_hub_exact=False,
         score_protect_hub_fuzzy=True,
         score_forbid_rare_fuzzy=True,
         score_support_discount=True,
+        score_rare_gate_mode="support",
+        score_rare_min_dist=2,
+        score_rare_min_route_hits=2,
+        score_rare_min_base_hits=2,
+        score_pair_confidence_discount=1,
+        score_pair_confidence_max_dist=1,
+        score_pair_confidence_min_route_hits=2,
+        score_pair_confidence_min_base_hits=2,
+        score_pair_confidence_min_cos_margin=0.02,
         score_rarity_bits=16,
         score_rarity_seed=98765,
         score_propagation_weight=3,
@@ -159,6 +168,15 @@ class PaperHashReuseController(HeatPlusPlus_NDP_Controller):
             protect_hub_fuzzy=bool(score_protect_hub_fuzzy),
             forbid_rare_fuzzy=bool(score_forbid_rare_fuzzy),
             support_discount=bool(score_support_discount),
+            rare_gate_mode=str(score_rare_gate_mode),
+            rare_min_dist=int(score_rare_min_dist),
+            rare_min_route_hits=int(score_rare_min_route_hits),
+            rare_min_base_hits=int(score_rare_min_base_hits),
+            confidence_discount=int(score_pair_confidence_discount),
+            confidence_max_dist=int(score_pair_confidence_max_dist),
+            confidence_min_route_hits=int(score_pair_confidence_min_route_hits),
+            confidence_min_base_hits=int(score_pair_confidence_min_base_hits),
+            confidence_min_cos_margin=float(score_pair_confidence_min_cos_margin),
         )
         self.score_rarity_bits = int(score_rarity_bits)
         self.score_rarity_seed = int(score_rarity_seed)
@@ -536,7 +554,8 @@ class PaperHashReuseController(HeatPlusPlus_NDP_Controller):
             f"reuse_gate={gate_status} | quant_policy={quant_status} "
             f"| T_reuse={self.score_gate_config.reuse_threshold} "
             f"| T_hub={self.score_gate_config.hub_threshold} "
-            f"| T_rare={self.score_gate_config.rare_threshold}"
+            f"| T_rare={self.score_gate_config.rare_threshold} "
+            f"| rare_mode={self.score_gate_config.rare_gate_mode}"
         )
         if self.quant_policy_config.enabled:
             print(
@@ -553,10 +572,16 @@ class PaperHashReuseController(HeatPlusPlus_NDP_Controller):
     def _score_gate_allows(self, query_node_id, item):
         if self.risk_gate is None:
             return True, None
+        cos_margin = None
+        if not self.hamming_only_acceptor:
+            required_tau = self._required_route_cosine_tau(item["route_idx"], item["dist"])
+            cos_margin = float(item.get("cos", 0.0)) - float(required_tau)
         decision = self.risk_gate.evaluate(
             query_node_id,
             item["dist"],
             route_hit_count=item.get("route_hit_count", 1),
+            base_route_hit_count=item.get("base_route_hit_count", 1),
+            cos_margin=cos_margin,
         )
         self.stats["score_checked"] += 1
         self.stats["score_risk_sum"] += decision["risk"]

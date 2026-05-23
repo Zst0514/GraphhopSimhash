@@ -42,7 +42,12 @@ Risk_q = Sensitivity_q * ReuseError_q
 Decision rules:
 
 - High-degree nodes are protected by `--score_hub_threshold`.
-- Low-degree rare nodes block fuzzy reuse by default.
+- Low-degree rare fuzzy candidates use `--score_rare_gate_mode support` by
+  default: only weakly supported rare candidates are hard-blocked. The old
+  behavior is `--score_rare_gate_mode hard`; `risk` leaves rare nodes to the
+  risk threshold only.
+- Pair-level confidence can reduce `ReuseError_q` when candidates have enough
+  route/base support or a strong cosine margin.
 - Remaining candidates use `Risk_q <= --score_reuse_threshold`.
 
 ## Risk-Guided Quantization
@@ -112,13 +117,44 @@ W4A4/W4A8 fixed-budget ablation with the internal split row:
 python -m GraphhopSimhash --datasets cora --runs 3 --experiment_suite real_quant_ablation --real_quant_policy_suite w4a8_budget --real_quant_model_name llama2_7b --real_quant_fp_tag W4A16 --real_quant_int8_tag W4A8 --real_quant_int4_tag W4A4 --real_quant_fp_ratio 0.0 --real_quant_int8_ratio 0.90 --internal_split_calibration --internal_split_priority degree --internal_split_topk_ratio 0.90
 ```
 
-See `REAL_QUANT.md` for required cache files and the exact DegreeTopK/TSERTopK
-and DegreeCascade/TSERCascade policy definitions.
+Joint hash reuse plus real W4A4/W4A8 feature-pool execution:
+
+```bash
+python -m GraphhopSimhash \
+  --datasets cora \
+  --runs 3 \
+  --experiment_suite reuse_real_quant \
+  --real_quant_policy_suite w4a8_budget \
+  --real_quant_model_name ST \
+  --real_quant_fp_tag W4A16 \
+  --real_quant_int8_tag W4A8 \
+  --real_quant_int4_tag W4A4 \
+  --real_quant_fp_ratio 0.0 \
+  --real_quant_int8_ratio 0.20 \
+  --real_quant_error_norm 1.0 \
+  --learned_hash_epochs 10 \
+  --learned_hash_dim 128 \
+  --hamming_only_acceptor \
+  --enable_score_gate \
+  --main_hash_head_bits 16 16 16 16 16 16 16 16 \
+  --route_min_support_hits 3
+```
+
+In `reuse_real_quant`, reuse hits are counted as cache reads. The real
+W4A4/W4A8/FP policy is applied only to hash-miss nodes, so the reported
+W4A8/W4A4/FP percentages are actual compute percentages over all nodes.
+
+The `w4a8_budget` suite also reports quantization-aware `QuantTSERTopK`,
+`DegreeErrorTopK`, and `TSERErrorTopK` rows. `DegreeErrorTopK` and
+`TSERErrorTopK` rank nodes by graph importance multiplied by the actual W4A4
+embedding error. See `REAL_QUANT.md` for required cache files and the exact
+policy definitions.
 
 Useful score ablations:
 
 ```bash
-python -m GraphhopSimhash --datasets cora --runs 1 --enable_score_gate --score_reuse_threshold 80
-python -m GraphhopSimhash --datasets cora --runs 1 --enable_score_gate --allow_rare_fuzzy
+python -m GraphhopSimhash --datasets cora --runs 1 --enable_score_gate --score_reuse_threshold 45
+python -m GraphhopSimhash --datasets cora --runs 1 --enable_score_gate --score_rare_gate_mode hard --score_reuse_threshold 120
+python -m GraphhopSimhash --datasets cora --runs 1 --enable_score_gate --score_rare_gate_mode risk
 python -m GraphhopSimhash --datasets cora --runs 1 --experiment_suite score_ablation
 ```
