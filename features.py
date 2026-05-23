@@ -16,10 +16,22 @@ def _compute_neighbor_mean(features, edge_index):
     sym_col = torch.cat([col, row], dim=0)
 
     neighbor_sum = torch.zeros_like(features)
-    neighbor_sum.index_add_(0, sym_row, features[sym_col])
-
     total_degree = torch.zeros(num_nodes, device=features.device)
-    total_degree.index_add_(0, sym_row, torch.ones(sym_row.size(0), device=features.device))
+    dim = max(1, int(features.size(1)))
+    bytes_per_value = max(1, int(features.element_size()))
+    target_bytes = 256 * 1024 * 1024
+    chunk_size = max(1, target_bytes // (dim * bytes_per_value))
+
+    for start in range(0, sym_row.size(0), chunk_size):
+        end = min(start + chunk_size, sym_row.size(0))
+        row_chunk = sym_row[start:end]
+        col_chunk = sym_col[start:end]
+        neighbor_sum.index_add_(0, row_chunk, features[col_chunk])
+        total_degree.index_add_(
+            0,
+            row_chunk,
+            torch.ones(row_chunk.size(0), device=features.device),
+        )
 
     neighbor_mean = neighbor_sum / total_degree.clamp(min=1).unsqueeze(1)
     isolated_mask = total_degree == 0

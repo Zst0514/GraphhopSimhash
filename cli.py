@@ -247,8 +247,8 @@ def build_parser():
     parser.add_argument("--score_rarity_bits", type=int, default=16)
     parser.add_argument("--score_rarity_seed", type=int, default=98765)
     parser.add_argument("--score_propagation_weight", type=int, default=3)
-    parser.add_argument("--score_graph_context_weight", type=int, default=2)
-    parser.add_argument("--score_low_unique_weight", type=int, default=2)
+    parser.add_argument("--score_graph_context_weight", type=int, default=1)
+    parser.add_argument("--score_low_unique_weight", type=int, default=1)
     parser.add_argument(
         "--enable_quant_policy",
         action="store_true",
@@ -330,8 +330,12 @@ def build_parser():
         "--real_quant_policy_suite",
         type=str,
         default="standard",
-        choices=["standard", "w4a8_budget"],
-        help="Policy set for real-quant ablation. w4a8_budget matches W4A4/W4A8/FP table-style comparisons.",
+        choices=["standard", "w4a8_budget", "fixed_aggressive_budget"],
+        help=(
+            "Policy set for real-quant ablation. fixed_aggressive_budget enforces "
+            "FP=0 with a fixed safe/aggressive ratio; w4a8_budget matches older "
+            "W4A4/W4A8/FP table-style comparisons."
+        ),
     )
     parser.add_argument(
         "--real_quant_error_space",
@@ -358,7 +362,7 @@ def build_parser():
         "--real_quant_int8_ratio",
         type=float,
         default=0.20,
-        help="INT8 ratio for DegreeCascade/TSERCascade. Tail nodes use INT4.",
+        help="Safe-path INT8/W4A8 ratio for budget policies. Tail nodes use INT4/W4A4.",
     )
     parser.add_argument(
         "--real_quant_tail_precision",
@@ -366,6 +370,46 @@ def build_parser():
         default="int4",
         choices=["int4", "int8"],
         help="Tail precision for TopK real-quant policies.",
+    )
+    parser.add_argument(
+        "--tserq_margin_norm",
+        type=float,
+        default=1.0,
+        help="FP logit margin value that maps margin risk to zero for TSER-Q.",
+    )
+    parser.add_argument("--tserq_graph_impact_weight", type=int, default=4)
+    parser.add_argument("--tserq_margin_weight", type=int, default=2)
+    parser.add_argument("--tserq_graph_context_weight", type=int, default=1)
+    parser.add_argument("--tserq_low_unique_weight", type=int, default=1)
+    parser.add_argument("--w4a4_safe_density_weight", type=int, default=2)
+    parser.add_argument("--w4a4_safe_agreement_weight", type=int, default=1)
+    parser.add_argument("--w4a4_safe_context_weight", type=int, default=2)
+    parser.add_argument("--w4a4_safe_low_propagation_weight", type=int, default=3)
+    parser.add_argument("--w4a4_safe_non_unique_weight", type=int, default=2)
+    parser.add_argument(
+        "--calib_proxy_size",
+        type=int,
+        default=256,
+        help="Number of calibration nodes used to estimate proxy quantization error for calibrated budget policies.",
+    )
+    parser.add_argument(
+        "--calib_proxy_strategy",
+        type=str,
+        default="score_stratified",
+        choices=["random", "score_stratified"],
+        help="Sampling strategy for calibrated quantization-error proxy nodes.",
+    )
+    parser.add_argument(
+        "--calib_proxy_bins",
+        type=int,
+        default=4,
+        help="Coarse bins per score dimension for the calibrated quantization-error LUT.",
+    )
+    parser.add_argument(
+        "--calib_proxy_sample_bins",
+        type=int,
+        default=8,
+        help="Number of quant-sensitivity strata for score-stratified proxy calibration sampling.",
     )
     parser.add_argument(
         "--controller_seed",
@@ -380,6 +424,24 @@ def build_parser():
     )
     parser.add_argument("--llm_name", type=str, default="ST")
     parser.add_argument("--emb_dim", type=int, default=768)
+    parser.add_argument(
+        "--reuse_embedding_model_name",
+        type=str,
+        default=None,
+        help="Optional oracle embedding model name for reuse experiments, e.g. llama2_7b.",
+    )
+    parser.add_argument(
+        "--reuse_embedding_tag",
+        type=str,
+        default="FP16",
+        help="Oracle embedding pool tag used with --reuse_embedding_model_name.",
+    )
+    parser.add_argument(
+        "--reuse_embedding_path",
+        type=str,
+        default=None,
+        help="Explicit oracle embedding pool path for reuse experiments.",
+    )
     return parser
 
 
@@ -559,6 +621,29 @@ def validate_args(parser, args):
         parser.error("--real_quant_int8_ratio must be in [0, 1]")
     if args.real_quant_fp_ratio + args.real_quant_int8_ratio > 1.0:
         parser.error("--real_quant_fp_ratio + --real_quant_int8_ratio must be <= 1")
+    if args.tserq_margin_norm <= 0:
+        parser.error("--tserq_margin_norm must be positive")
+    if (
+        args.tserq_graph_impact_weight < 0
+        or args.tserq_margin_weight < 0
+        or args.tserq_graph_context_weight < 0
+        or args.tserq_low_unique_weight < 0
+    ):
+        parser.error("TSER-Q weights must be non-negative")
+    if (
+        args.w4a4_safe_density_weight < 0
+        or args.w4a4_safe_agreement_weight < 0
+        or args.w4a4_safe_context_weight < 0
+        or args.w4a4_safe_low_propagation_weight < 0
+        or args.w4a4_safe_non_unique_weight < 0
+    ):
+        parser.error("W4A4-safe weights must be non-negative")
+    if args.calib_proxy_size < 0:
+        parser.error("--calib_proxy_size must be >= 0")
+    if args.calib_proxy_bins <= 0:
+        parser.error("--calib_proxy_bins must be positive")
+    if args.calib_proxy_sample_bins <= 0:
+        parser.error("--calib_proxy_sample_bins must be positive")
     if args.controller_seed is not None and args.controller_seed < 0:
         parser.error("--controller_seed must be >= 0")
     if args.hash_head_seed is not None and args.hash_head_seed < 0:
