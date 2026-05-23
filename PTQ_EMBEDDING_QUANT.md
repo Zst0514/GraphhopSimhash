@@ -1,66 +1,73 @@
-# Calibration-Aware W4A8/W4A4 Embedding PTQ
+# W4A8/W4A4 Embedding PTQ 说明
 
-This document describes the PTQ embedding-pool generation path implemented in
-`generate_real_quant_pools.py` through:
+本文档说明当前 `GraphhopSimhash` 中真实 embedding pool 的 PTQ 生成方式，以及这些 pool 应该如何配合固定预算量化路由实验使用。
 
-```bash
---w4a_backend ptq
-```
-
-The goal is to generate low-precision Transformer-front-end embedding pools for
-TAG/GFM experiments, especially `W4A8` and `W4A4`, with a calibration procedure
-that is more meaningful than naive fake quantization.
-
-## Motivation
-
-The original `FakeQuantLinear` path only rounds weights and activations to low
-bitwidth and immediately dequantizes them before an FP linear operation. This is
-useful as a stress test, but it is too crude for a serious W4A4 embedding study:
+当前主线不是把全图都压到 W4A4，而是：
 
 ```text
-naive fake quant:
-    W -> round/clip/dequant
-    X -> round/clip/dequant
-    Y = Linear(X_q, W_q)
+W4A8:
+    safe low-precision path
+
+W4A4:
+    aggressive low-precision path
+
+GraphHop / Degree / TSER policy:
+    决定哪些节点可以走 W4A4，哪些节点应该留在 W4A8。
 ```
 
-The problem is that W4A4 is dominated by activation outliers. If the activation
-range is chosen by raw max values, most 4-bit buckets are wasted on rare large
-values, and the dense part of the activation distribution is poorly represented.
-This can severely damage the final sentence/node embedding.
+因此，W4A4 的意义不是证明“全图 W4A4 也能很好”，而是提供一个更便宜但更危险的执行路径，让图相关路由策略去选择低风险节点。
 
-The new PTQ path uses a calibration-aware pipeline:
+## 1. 为什么需要 calibration-aware PTQ
+
+最早的 fake quant 路径只是做：
 
 ```text
-Calibration-aware W4A4/W4A8 PTQ =
-    group-wise W4 weight quantization
-  + layer-wise activation-aware scale search
-  + SmoothQuant/AWQ-style scale migration
-  + percentile activation clipping
-  + dynamic per-token activation quantization
-  + output embedding affine alignment
-  + damage check against FP16 embeddings
+W -> round / clip / dequant
+X -> round / clip / dequant
+Y = Linear(X_q, W_q)
 ```
 
-## High-Level Pipeline
+这个路径适合作为 stress test，但对 LLaMA/ST 这种 Transformer 前端不够稳，尤其是 A4 激活量化。
 
-For each dataset/model/config pair:
+核心问题是：
 
 ```text
-1. Load the FP16 Transformer encoder.
-2. Replace every nn.Linear with CalibratedPTQLinear.
-3. Run a calibration forward pass on sampled node texts.
-4. For each Linear layer:
-      search scale mode, alpha, activation clipping threshold
-      choose the candidate minimizing layer output MSE.
-5. Extract all node embeddings using finalized quantized Linear layers.
-6. Optionally fit output affine alignment on calibration embeddings.
-7. Save the final embedding pool:
+A4 最容易被 activation outlier 破坏。
+```
+
+如果 activation scale 直接由 raw max 决定，少数极端大值会占掉 4-bit 的大部分表示范围，密集区间反而表示得很差。对于 LLaMA-7B，这个问题更严重，沿用轻量 encoder 上的朴素 W4A4 策略可能直接产生 NaN 或极大 embedding damage。
+
+当前 PTQ 路径使用：
+
+```text
+group-wise W4 weight quantization
++ activation-aware scale search
++ SmoothQuant/AWQ-style scale migration
++ percentile activation clipping
++ dynamic per-token activation quantization
++ optional activation outlier protection
++ output embedding affine alignment
++ damage check against FP16 pool
+```
+
+## 2. 高层流程
+
+对每个 dataset / model / config：
+
+```text
+1. 加载 FP16 Transformer encoder。
+2. 将 nn.Linear 替换成 CalibratedPTQLinear。
+3. 在 calibration texts 上跑一次 FP forward，收集每层 activation。
+4. 每层搜索 scale mode、alpha、activation clipping threshold。
+5. 选择 layer output MSE 最小的 PTQ 配置。
+6. 用 finalized PTQ Linear 提取全图 embedding。
+7. 可选：在 calibration embeddings 上拟合 output affine alignment。
+8. 保存 embedding pool:
       cache_data/{dataset}_{model}_oracle_{tag}.pt
-8. Print cosine damage statistics against FP16 embeddings.
+9. 如果 FP16 pool 存在，打印 cosine damage statistics。
 ```
 
-The implementation is in:
+主要实现位置：
 
 ```text
 generate_real_quant_pools.py
@@ -70,78 +77,40 @@ generate_real_quant_pools.py
     fit_output_alignment
 ```
 
-## Calibration Set
+## 3. Calibration Set
 
-The calibration set is selected before quantization:
+推荐使用随机 calibration nodes：
 
 ```bash
---w4a_calib_samples 128
+--w4a_calib_samples 256
 --calibration_strategy random
 --seed 42
 ```
 
-Currently supported strategies:
-
-```text
-first:
-    Use the first N raw texts.
-
-random:
-    Use N randomly sampled raw texts with a fixed seed.
-```
-
-During calibration, each `CalibratedPTQLinear` records a bounded number of input
-rows from its incoming activation:
+每个 Linear 记录有限数量的 activation rows：
 
 ```bash
---ptq_sample_rows 256
+--ptq_sample_rows 128
 ```
 
-Important detail: during this calibration pass, the layer still executes the
-original FP Linear. The pass only records activation samples. This avoids
-cascading quantization noise during statistics collection.
+注意：calibration forward 期间，层本身仍然执行原始 FP Linear，只记录 activation samples。这样可以避免校准阶段就引入级联量化噪声。
 
-## Quantization Bounds
+## 4. Weight Quantization
 
-For a signed `b`-bit quantizer:
-
-```text
-q_min = -2^(b-1)
-q_max =  2^(b-1) - 1
-```
-
-For 4-bit:
-
-```text
-q_min = -8
-q_max =  7
-```
-
-For 8-bit:
-
-```text
-q_min = -128
-q_max =  127
-```
-
-## Weight Quantization
-
-Weights are quantized group-wise along the input-channel dimension.
-
-For a Linear layer:
+Linear 层形式为：
 
 ```text
 Y = X W^T + b
 W shape = [out_features, in_features]
 ```
 
-The input channels are split into groups:
+权重量化沿 input-channel 维度 group-wise 进行：
 
 ```bash
---ptq_group_size 128
+--ptq_group_size 64
 ```
 
-For each output channel and each input-channel group:
+对每个 output channel 和每个 input-channel group：
 
 ```text
 s_w = max(abs(W_group)) / q_max
@@ -149,13 +118,25 @@ Q_w = clamp(round(W_group / s_w), q_min, q_max)
 W_hat = Q_w * s_w
 ```
 
-This gives each group its own scale, which is much safer than one global scale
-for the full weight matrix.
+4-bit signed quantizer：
 
-## Activation Quantization
+```text
+q_min = -8
+q_max =  7
+```
 
-Activations are quantized dynamically per token/row. For each activation vector
-`x`:
+8-bit signed quantizer：
+
+```text
+q_min = -128
+q_max =  127
+```
+
+group-wise scale 比整层一个 scale 更稳，尤其适合 LLaMA 这种通道分布差异很大的模型。
+
+## 5. Activation Quantization
+
+Activation 使用 per-token / per-row dynamic quantization：
 
 ```text
 s_x = quantile(abs(x), p) / q_max
@@ -163,153 +144,107 @@ Q_x = clamp(round(x / s_x), q_min, q_max)
 x_hat = Q_x * s_x
 ```
 
-The quantile `p` is searched from:
+推荐搜索：
 
 ```bash
---ptq_clip_grid 1.0 0.999 0.995
+--ptq_clip_grid 1.0 0.999
 ```
 
-Interpretation:
+解释：
 
 ```text
 1.0:
-    use the max absolute value
+    使用 max absolute value。
 
-0.999 / 0.995:
-    clip extreme activation outliers and allocate more 4-bit buckets
-    to the dense region of the activation distribution
+0.999:
+    clip 极端 activation outlier，把更多 4-bit bucket 留给密集区间。
 ```
 
-This is the main protection against activation outliers in A4.
+这是 A4 激活量化最关键的保护之一。
 
-## Scale Migration
+## 6. Scale Migration
 
-Before quantization, the method searches a channel-wise scale vector `s` that
-redistributes numerical range between activations and weights:
+量化前，代码会搜索 channel-wise scale vector `s`：
 
 ```text
 X' = X / s
 W' = W * s
 ```
 
-Mathematically, this preserves the original FP linear operation before
-quantization:
+数学上，未量化时它保持等价：
 
 ```text
 X W^T = (X / s) (W * s)^T
 ```
 
-After this transformation, both `X'` and `W'` are quantized. The purpose is to
-move difficult activation outliers into weight scales, where group-wise W4
-quantization can sometimes represent them more stably.
+量化后，scale migration 可以把 activation outlier 的压力迁移到 weight side，让 group-wise W4 更容易表示。
 
-The implementation searches four scale families.
-
-### Identity
+当前搜索的模式包括：
 
 ```text
-s = 1
+identity:
+    s = 1
+
+smooth:
+    s = act_stat^alpha / weight_stat^(1 - alpha)
+
+awq:
+    s = act_stat^alpha
+
+balanced:
+    s = act_stat^alpha * weight_stat^(1 - alpha)
 ```
 
-This is the fallback candidate. It means no scale migration.
-
-### SmoothQuant-Style
-
-```text
-s = act_stat^alpha / weight_stat^(1 - alpha)
-```
-
-This follows the SmoothQuant intuition: use activation and weight statistics to
-balance the dynamic range between the two sides of the matrix multiply.
-
-### AWQ-Style
-
-```text
-s = act_stat^alpha
-```
-
-This follows the AWQ intuition: activation statistics indicate which input
-channels are more important; scaling can protect those channels before W4
-weight quantization.
-
-### Balanced
-
-```text
-s = act_stat^alpha * weight_stat^(1 - alpha)
-```
-
-This candidate gives another conservative way to combine activation and weight
-statistics.
-
-The searched alpha grid is controlled by:
+推荐 alpha grid：
 
 ```bash
---ptq_smooth_grid 0.0 0.25 0.5 0.75 1.0
+--ptq_smooth_grid 0.0 0.25 0.5
 ```
 
-Each scale candidate is sanitized:
+所有 scale 都会做 non-finite 清理、clamp、median normalize，避免少数异常 channel 产生极端 scale。
+
+## 7. LLaMA W4A4 的 outlier backend
+
+LLaMA-7B 的 W4A4 比 ST 更脆弱。当前 LLaMA W4A4 推荐使用：
+
+```bash
+--w4a_backend ptq_outlier
+--ptq_outlier_ratio 0.02
+--ptq_outlier_a_bit 8
+```
+
+含义是：
 
 ```text
-1. replace non-finite values
-2. clamp to [ptq_scale_min, ptq_scale_max]
-3. normalize by median(scale)
-4. clamp again
+每层统计 activation channel 的离群程度；
+top 2% outlier channels 使用 A8 side path；
+剩余 activation channels 使用 A4。
 ```
 
-This prevents a few pathological channels from producing extreme scales.
+这不是图相关策略，而是为了让 W4A4 backend 本身先变成“可用的 aggressive path”。如果 W4A4 pool 本身 NaN 或 damage 过大，后面的 TSER/Degree/GraphHop routing 没有实验意义。
 
-## Layer-Wise MSE Search
+## 8. Output Affine Alignment
 
-For each Linear layer, the calibration objective is:
-
-```text
-min over scale_mode, alpha, clip:
-
-    MSE(Y_fp, Y_quant)
-
-where:
-    Y_fp    = Linear(X, W)
-    Y_quant = Linear(Q_A(X / s), Q_W(W * s))
-```
-
-The best candidate is stored per layer:
-
-```text
-best_scale_mode
-best_alpha
-best_clip
-best_mse
-smooth_scale
-quant_weight
-```
-
-After finalization, the layer uses the selected scale and quantized weight for
-all subsequent full-dataset embedding extraction.
-
-## Output Embedding Alignment
-
-The Transformer output embedding can still have a distribution shift even when
-each layer's local MSE is reduced. To reduce the TF-to-GNN boundary mismatch, the
-PTQ path optionally fits a per-dimension affine alignment:
+即使每层 local MSE 被压低，最终 Transformer embedding 仍可能和 FP16 embedding 发生分布错位。为了降低 GFM 到 GNN 接口处的数值分布偏移，可以打开：
 
 ```bash
 --ptq_align_output
 ```
 
-On calibration embeddings:
+在 calibration embeddings 上：
 
 ```text
-E_fp  = FP16 embeddings
-E_q   = quantized embeddings
+E_fp = FP16 embeddings
+E_q  = quantized embeddings
 ```
 
-Fit:
+拟合 per-dimension affine：
 
 ```text
 E_fp ~= gamma * E_q + beta
 ```
 
-The closed-form per-dimension fit is:
+闭式解：
 
 ```text
 gamma = sum((E_q - mean(E_q)) * (E_fp - mean(E_fp)))
@@ -318,193 +253,301 @@ gamma = sum((E_q - mean(E_q)) * (E_fp - mean(E_fp)))
 beta = mean(E_fp) - gamma * mean(E_q)
 ```
 
-Then all quantized embeddings are aligned:
+然后对全图 quantized embeddings 做：
 
 ```text
 E_aligned = normalize(gamma * E_q + beta)
 ```
 
-This is similar in spirit to interface alignment: the quantized Transformer
-frontend should produce embeddings in the numerical range expected by the
-downstream GNN.
+这一步不是“恢复原始语义”，而是缓解量化前端输出分布和下游 GNN 期望输入分布之间的错位。
 
-## Damage Check
+## 9. Damage Check
 
-After saving a quantized pool, the script compares it against the FP16 pool if
-the FP16 pool exists:
-
-```text
-cache_data/{dataset}_{model}_oracle_FP16.pt
-```
-
-It reports cosine error:
+保存 quantized pool 后，如果 FP16 pool 存在，脚本会打印：
 
 ```text
 cos_err(v) = 1 - cosine(E_fp(v), E_quant(v))
 ```
 
-Printed statistics:
+统计项：
 
 ```text
 mean, p50, p90, p95, p99, max
 ```
 
-This is a required sanity check. If W4A4 has very high cosine damage, the
-downstream GNN accuracy drop is expected and should not be blamed on the
-TSER/Degree policy.
+这是必须看的 sanity check：
 
-## Example Commands
+```text
+W4A8 damage 很低:
+    可以作为 safe low-precision path。
 
-Generate FP16 ST embeddings:
+W4A4 damage 明显更高:
+    只能作为 aggressive path，不能默认全图使用。
+```
+
+如果 W4A4 全图掉点很大，这首先说明 W4A4 backend 本身损伤重，不应该直接归因于 TSER/Degree 路由策略。
+
+## 10. 推荐生成命令
+
+### 10.1 ST / Arxiv FP16
 
 ```bash
 python -m GraphhopSimhash.generate_real_quant_pools \
-  --datasets cora \
+  --datasets arxiv \
   --llm_name ST \
   --configs fp16 \
   --batch_size 128 \
   --overwrite
 ```
 
-Generate calibrated W4A8 and W4A4 embeddings:
+### 10.2 ST / PubMed + Arxiv W4A4
 
 ```bash
 python -m GraphhopSimhash.generate_real_quant_pools \
-  --datasets cora \
+  --datasets pubmed arxiv \
   --llm_name ST \
-  --configs W4A8 W4A4 \
+  --configs W4A4 \
   --batch_size 128 \
   --w4a_backend ptq \
-  --w4a_calib_samples 128 \
+  --w4a_calib_samples 256 \
   --calibration_strategy random \
   --seed 42 \
-  --ptq_group_size 128 \
-  --ptq_sample_rows 256 \
-  --ptq_smooth_grid 0.0 0.25 0.5 0.75 1.0 \
-  --ptq_clip_grid 1.0 0.999 0.995 \
+  --ptq_group_size 64 \
+  --ptq_sample_rows 128 \
+  --ptq_smooth_grid 0.0 0.25 0.5 \
+  --ptq_clip_grid 1.0 0.999 \
+  --ptq_output_clip_percentile 0.999 \
+  --ptq_output_clip_multiplier 4.0 \
   --ptq_align_output \
-  --tag_suffix PTQ_TEST \
+  --tag_suffix PTQ_TEST2 \
   --overwrite
 ```
 
-Evaluate W4A8/W4A4 pools with the real quantization ablation:
+### 10.3 LLaMA-7B / PubMed W4A8
+
+```bash
+python -m GraphhopSimhash.generate_real_quant_pools \
+  --datasets pubmed \
+  --llm_name llama2_7b \
+  --configs W4A8 \
+  --batch_size 4 \
+  --w4a_backend ptq \
+  --w4a_calib_samples 256 \
+  --calibration_strategy random \
+  --seed 42 \
+  --ptq_group_size 64 \
+  --ptq_sample_rows 128 \
+  --ptq_smooth_grid 0.0 0.25 0.5 \
+  --ptq_clip_grid 1.0 0.999 \
+  --ptq_output_clip_percentile 0.999 \
+  --ptq_output_clip_multiplier 4.0 \
+  --ptq_align_output \
+  --tag_suffix LLAMA7B_PTQ_TEST \
+  --overwrite
+```
+
+### 10.4 LLaMA-7B / PubMed W4A4 outlier backend
+
+```bash
+python -m GraphhopSimhash.generate_real_quant_pools \
+  --datasets pubmed \
+  --llm_name llama2_7b \
+  --configs W4A4 \
+  --batch_size 4 \
+  --w4a_backend ptq_outlier \
+  --w4a_calib_samples 256 \
+  --calibration_strategy random \
+  --seed 42 \
+  --ptq_group_size 64 \
+  --ptq_sample_rows 128 \
+  --ptq_smooth_grid 0.0 0.25 0.5 \
+  --ptq_clip_grid 1.0 0.999 \
+  --ptq_outlier_ratio 0.02 \
+  --ptq_outlier_a_bit 8 \
+  --ptq_output_clip_percentile 0.999 \
+  --ptq_output_clip_multiplier 4.0 \
+  --ptq_align_output \
+  --tag_suffix LLAMA7B_W4A4O_R2 \
+  --overwrite
+```
+
+### 10.5 LLaMA-7B / Arxiv FP16
+
+Arxiv + LLaMA-7B 很慢，建议先只生成 FP16：
+
+```bash
+python -m GraphhopSimhash.generate_real_quant_pools \
+  --datasets arxiv \
+  --llm_name llama2_7b \
+  --configs fp16 \
+  --batch_size 4 \
+  --overwrite
+```
+
+## 11. 推荐评估命令
+
+当前固定预算主线使用：
+
+```text
+fixed_aggressive_budget
+```
+
+例如 Cora / LLaMA-7B，20% W4A4 + 80% W4A8：
 
 ```bash
 python -m GraphhopSimhash \
   --datasets cora \
-  --runs 3 \
+  --runs 10 \
   --experiment_suite real_quant_ablation \
-  --real_quant_policy_suite w4a8_budget \
-  --real_quant_model_name ST \
+  --real_quant_policy_suite fixed_aggressive_budget \
+  --real_quant_model_name llama2_7b \
   --real_quant_fp_tag FP16 \
-  --real_quant_int8_tag W4A8_PTQ_TEST \
-  --real_quant_int4_tag W4A4_PTQ_TEST \
+  --real_quant_int8_tag W4A8_LLAMA7B_PTQ_TEST \
+  --real_quant_int4_tag W4A4_LLAMA7B_W4A4O_R2 \
   --real_quant_error_norm 1.0 \
-  --real_quant_int8_ratio 0.20
+  --real_quant_int8_ratio 0.80 \
+  --score_propagation_weight 3 \
+  --score_graph_context_weight 1 \
+  --score_low_unique_weight 1
 ```
 
-## Current ST/Cora Sanity Results
-
-With Sentence-BERT on Cora, the initial PTQ implementation produced:
+注意：
 
 ```text
-W4A8:
-    embedding cosine error mean ~= 0.029
-    downstream GNN drop ~= 0.50%
-
-W4A4:
-    embedding cosine error mean ~= 0.34
-    downstream GNN drop ~= 14%
+--real_quant_int8_ratio 0.80
 ```
 
-Interpretation:
+表示：
 
 ```text
-W4A8 is currently a stable aggressive low-precision point.
-W4A4 is still too destructive if applied to all or most nodes.
+80% W4A8
+20% W4A4
 ```
 
-Therefore, W4A4 should be treated as an extreme path assigned only to a small
-low-risk subset of nodes, rather than as the default tail precision for 80-90%
-of the graph.
-
-## Relationship To TSER
-
-The PTQ pool generation is intentionally independent of the routing policy:
+如果要复现旧表里的：
 
 ```text
-PTQ generator:
-    produces FP16 / W4A8 / W4A4 embedding pools
-
-TSER / Degree / Random policy:
-    chooses which node reads which pool
+80% W4A4
+20% W4A8
 ```
 
-This separation is important for fair comparison. Degree and TSER should use the
-same FP16/W4A8/W4A4 pools. The only difference should be node assignment:
+则应该设置：
+
+```bash
+--real_quant_int8_ratio 0.20
+```
+
+## 12. 当前实验解读
+
+### 12.1 W4A8
+
+W4A8 通常非常稳，适合作为 safe low-precision baseline。
+
+例如 PubMed / LLaMA-7B W4A8 pool：
 
 ```text
-DegreeTopK:
-    high-degree nodes use W4A8 or FP
-
-TSERTopK:
-    high-risk nodes use W4A8 or FP
-
-RandomTopK:
-    random nodes use W4A8 or FP
+DamageCheck mean ~= 0.0047
 ```
 
-This isolates the benefit of graph-semantic scoring from the quality of the
-quantizer itself.
+在下游 GNN 上通常只造成很小掉点。
 
-## Recommended Experimental Framing
+### 12.2 W4A4
 
-Given the current W4A4 damage, the most reasonable experiment is not:
+W4A4 全图使用通常掉点明显：
 
 ```text
-80% W4A4 + 20% W4A8
+ST / Cora:
+    AllW4A4 drop ~= 14 points
+
+LLaMA-7B / Cora:
+    AllW4A4 drop ~= 20+ points
+
+LLaMA-7B / PubMed:
+    AllW4A4 drop ~= 15 points
 ```
 
-Instead, use W4A8 as the safe low-precision baseline, then sweep W4A4 budget:
+这不是异常，而是说明 W4A4 aggressive path 本身有明显损伤。合理用法是只给低风险节点使用。
+
+### 12.3 固定预算评估
+
+推荐主表不是看全图 W4A4，而是看：
 
 ```text
 0% W4A4 + 100% W4A8
-5% W4A4 + 95% W4A8
 10% W4A4 + 90% W4A8
 20% W4A4 + 80% W4A8
+30% W4A4 + 70% W4A8
 ```
 
-At each fixed W4A4 budget, compare:
+每个固定预算下比较：
 
 ```text
-Random
-Degree
-TSER
+RandomBudget
+DegreeBudget
+TSERBudget
+GraphHopSafeBudget
 ```
 
-The paper claim should be:
+当前经验是：
 
 ```text
-TSER is not a new quantizer by itself.
-TSER is a risk-aware graph-semantic assignment policy that decides where
-aggressive quantization is safe.
+Cora / LLaMA-7B:
+    TSER 3/1/1 可能略优于 Degree/Random。
+
+Cora / ST:
+    Degree 通常更稳，low-degree unique 项可能伤精度。
+
+PubMed / ST 和 PubMed / LLaMA-7B:
+    Degree 往往最好，说明 PubMed 更传播主导。
 ```
 
-## Limitations
-
-This implementation is a calibration-aware PTQ embedding generator, not a
-production INT4 kernel:
+因此论文里不要写成“TSER 总是优于 Degree”。更稳的说法是：
 
 ```text
-1. It simulates low-bit numerical effects through quantize-dequantize tensors.
-2. It does not pack INT4 weights into a custom CUDA/NPU kernel.
-3. It does not implement full industrial AWQ exactly.
-4. It does not use Hessian/second-order information.
-5. W4A4 remains fragile for sentence embeddings.
+图相关路由是必要的；
+不同数据集/backend 下，传播风险和图语义修正的重要性不同；
+GraphHopSafeBudget 是可部署的 graph/hash stability routing；
+Degree 是强 baseline，尤其在传播主导数据集上。
 ```
 
-For architecture evaluation, this is still useful because it gives realistic
-embedding damage trends and supports fair policy comparison. For a final systems
-paper, the software PTQ should be paired with a hardware model that implements
-the selected W4A8/W4A4 execution paths.
+## 13. 和 TSER 文档的关系
 
+PTQ pool generation 和 routing policy 是两层：
+
+```text
+PTQ generator:
+    生成 FP16 / W4A8 / W4A4 embedding pools。
+
+Routing policy:
+    决定每个节点读取哪个 pool。
+```
+
+这两层必须分开看：
+
+```text
+如果 W4A4 pool 本身 damage 很大，
+    任何 routing 策略都会受到上限约束。
+
+如果固定 W4A4 budget 相同，
+    Random / Degree / TSER / GraphHopSafe 的差异才表示路由策略差异。
+```
+
+对应的分数定义见：
+
+```text
+SCORE_DEFINITIONS.md
+```
+
+## 14. 限制
+
+当前实现是 calibration-aware PTQ embedding generator，不是生产级 INT4 kernel：
+
+```text
+1. 它通过 quantize-dequantize tensor 模拟低 bit 数值效果。
+2. 它没有把 INT4 weight 真正 pack 到自定义 CUDA/NPU kernel。
+3. 它不是完整工业级 AWQ/OmniQuant 实现。
+4. 它没有 Hessian / second-order reconstruction。
+5. W4A4 对 sentence/node embedding 仍然脆弱。
+```
+
+对 architecture / routing 研究来说，它的价值是提供真实 embedding damage trend，并支持公平的 policy comparison。最终系统论文中，软件 PTQ 结果应该和硬件侧 W4A8/W4A4 execution path、NDP/NPU/CAM routing pipeline 一起解释。
