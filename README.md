@@ -352,6 +352,47 @@ python -m GraphhopSimhash \
   --score_low_unique_weight 1
 ```
 
+### 5.5 PubMed + Arxiv 权重扫描
+
+如果要系统比较 TSER 权重，可以直接运行：
+
+```bash
+bash GraphhopSimhash/run_quant_weight_sweeps.sh
+```
+
+默认会跑：
+
+```text
+datasets = pubmed arxiv
+model    = llama2_7b
+runs     = 10
+preset   = core
+budget   = 20% W4A4 + 80% W4A8
+```
+
+`core` 参数组包括：
+
+```text
+3/0/0  degree_only
+3/1/0  context_add
+3/0/1  unique_add
+3/1/1  tser_light
+4/0/0  prop4_degree
+4/1/0  prop4_context
+```
+
+完整日志和最终结果会保存到：
+
+```text
+saved_exp/graphhop_quant_weight_sweeps/
+```
+
+如果想跑更多组：
+
+```bash
+PRESET=extended bash GraphhopSimhash/run_quant_weight_sweeps.sh
+```
+
 ## 6. 结果解读原则
 
 ### 6.1 AllW4A4 掉点大是合理现象
