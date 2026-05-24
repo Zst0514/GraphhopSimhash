@@ -1,3 +1,4 @@
+import builtins
 import os
 from types import SimpleNamespace
 
@@ -12,9 +13,24 @@ ensure_repo_paths()
 from task_constructor import UnifiedTaskConstructor  # noqa: E402
 from utils import SentenceEncoder  # noqa: E402
 
+def _build_sentence_encoder_quiet(llm_name, batch_size):
+    original_print = builtins.print
+
+    def filtered_print(*args, **kwargs):
+        if args and isinstance(args[0], str) and args[0].startswith("[SentenceEncoder] Initializing "):
+            return
+        return original_print(*args, **kwargs)
+
+    builtins.print = filtered_print
+    try:
+        return SentenceEncoder(llm_name, batch_size=batch_size)
+    finally:
+        builtins.print = original_print
+
+
 def load_data_pipeline(ds_key, params, device):
     batch_size = 1 if "llama2" in params.llm_name.lower() else params.batch_size
-    encoder = SentenceEncoder(params.llm_name, batch_size=batch_size)
+    encoder = _build_sentence_encoder_quiet(params.llm_name, batch_size=batch_size)
 
     st_data_path = os.path.join("cache_data", params.data_dir, params.llm_name, "processed", "geometric_data_processed.pt")
     print(f"\n[Debug] Checking existence of: {st_data_path}")
