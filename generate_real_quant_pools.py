@@ -120,6 +120,8 @@ def affine_fake_quantize(x, bit_width, mode="per_tensor", dim=-1):
     if int(bit_width) >= 16:
         return x
 
+    x = torch.nan_to_num(x, nan=0.0, posinf=0.0, neginf=0.0)
+
     q_min = 0
     q_max = (2 ** int(bit_width)) - 1
     if mode == "per_tensor":
@@ -134,7 +136,7 @@ def affine_fake_quantize(x, bit_width, mode="per_tensor", dim=-1):
     scale = torch.clamp(max_val - min_val, min=1e-8) / q_max
     zero_point = torch.round(q_min - min_val / scale).clamp(q_min, q_max)
     quantized = torch.round(x / scale + zero_point).clamp(q_min, q_max)
-    return (quantized - zero_point) * scale
+    return torch.nan_to_num((quantized - zero_point) * scale, nan=0.0, posinf=0.0, neginf=0.0)
 
 
 class FakeQuantLinear(nn.Module):
@@ -280,7 +282,8 @@ def _forward_hidden_states(model, tokens):
         output_hidden_states=True,
         return_dict=True,
     )
-    return outputs.hidden_states[-1].to(torch.float32)
+    hidden = outputs.hidden_states[-1].to(torch.float32)
+    return torch.nan_to_num(hidden, nan=0.0, posinf=0.0, neginf=0.0)
 
 
 def encode_texts(model, tokenizer, texts, batch_size, max_length, device):

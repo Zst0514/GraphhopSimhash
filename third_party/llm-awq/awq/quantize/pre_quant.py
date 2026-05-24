@@ -64,16 +64,18 @@ def get_blocks(model):
 def move_embed(model, device):
     if isinstance(model, (LlamaForCausalLM, Qwen2ForCausalLM)):
         model.model.embed_tokens = model.model.embed_tokens.to(device)
-        model.model.rotary_emb = model.model.rotary_emb.to(device)
+        if hasattr(model.model, "rotary_emb"):
+            model.model.rotary_emb = model.model.rotary_emb.to(device)
     elif isinstance(model, DistilBertModel):
         model.embeddings = model.embeddings.to(device)
     elif model.__class__.__name__ == "InternVL3":
         model.language_model.model.embed_tokens = (
             model.language_model.model.embed_tokens.to(device)
         )
-        model.language_model.model.rotary_emb = (
-            model.language_model.model.rotary_emb.to(device)
-        )
+        if hasattr(model.language_model.model, "rotary_emb"):
+            model.language_model.model.rotary_emb = (
+                model.language_model.model.rotary_emb.to(device)
+            )
         model.vision_model.embeddings.to(device)
     elif isinstance(model, LlavaLlamaForCausalLM):
         model.model.embed_tokens = model.model.embed_tokens.to(device)
