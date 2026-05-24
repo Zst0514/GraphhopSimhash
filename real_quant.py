@@ -1,5 +1,6 @@
 from dataclasses import dataclass
 import os
+from types import SimpleNamespace
 
 import torch
 import torch.nn.functional as F
@@ -28,6 +29,65 @@ def resolve_pool_paths(ds_key, args):
     int8_path = args.real_quant_int8_path or default_pool_path(ds_key, model_name, args.real_quant_int8_tag)
     int4_path = args.real_quant_int4_path or default_pool_path(ds_key, model_name, args.real_quant_int4_tag)
     return fp_path, int8_path, int4_path
+
+
+def _resolve_generation_config_name(tag):
+    from .generate_real_quant_pools import CONFIG_SPECS
+
+    normalized = str(tag).strip()
+    if normalized in CONFIG_SPECS:
+        return normalized
+
+    bnb_aliases = {
+        "FP16": "fp16",
+        "INT8": "int8",
+        "INT4": "int4",
+    }
+    upper = normalized.upper()
+    if upper in bnb_aliases:
+        return bnb_aliases[upper]
+
+    for config_name, spec in CONFIG_SPECS.items():
+        if upper == str(spec["tag"]).upper():
+            return config_name
+
+    raise ValueError(
+        f"Cannot regenerate real-quant pool for tag {tag!r}. "
+        f"Available generator configs: {sorted(CONFIG_SPECS)}"
+    )
+
+
+def regenerate_real_quant_pools(ds_key, args, log_fn=print):
+    from .generate_real_quant_pools import generate_pool
+
+    fp_path, int8_path, int4_path = resolve_pool_paths(ds_key, args)
+    jobs = [
+        ("FP", args.real_quant_fp_tag, fp_path),
+        ("INT8", args.real_quant_int8_tag, int8_path),
+        ("INT4", args.real_quant_int4_tag, int4_path),
+    ]
+    gen_args = SimpleNamespace(
+        batch_size=64,
+        max_length=500,
+        cache_dir="cache_data/model",
+        output_path=None,
+        w4a_calib_samples=64,
+        w4a_awq_grid=21,
+        overwrite=True,
+    )
+
+    log_fn(
+        "[RealQuantAutoGen] Regenerating FP/INT8/INT4 feature pools before reuse_real_quant; "
+        "existing cache files will be overwritten."
+    )
+    for role, tag, out_path in jobs:
+        config_name = _resolve_generation_config_name(tag)
+        gen_args.output_path = out_path
+        log_fn(
+            f"[RealQuantAutoGen] {role}: tag={tag} | config={config_name} "
+            f"| batch_size=64 | w4a_calib_samples=64 | output={out_path}"
+        )
+        generate_pool(ds_key, args.real_quant_model_name, config_name, gen_args)
 
 
 def load_tensor_pool(path, device):

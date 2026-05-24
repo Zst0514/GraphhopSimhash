@@ -20,6 +20,7 @@ from .real_quant import (
     build_real_quant_scores,
     compute_real_quant_errors,
     load_real_quant_pools,
+    regenerate_real_quant_pools,
     select_real_quant_policy_actions,
     summarize_real_quant_policy,
 )
@@ -903,6 +904,7 @@ def run_reuse_real_quant_experiment(args):
                 "[JointPolicy] Reuse hits are free cache reads; "
                 "real-quant budgets are allocated only over hash-miss nodes."
             )
+            regenerate_real_quant_pools(ds_key, args, log_important)
 
             seeds = [int(args.seed) + run_idx for run_idx in range(args.runs)]
             for run_idx, seed in enumerate(seeds):
