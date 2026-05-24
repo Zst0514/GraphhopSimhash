@@ -143,13 +143,22 @@ def reuse_error_q(hamming_dist, route_hit_count=1, support_discount=True):
 @dataclass
 class RiskGateConfig:
     enabled: bool = True
-    reuse_threshold: int = 120
+    reuse_threshold: int = 45
     hub_threshold: int = 12
     rare_threshold: int = 10
     protect_hub_exact: bool = False
     protect_hub_fuzzy: bool = True
     forbid_rare_fuzzy: bool = True
     support_discount: bool = True
+    rare_gate_mode: str = "support"
+    rare_min_dist: int = 2
+    rare_min_route_hits: int = 2
+    rare_min_base_hits: int = 2
+    confidence_discount: int = 1
+    confidence_max_dist: int = 1
+    confidence_min_route_hits: int = 2
+    confidence_min_base_hits: int = 2
+    confidence_min_cos_margin: float = 0.02
 
 
 @dataclass
@@ -166,7 +175,14 @@ class ReuseRiskGate:
         self.scores = scores
         self.config = config or RiskGateConfig()
 
-    def evaluate(self, node_idx, hamming_dist, route_hit_count=1):
+    def evaluate(
+        self,
+        node_idx,
+        hamming_dist,
+        route_hit_count=1,
+        base_route_hit_count=1,
+        cos_margin=None,
+    ):
         dist = int(hamming_dist)
         sensitivity = int(self.scores["sensitivity_q"][node_idx])
         propagation = int(self.scores["propagation_q"][node_idx])
@@ -178,6 +194,14 @@ class ReuseRiskGate:
             route_hit_count=route_hit_count,
             support_discount=self.config.support_discount,
         )
+        confidence_discount = self._confidence_discount(
+            dist=dist,
+            route_hit_count=route_hit_count,
+            base_route_hit_count=base_route_hit_count,
+            cos_margin=cos_margin,
+        )
+        if confidence_discount > 0:
+            error = max(1, error - confidence_discount)
         risk = sensitivity * error
 
         result = {
@@ -191,6 +215,8 @@ class ReuseRiskGate:
             "low_unique": low_unique,
             "rarity": rarity,
             "route_hit_count": int(route_hit_count),
+            "base_route_hit_count": int(base_route_hit_count),
+            "confidence_discount": int(confidence_discount),
         }
         if not self.config.enabled:
             return result
@@ -206,10 +232,11 @@ class ReuseRiskGate:
             result["reason"] = "hub_protect"
             return result
 
-        if (
-            self.config.forbid_rare_fuzzy
-            and low_unique >= self.config.rare_threshold
-            and dist > 0
+        if self._rare_gate_rejects(
+            low_unique=low_unique,
+            dist=dist,
+            route_hit_count=route_hit_count,
+            base_route_hit_count=base_route_hit_count,
         ):
             result["allow"] = False
             result["reason"] = "rare_leaf"
@@ -221,6 +248,43 @@ class ReuseRiskGate:
             return result
 
         return result
+
+    def _confidence_discount(self, dist, route_hit_count, base_route_hit_count, cos_margin):
+        discount = max(0, int(self.config.confidence_discount))
+        if discount <= 0:
+            return 0
+        if int(dist) > int(self.config.confidence_max_dist):
+            return 0
+
+        route_supported = int(route_hit_count) >= int(self.config.confidence_min_route_hits)
+        base_supported = int(base_route_hit_count) >= int(self.config.confidence_min_base_hits)
+        cos_supported = (
+            cos_margin is not None
+            and float(cos_margin) >= float(self.config.confidence_min_cos_margin)
+        )
+        if route_supported or base_supported or cos_supported:
+            return discount
+        return 0
+
+    def _rare_gate_rejects(self, low_unique, dist, route_hit_count, base_route_hit_count):
+        if not self.config.forbid_rare_fuzzy:
+            return False
+        if int(low_unique) < int(self.config.rare_threshold) or int(dist) <= 0:
+            return False
+
+        mode = str(self.config.rare_gate_mode).lower()
+        if mode == "risk":
+            return False
+        if mode == "hard":
+            return True
+        if mode != "support":
+            raise ValueError(f"Unknown rare_gate_mode={self.config.rare_gate_mode}")
+
+        if int(dist) < int(self.config.rare_min_dist):
+            return False
+        route_supported = int(route_hit_count) >= int(self.config.rare_min_route_hits)
+        base_supported = int(base_route_hit_count) >= int(self.config.rare_min_base_hits)
+        return not (route_supported or base_supported)
 
 
 class QuantExecutionPolicy:

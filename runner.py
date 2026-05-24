@@ -16,15 +16,11 @@ from .internal_split_calibration import (
 from .models import GNN_LLM_Model
 from .projections import fit_multihead_hash_projection
 from .real_quant import (
-    augment_quant_vulnerability_scores,
-    augment_w4a4_safe_scores,
     assemble_real_quant_embeddings,
     build_real_quant_scores,
-    build_calibration_error_proxy_scores,
     compute_real_quant_errors,
-    default_pool_path,
-    load_tensor_pool,
     load_real_quant_pools,
+    regenerate_real_quant_pools,
     select_real_quant_policy_actions,
     summarize_real_quant_policy,
 )
@@ -190,28 +186,6 @@ def train_baseline_model(data, args, device):
         base_acc = (pred[data.test_mask] == data.y[data.test_mask]).sum().item() / data.test_mask.sum().item()
 
     return model, float(base_acc), baseline_embs.detach(), baseline_logits.detach()
-
-
-def maybe_apply_reuse_embedding_pool(ds_key, data, args, device, log_important):
-    model_name = getattr(args, "reuse_embedding_model_name", None)
-    tag = getattr(args, "reuse_embedding_tag", None)
-    path = getattr(args, "reuse_embedding_path", None)
-    if not path and not model_name:
-        return None
-    if path is None:
-        if not tag:
-            tag = "FP16"
-        path = default_pool_path(ds_key, model_name, tag)
-
-    pool = load_tensor_pool(path, device)
-    if pool.size(0) != int(data.num_nodes):
-        raise ValueError(
-            f"Reuse embedding pool node count must match data.num_nodes={int(data.num_nodes)}, "
-            f"got {pool.size(0)} from {path}"
-        )
-    data.x = pool
-    log_important(f"[ReuseEmbPool] data.x <- {path} | shape={tuple(pool.shape)}")
-    return path
 
 
 def build_route_bundle(verify_features, data, oracle_embs, oracle_logits, args, log_important, device):
@@ -442,6 +416,15 @@ def build_controller(
         score_protect_hub_fuzzy=not args.allow_hub_fuzzy,
         score_forbid_rare_fuzzy=not args.allow_rare_fuzzy,
         score_support_discount=not args.disable_score_support_discount,
+        score_rare_gate_mode=args.score_rare_gate_mode,
+        score_rare_min_dist=args.score_rare_min_dist,
+        score_rare_min_route_hits=args.score_rare_min_route_hits,
+        score_rare_min_base_hits=args.score_rare_min_base_hits,
+        score_pair_confidence_discount=args.score_pair_confidence_discount,
+        score_pair_confidence_max_dist=args.score_pair_confidence_max_dist,
+        score_pair_confidence_min_route_hits=args.score_pair_confidence_min_route_hits,
+        score_pair_confidence_min_base_hits=args.score_pair_confidence_min_base_hits,
+        score_pair_confidence_min_cos_margin=args.score_pair_confidence_min_cos_margin,
         score_rarity_bits=args.score_rarity_bits,
         score_rarity_seed=args.score_rarity_seed,
         score_propagation_weight=args.score_propagation_weight,
@@ -526,6 +509,79 @@ def evaluate_gnn_embeddings(model, data, node_embs):
     return float(acc)
 
 
+def summarize_reuse_real_quant_execution(actions, hit_mask, errors, fp_embs, final_embs):
+    total = max(1, int(actions.numel()))
+    hit_mask = hit_mask.to(dtype=torch.bool, device=actions.device)
+    miss_mask = ~hit_mask
+
+    int4_mask = miss_mask & (actions == 4)
+    int8_mask = miss_mask & (actions == 8)
+    fp_mask = miss_mask & (actions == 16)
+
+    selected_err = torch.zeros(total, dtype=torch.float32, device=actions.device)
+    selected_err[int4_mask] = errors["int4_err"][int4_mask]
+    selected_err[int8_mask] = errors["int8_err"][int8_mask]
+    miss_count = max(1, int(miss_mask.sum().item()))
+
+    final_err = 1.0 - F.cosine_similarity(fp_embs, final_embs, dim=1)
+    final_err = final_err.clamp(min=0.0)
+
+    int4_rate = float(int4_mask.float().mean().item())
+    int8_rate = float(int8_mask.float().mean().item())
+    fp_rate = float(fp_mask.float().mean().item())
+    reuse_rate = float(hit_mask.float().mean().item())
+    cost = fp_rate + 0.50 * int8_rate + 0.25 * int4_rate
+
+    return {
+        "reuse_num": int(hit_mask.sum().item()),
+        "reuse_den": total,
+        "reuse_rate": reuse_rate,
+        "int4_num": int(int4_mask.sum().item()),
+        "int8_num": int(int8_mask.sum().item()),
+        "fp_num": int(fp_mask.sum().item()),
+        "int4_rate": int4_rate,
+        "int8_rate": int8_rate,
+        "fp_rate": fp_rate,
+        "cost": float(cost),
+        "miss_avg_selected_error": float(selected_err[miss_mask].sum().item() / miss_count),
+        "final_avg_error": float(final_err.mean().item()),
+    }
+
+
+def evaluate_with_controller_real_quant(
+    model,
+    data,
+    controller,
+    route_bundle,
+    verify_features,
+    selected_embs,
+    actions,
+    errors,
+    fp_embs,
+):
+    reconstructed_embs, hits = controller.query_full_batch(
+        route_bundle["hash_route_features"],
+        verify_features,
+        selected_embs,
+    )
+
+    acc = evaluate_gnn_embeddings(model, data, reconstructed_embs)
+    exec_stats = summarize_reuse_real_quant_execution(
+        actions,
+        hits,
+        errors,
+        fp_embs,
+        reconstructed_embs,
+    )
+    return {
+        "acc": float(acc),
+        "drop": None,
+        "hits": hits,
+        "stats": controller.stats,
+        **exec_stats,
+    }
+
+
 def run_internal_split_calibration_step(
     ds_key,
     data,
@@ -576,19 +632,11 @@ def run_internal_split_calibration_step(
 
 
 def build_real_quant_policy_configs(args):
-    if args.real_quant_policy_suite == "fixed_aggressive_budget":
-        return [
-            ("AllW4A8", "all_int8"),
-            ("AllW4A4", "all_int4"),
-            ("RandomBudget", "random_int8_budget"),
-            ("DegreeBudget", "degree_int8_budget"),
-            ("TSERBudget", "tser_int8_budget"),
-            ("GraphHopSafeBudget", "w4a4_safe_budget"),
-        ]
-
     if args.real_quant_policy_suite == "w4a8_budget":
         int8_tag = str(args.real_quant_int8_tag)
         int4_tag = str(args.real_quant_int4_tag)
+        # Keep the default table deployable: no route may use per-node
+        # FP-vs-quantized embedding error as an input signal.
         configs = [
             ("AllFP", "all_fp"),
             (f"Uniform{int8_tag}", "all_int8"),
@@ -596,17 +644,14 @@ def build_real_quant_policy_configs(args):
             (f"RandomTopK_{int8_tag}", "random_int8_budget"),
             (f"DegreeTopK_{int8_tag}", "degree_int8_budget"),
             (f"TSERTopK_{int8_tag}", "tser_int8_budget"),
-            (f"ErrorTopK_{int8_tag}", "error_int8_budget"),
-            (f"DegreeErrorTopK_{int8_tag}", "degree_error_int8_budget"),
-            (f"TSERQTopK_{int8_tag}", "tserq_int8_budget"),
-            (f"CalibErrorTopK_{int8_tag}", "calib_error_int8_budget"),
-            (f"CalibDegreeErrorTopK_{int8_tag}", "calib_degree_error_int8_budget"),
-            (f"CalibTSERQTopK_{int8_tag}", "calib_tserq_int8_budget"),
         ]
         if bool(args.internal_split_calibration):
             configs.append((f"InternalSplitCalib_{int8_tag}", "internal_split"))
         return configs
 
+    # The standard suite is also kept deployable by default. Error-aware and
+    # QuantTSER variants remain implemented as research/debug helpers, but they
+    # are intentionally excluded from the main printed policy table.
     configs = [
         ("AllFP", "all_fp"),
         ("AllINT8", "all_int8"),
@@ -702,15 +747,6 @@ def run_real_quant_ablation(args):
             log_important(f"{'=' * 72}")
 
             seeds = [int(args.seed) + run_idx for run_idx in range(args.runs)]
-            error_routing_policies = {
-                "error_int8_budget",
-                "degree_error_int8_budget",
-                "tserq_int8_budget",
-                "calib_error_int8_budget",
-                "calib_degree_error_int8_budget",
-                "calib_tserq_int8_budget",
-            }
-            needs_quant_vulnerability = any(policy in error_routing_policies for _name, policy in configs)
             for run_idx, seed in enumerate(seeds):
                 log_important(f"\n--- Run {run_idx + 1}/{args.runs} (Seed {seed}) ---")
                 run_args = make_run_args(args, seed)
@@ -741,16 +777,8 @@ def run_real_quant_ablation(args):
                     f"| int8_ratio={run_args.real_quant_int8_ratio:.2f} "
                     f"| tail={run_args.real_quant_tail_precision}"
                 )
-                if run_args.real_quant_policy_suite == "fixed_aggressive_budget":
-                    aggressive_ratio = max(0.0, min(1.0, 1.0 - float(run_args.real_quant_int8_ratio)))
-                    log_important(
-                        "[FixedBudget] "
-                        f"safe={run_args.real_quant_int8_tag}:{run_args.real_quant_int8_ratio:.1%} "
-                        f"| aggressive={run_args.real_quant_int4_tag}:{aggressive_ratio:.1%} "
-                        "| FP=0.0%"
-                    )
 
-                model, base_acc, fp_embs, baseline_logits = train_baseline_model(data, run_args, device)
+                model, base_acc, fp_embs, _oracle_logits = train_baseline_model(data, run_args, device)
                 results["baseline"].append(base_acc)
                 log_important(f"[Baseline:AllFP] Acc: {base_acc:.4f}")
 
@@ -765,18 +793,6 @@ def run_real_quant_ablation(args):
                     errors = compute_real_quant_errors(fp_embs, int8_embs, int4_embs, run_args)
 
                 scores = build_real_quant_scores(verify_features, data, run_args, device)
-                scores = augment_w4a4_safe_scores(scores, run_args)
-                calib_proxy_report = {"enabled": False}
-                if needs_quant_vulnerability:
-                    scores = augment_quant_vulnerability_scores(
-                        scores,
-                        errors,
-                        data,
-                        baseline_logits,
-                        run_args,
-                        device,
-                    )
-                    calib_proxy_report = build_calibration_error_proxy_scores(scores, errors, run_args, device)
                 log_important(
                     "[RealQuantScore] "
                     f"sensitivity min={scores['sensitivity_q'].float().min().item():.1f}, "
@@ -784,42 +800,12 @@ def run_real_quant_ablation(args):
                     f"max={scores['sensitivity_q'].float().max().item():.1f}"
                 )
                 log_important(
-                    "[W4A4SafeScore] "
-                    f"density mean={scores['bucket_density_q'].float().mean().item():.1f} "
-                    f"| agreement mean={scores['hash_agreement_proxy_q'].float().mean().item():.1f} "
-                    f"| consistency mean={scores['context_consistency_q'].float().mean().item():.1f} "
-                    f"| low_prop mean={scores['low_propagation_q'].float().mean().item():.1f} "
-                    f"| non_unique mean={scores['non_unique_q'].float().mean().item():.1f} "
-                    f"| safe mean={scores['w4a4_safe_q'].float().mean().item():.1f}"
+                    "[RealQuantError] "
+                    f"INT8 mean={errors['int8_err'].mean().item():.5f}, "
+                    f"max={errors['int8_err'].max().item():.5f} | "
+                    f"INT4 mean={errors['int4_err'].mean().item():.5f}, "
+                    f"max={errors['int4_err'].max().item():.5f}"
                 )
-                if needs_quant_vulnerability:
-                    log_important(
-                        "[TSER-Q] "
-                        f"impact_q mean={scores['graph_impact_q'].float().mean().item():.1f} "
-                        f"| margin_risk_q mean={scores['margin_risk_q'].float().mean().item():.1f} "
-                        f"| quant_sens mean={scores['quant_sensitivity_q'].float().mean().item():.1f} "
-                        f"| gain mean={scores['tserq_protect_gain_q'].float().mean().item():.1f}"
-                    )
-                if calib_proxy_report.get("enabled", False):
-                    log_important(
-                        "[CalibProxy] "
-                        f"strategy={run_args.calib_proxy_strategy} "
-                        f"| size={calib_proxy_report['calib_size']} "
-                        f"| bins={calib_proxy_report['bins']} "
-                        f"| covered={calib_proxy_report['covered_buckets']}/{calib_proxy_report['num_buckets']} "
-                        f"| I4_MAEq={calib_proxy_report['int4_mae_q']:.2f} "
-                        f"| I8_MAEq={calib_proxy_report['int8_mae_q']:.2f} "
-                        f"| calib_I4q={calib_proxy_report['int4_calib_mean_q']:.2f} "
-                        f"| calib_I8q={calib_proxy_report['int8_calib_mean_q']:.2f}"
-                    )
-                if needs_quant_vulnerability:
-                    log_important(
-                        "[RealQuantError] "
-                        f"INT8 mean={errors['int8_err'].mean().item():.5f}, "
-                        f"max={errors['int8_err'].max().item():.5f} | "
-                        f"INT4 mean={errors['int4_err'].mean().item():.5f}, "
-                        f"max={errors['int4_err'].max().item():.5f}"
-                    )
 
                 for name, policy in configs:
                     actions = select_real_quant_policy_actions(policy, scores, errors, run_args)
@@ -837,47 +823,27 @@ def run_real_quant_ablation(args):
                     results[name]["avg_err"].append(stats["avg_selected_error"])
                     results[name]["cost"].append(rel_cost)
 
-                    if run_args.real_quant_policy_suite == "fixed_aggressive_budget":
-                        log_important(
-                            f"[{name}] {run_args.real_quant_int4_tag}={stats['int4_rate']:.1%} "
-                            f"| {run_args.real_quant_int8_tag}={stats['int8_rate']:.1%} "
-                            f"| Cost={rel_cost:.3f} | Acc={acc:.4f} | Drop={drop:.2%} "
-                            f"| AvgErr={stats['avg_selected_error']:.5f}"
-                        )
-                    else:
-                        log_important(
-                            f"[{name}] {run_args.real_quant_int4_tag}={stats['int4_rate']:.1%} "
-                            f"| {run_args.real_quant_int8_tag}={stats['int8_rate']:.1%} "
-                            f"| FP={stats['fp_rate']:.1%} | Cost={rel_cost:.3f} "
-                            f"| Acc={acc:.4f} | Drop={drop:.2%} "
-                            f"| AvgErr={stats['avg_selected_error']:.5f}"
-                        )
+                    log_important(
+                        f"[{name}] {run_args.real_quant_int4_tag}={stats['int4_rate']:.1%} "
+                        f"| {run_args.real_quant_int8_tag}={stats['int8_rate']:.1%} "
+                        f"| FP={stats['fp_rate']:.1%} | Cost={rel_cost:.3f} "
+                        f"| Acc={acc:.4f} | Drop={drop:.2%} "
+                        f"| AvgErr={stats['avg_selected_error']:.5f}"
+                    )
 
             log_important(f"\n{'=' * 72}")
             log_important(f"FINAL REAL QUANT SUMMARY ({args.runs} Runs) | {ds_key.upper()}")
             log_important(f"{'=' * 72}")
             base_mean = float(np.mean(results["baseline"]))
             log_important(f"Baseline Acc: {base_mean:.4f}")
-            fixed_budget = args.real_quant_policy_suite == "fixed_aggressive_budget"
-            if fixed_budget:
-                int4_header = "W4A4 %"
-                int8_header = "W4A8 %"
-            else:
-                int4_header = f"{args.real_quant_int4_tag} %"
-                int8_header = f"{args.real_quant_int8_tag} %"
-            sep_width = 108 if fixed_budget else 120
-            log_important("-" * sep_width)
-            if fixed_budget:
-                log_important(
-                    f"{'Config':<26} | {int4_header:<8} | {int8_header:<8} | "
-                    f"{'Cost':<8} | {'Acc':<10} | {'Drop %':<10} | {'AvgErr':<10}"
-                )
-            else:
-                log_important(
-                    f"{'Config':<26} | {int4_header:<8} | {int8_header:<8} | {'FP %':<8} | "
-                    f"{'Cost':<8} | {'Acc':<10} | {'Drop %':<10} | {'AvgErr':<10}"
-                )
-            log_important("-" * sep_width)
+            int4_header = f"{args.real_quant_int4_tag} %"
+            int8_header = f"{args.real_quant_int8_tag} %"
+            log_important("-" * 120)
+            log_important(
+                f"{'Config':<26} | {int4_header:<8} | {int8_header:<8} | {'FP %':<8} | "
+                f"{'Cost':<8} | {'Acc':<10} | {'Drop %':<10} | {'AvgErr':<10}"
+            )
+            log_important("-" * 120)
             for name, _policy in configs:
                 i4 = float(np.mean(results[name]["int4"]))
                 i8 = float(np.mean(results[name]["int8"]))
@@ -886,16 +852,273 @@ def run_real_quant_ablation(args):
                 acc = float(np.mean(results[name]["acc"]))
                 drop = float(np.mean(results[name]["drop"]))
                 avg_err = float(np.mean(results[name]["avg_err"]))
-                if fixed_budget:
-                    log_important(
-                        f"{name:<26} | {i4:<8.1%} | {i8:<8.1%} | "
-                        f"{cost:<8.3f} | {acc:<10.4f} | {drop:<10.2%} | {avg_err:<10.5f}"
-                    )
+                log_important(
+                    f"{name:<26} | {i4:<8.1%} | {i8:<8.1%} | {fp:<8.1%} | "
+                    f"{cost:<8.3f} | {acc:<10.4f} | {drop:<10.2%} | {avg_err:<10.5f}"
+                )
+            log_important(f"{'=' * 72}\n")
+
+
+def run_reuse_real_quant_experiment(args):
+    target_datasets = args.datasets if args.datasets else ["cora"]
+    log_dir = os.path.join("output", "graph_simhash")
+    os.makedirs(log_dir, exist_ok=True)
+    configs = build_real_quant_policy_configs(args)
+
+    for ds_key in target_datasets:
+        if ds_key not in DATASET_CONFIGS:
+            continue
+
+        dataset_log_dir = os.path.join(log_dir, ds_key)
+        os.makedirs(dataset_log_dir, exist_ok=True)
+        log_path = build_log_path(dataset_log_dir, ds_key, args)
+        results = {
+            name: {
+                "reuse": [],
+                "reuse_num": [],
+                "reuse_den": [],
+                "int4": [],
+                "int8": [],
+                "fp": [],
+                "cost": [],
+                "acc": [],
+                "drop": [],
+                "final_err": [],
+                "miss_err": [],
+            }
+            for name, _policy in configs
+        }
+        results["baseline"] = []
+
+        with open(log_path, "w", encoding="utf-8") as summary_file:
+            def log_important(msg):
+                print(msg)
+                summary_file.write(msg + "\n")
+                summary_file.flush()
+
+            log_important(f"\n{'=' * 72}")
+            log_important(f"Running Hash Reuse + Real Quant Feature Pools on {ds_key.upper()}")
+            log_important(f"{'=' * 72}")
+            log_important(
+                "[JointPolicy] Reuse hits are free cache reads; "
+                "real-quant budgets are allocated only over hash-miss nodes."
+            )
+            regenerate_real_quant_pools(ds_key, args, log_important)
+
+            seeds = [int(args.seed) + run_idx for run_idx in range(args.runs)]
+            for run_idx, seed in enumerate(seeds):
+                log_important(f"\n--- Run {run_idx + 1}/{args.runs} (Seed {seed}) ---")
+                run_args = make_run_args(args, seed)
+                run_args.enable_quant_policy = False
+                _conf, data, verify_features, device = load_run_state(ds_key, run_args, seed)
+                log_important(
+                    f"[Seed] run={int(seed)} | controller={int(run_args.controller_seed)} "
+                    f"| hash_head={int(run_args.hash_head_seed)} "
+                    f"| topology_sketch={int(run_args.topology_sketch_seed)}"
+                )
+
+                internal_bundle, internal_report = run_internal_split_calibration_step(
+                    ds_key=ds_key,
+                    data=data,
+                    verify_features=verify_features,
+                    args=run_args,
+                    device=device,
+                    dataset_log_dir=dataset_log_dir,
+                    log_important=log_important,
+                )
+                if internal_bundle is not None:
+                    run_args._internal_split_calibration_bundle = internal_bundle
+                    run_args._internal_split_calibration_report = internal_report
+
+                pools = load_real_quant_pools(ds_key, run_args, data, device)
+                log_important(
+                    "[RealQuantPools] "
+                    f"FP={pools.fp_path} | INT8={pools.int8_path} | INT4={pools.int4_path}"
+                )
+                log_important(
+                    f"[RealQuantPools] shape={tuple(pools.fp.shape)} "
+                    f"| error_space={run_args.real_quant_error_space} "
+                    f"| error_norm={run_args.real_quant_error_norm} "
+                    f"| miss_fp_ratio={run_args.real_quant_fp_ratio:.2f} "
+                    f"| miss_int8_ratio={run_args.real_quant_int8_ratio:.2f} "
+                    f"| tail={run_args.real_quant_tail_precision}"
+                )
+
+                data.x = pools.fp
+                model, base_acc, fp_embs, oracle_logits = train_baseline_model(data, run_args, device)
+                results["baseline"].append(base_acc)
+                log_important(f"[Baseline:AllFP] Acc: {base_acc:.4f}")
+
+                model.eval()
+                with torch.no_grad():
+                    int8_embs = model.encoder(pools.int8)
+                    int4_embs = model.encoder(pools.int4)
+
+                if run_args.real_quant_error_space == "raw":
+                    errors = compute_real_quant_errors(pools.fp, pools.int8, pools.int4, run_args)
                 else:
-                    log_important(
-                        f"{name:<26} | {i4:<8.1%} | {i8:<8.1%} | {fp:<8.1%} | "
-                        f"{cost:<8.3f} | {acc:<10.4f} | {drop:<10.2%} | {avg_err:<10.5f}"
+                    errors = compute_real_quant_errors(fp_embs, int8_embs, int4_embs, run_args)
+
+                scores = build_real_quant_scores(verify_features, data, run_args, device)
+                log_important(
+                    "[RealQuantScore] "
+                    f"sensitivity min={scores['sensitivity_q'].float().min().item():.1f}, "
+                    f"mean={scores['sensitivity_q'].float().mean().item():.1f}, "
+                    f"max={scores['sensitivity_q'].float().max().item():.1f}"
+                )
+                log_important(
+                    "[RealQuantError] "
+                    f"INT8 mean={errors['int8_err'].mean().item():.5f}, "
+                    f"max={errors['int8_err'].max().item():.5f} | "
+                    f"INT4 mean={errors['int4_err'].mean().item():.5f}, "
+                    f"max={errors['int4_err'].max().item():.5f}"
+                )
+
+                route_bundle = build_route_bundle(
+                    verify_features,
+                    data,
+                    fp_embs,
+                    oracle_logits,
+                    run_args,
+                    log_important,
+                    device,
+                )
+
+                trace_controller = build_controller(
+                    data,
+                    verify_features,
+                    route_bundle,
+                    {"name": "Trace", "overrides": {}},
+                    run_args,
+                    device,
+                )
+                _trace_embs, trace_hits = trace_controller.query_full_batch(
+                    route_bundle["hash_route_features"],
+                    verify_features,
+                    fp_embs,
+                )
+                trace_stats = trace_controller.stats
+                trace_reuse = trace_stats["reuse"] / max(1, trace_stats["total_queries"])
+                log_important(
+                    f"[ReuseTrace] Reuse={trace_reuse:.1%} "
+                    f"| miss={(~trace_hits).float().mean().item():.1%} "
+                    f"| reuse n/d={trace_stats['reuse']}/{trace_stats['reuse_denominator']}"
+                )
+
+                miss_mask = ~trace_hits
+                for name, policy in configs:
+                    actions = select_real_quant_policy_actions(
+                        policy,
+                        scores,
+                        errors,
+                        run_args,
+                        eligible_mask=miss_mask,
                     )
+                    selected_embs = assemble_real_quant_embeddings(actions, fp_embs, int8_embs, int4_embs)
+                    controller = build_controller(
+                        data,
+                        verify_features,
+                        route_bundle,
+                        {"name": name, "overrides": {}},
+                        run_args,
+                        device,
+                    )
+                    result = evaluate_with_controller_real_quant(
+                        model,
+                        data,
+                        controller,
+                        route_bundle,
+                        verify_features,
+                        selected_embs,
+                        actions,
+                        errors,
+                        fp_embs,
+                    )
+                    result["drop"] = base_acc - result["acc"]
+                    hit_mismatch = int((result["hits"] != trace_hits).sum().item())
+                    if hit_mismatch > 0:
+                        log_important(
+                            f"[{name}] Warning: reuse trace changed for {hit_mismatch} nodes; "
+                            "using the policy run's actual hit mask for reporting."
+                        )
+
+                    results[name]["reuse"].append(result["reuse_rate"])
+                    results[name]["reuse_num"].append(result["reuse_num"])
+                    results[name]["reuse_den"].append(result["reuse_den"])
+                    results[name]["int4"].append(result["int4_rate"])
+                    results[name]["int8"].append(result["int8_rate"])
+                    results[name]["fp"].append(result["fp_rate"])
+                    results[name]["cost"].append(result["cost"])
+                    results[name]["acc"].append(result["acc"])
+                    results[name]["drop"].append(result["drop"])
+                    results[name]["final_err"].append(result["final_avg_error"])
+                    results[name]["miss_err"].append(result["miss_avg_selected_error"])
+
+                    stats = result["stats"]
+                    log_important(
+                        f"[{name}] Reuse={result['reuse_rate']:.1%} "
+                        f"| {run_args.real_quant_int4_tag}={result['int4_rate']:.1%} "
+                        f"| {run_args.real_quant_int8_tag}={result['int8_rate']:.1%} "
+                        f"| FP={result['fp_rate']:.1%} "
+                        f"| Cost={result['cost']:.3f} "
+                        f"| Acc={result['acc']:.4f} "
+                        f"| Drop={result['drop']:.2%} "
+                        f"| FinalErr={result['final_avg_error']:.5f} "
+                        f"| MissErr={result['miss_avg_selected_error']:.5f}"
+                    )
+                    log_important(
+                        f"  ReuseDetail: numerator={stats['reuse']} "
+                        f"(exact={stats['exact_reuse']}, fuzzy={stats['fuzzy_reuse']}) "
+                        f"/ denominator={stats['reuse_denominator']} "
+                        f"| computed={stats['computed']} "
+                        f"| exact_guarded={stats['exact_guarded']} "
+                        f"| exact_guard_reject={stats['exact_guard_reject']} "
+                        f"| struct_checked={stats['structure_checked']} "
+                        f"| struct_reject={stats['structure_reject']} "
+                        f"| score_checked={stats['score_checked']} "
+                        f"| score_reject={stats['score_reject']} "
+                        f"(hub={stats['score_reject_hub_protect']}, "
+                        f"rare={stats['score_reject_rare_leaf']}, "
+                        f"risk={stats['score_reject_risk']}) "
+                        f"| avg_score_risk={stats['avg_score_risk']:.1f} "
+                        f"| checks: reuse=exact+fuzzy {stats['reuse_consistency_ok']}, "
+                        f"reuse+computed=total {stats['query_consistency_ok']}"
+                    )
+
+            log_important(f"\n{'=' * 72}")
+            log_important(f"FINAL REUSE + REAL QUANT SUMMARY ({args.runs} Runs) | {ds_key.upper()}")
+            log_important(f"{'=' * 72}")
+            base_mean = float(np.mean(results["baseline"]))
+            log_important(f"Baseline Acc: {base_mean:.4f}")
+            int4_header = f"{args.real_quant_int4_tag} %"
+            int8_header = f"{args.real_quant_int8_tag} %"
+            log_important("-" * 140)
+            log_important(
+                f"{'Config':<26} | {'Reuse %':<9} | {int4_header:<8} | {int8_header:<8} | "
+                f"{'FP %':<8} | {'Cost':<8} | {'Acc':<10} | {'Drop %':<10} | "
+                f"{'FinalErr':<10} | {'Reuse n/d':<15}"
+            )
+            log_important("-" * 140)
+            for name, _policy in configs:
+                reuse = float(np.mean(results[name]["reuse"]))
+                reuse_num = float(np.mean(results[name]["reuse_num"]))
+                reuse_den = float(np.mean(results[name]["reuse_den"]))
+                int4 = float(np.mean(results[name]["int4"]))
+                int8 = float(np.mean(results[name]["int8"]))
+                fp = float(np.mean(results[name]["fp"]))
+                cost = float(np.mean(results[name]["cost"]))
+                acc = float(np.mean(results[name]["acc"]))
+                drop = float(np.mean(results[name]["drop"]))
+                final_err = float(np.mean(results[name]["final_err"]))
+                if args.runs > 1:
+                    reuse_frac = f"{reuse_num:.1f}/{reuse_den:.1f}"
+                else:
+                    reuse_frac = f"{int(reuse_num)}/{int(reuse_den)}"
+                log_important(
+                    f"{name:<26} | {reuse:<9.1%} | {int4:<8.1%} | {int8:<8.1%} | "
+                    f"{fp:<8.1%} | {cost:<8.3f} | {acc:<10.4f} | {drop:<10.2%} | "
+                    f"{final_err:<10.5f} | {reuse_frac:<15}"
+                )
             log_important(f"{'=' * 72}\n")
 
 
@@ -905,6 +1128,8 @@ def run_adaptive_simulation(args):
 
     if args.experiment_suite == "real_quant_ablation":
         return run_real_quant_ablation(args)
+    if args.experiment_suite == "reuse_real_quant":
+        return run_reuse_real_quant_experiment(args)
 
     target_datasets = args.datasets if args.datasets else ["cora"]
     log_dir = os.path.join("output", "graph_simhash")
@@ -969,7 +1194,6 @@ def run_adaptive_simulation(args):
                     dataset_log_dir=dataset_log_dir,
                     log_important=log_important,
                 )
-                maybe_apply_reuse_embedding_pool(ds_key, data, run_args, device, log_important)
                 model, base_acc, oracle_embs, oracle_logits = train_baseline_model(data, run_args, device)
                 results_collector["baseline"].append(base_acc)
                 log_important(f"[Baseline] Acc: {base_acc:.4f}")

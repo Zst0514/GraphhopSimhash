@@ -20,8 +20,9 @@ def build_parser():
             "score_ablation",
             "quant_ablation",
             "real_quant_ablation",
+            "reuse_real_quant",
         ],
-        help="Run one config, score-gate ablations, quantization ablations, or real-quantization ablations.",
+        help="Run one config, score-gate ablations, quantization ablations, real-quantization ablations, or joint reuse+real-quantization.",
     )
     parser.add_argument(
         "--seed",
@@ -221,7 +222,7 @@ def build_parser():
         help="Disable degree/context/rare-leaf risk gate after retrieval.",
     )
     parser.set_defaults(disable_score_gate=True)
-    parser.add_argument("--score_reuse_threshold", type=int, default=120)
+    parser.add_argument("--score_reuse_threshold", type=int, default=45)
     parser.add_argument("--score_hub_threshold", type=int, default=12)
     parser.add_argument("--score_rare_threshold", type=int, default=10)
     parser.add_argument(
@@ -244,11 +245,26 @@ def build_parser():
         action="store_true",
         help="Do not reduce approximation error when a candidate is supported by multiple hash heads.",
     )
+    parser.add_argument(
+        "--score_rare_gate_mode",
+        type=str,
+        default="support",
+        choices=["hard", "support", "risk"],
+        help="How to handle low-degree rare fuzzy candidates: old hard block, support-aware block, or risk-only.",
+    )
+    parser.add_argument("--score_rare_min_dist", type=int, default=2)
+    parser.add_argument("--score_rare_min_route_hits", type=int, default=2)
+    parser.add_argument("--score_rare_min_base_hits", type=int, default=2)
+    parser.add_argument("--score_pair_confidence_discount", type=int, default=1)
+    parser.add_argument("--score_pair_confidence_max_dist", type=int, default=1)
+    parser.add_argument("--score_pair_confidence_min_route_hits", type=int, default=2)
+    parser.add_argument("--score_pair_confidence_min_base_hits", type=int, default=2)
+    parser.add_argument("--score_pair_confidence_min_cos_margin", type=float, default=0.02)
     parser.add_argument("--score_rarity_bits", type=int, default=16)
     parser.add_argument("--score_rarity_seed", type=int, default=98765)
     parser.add_argument("--score_propagation_weight", type=int, default=3)
-    parser.add_argument("--score_graph_context_weight", type=int, default=1)
-    parser.add_argument("--score_low_unique_weight", type=int, default=1)
+    parser.add_argument("--score_graph_context_weight", type=int, default=2)
+    parser.add_argument("--score_low_unique_weight", type=int, default=2)
     parser.add_argument(
         "--enable_quant_policy",
         action="store_true",
@@ -260,6 +276,22 @@ def build_parser():
     parser.add_argument("--quant_int8_error", type=int, default=1)
     parser.add_argument("--quant_int4_bits", type=int, default=4)
     parser.add_argument("--quant_int8_bits", type=int, default=8)
+    parser.add_argument("--quant_tser_propagation_weight", type=float, default=4.0)
+    parser.add_argument("--quant_tser_graph_context_weight", type=float, default=1.0)
+    parser.add_argument("--quant_tser_low_unique_weight", type=float, default=0.0)
+    parser.add_argument(
+        "--quant_error_bias",
+        type=float,
+        default=1.0,
+        help="Bias added to quantized INT4 error for error-aware TopK ranking.",
+    )
+    parser.add_argument(
+        "--quant_error_rank_source",
+        type=str,
+        default="continuous",
+        choices=["continuous", "quantized"],
+        help="Error signal used by DegreeErrorTopK/TSERErrorTopK ranking.",
+    )
     parser.add_argument(
         "--internal_split_calibration",
         "--enable_internal_split_calibration",
@@ -330,12 +362,8 @@ def build_parser():
         "--real_quant_policy_suite",
         type=str,
         default="standard",
-        choices=["standard", "w4a8_budget", "fixed_aggressive_budget"],
-        help=(
-            "Policy set for real-quant ablation. fixed_aggressive_budget enforces "
-            "FP=0 with a fixed safe/aggressive ratio; w4a8_budget matches older "
-            "W4A4/W4A8/FP table-style comparisons."
-        ),
+        choices=["standard", "w4a8_budget"],
+        help="Policy set for real-quant ablation. w4a8_budget matches W4A4/W4A8/FP table-style comparisons.",
     )
     parser.add_argument(
         "--real_quant_error_space",
@@ -362,7 +390,7 @@ def build_parser():
         "--real_quant_int8_ratio",
         type=float,
         default=0.20,
-        help="Safe-path INT8/W4A8 ratio for budget policies. Tail nodes use INT4/W4A4.",
+        help="INT8 ratio for DegreeCascade/TSERCascade. Tail nodes use INT4.",
     )
     parser.add_argument(
         "--real_quant_tail_precision",
@@ -370,46 +398,6 @@ def build_parser():
         default="int4",
         choices=["int4", "int8"],
         help="Tail precision for TopK real-quant policies.",
-    )
-    parser.add_argument(
-        "--tserq_margin_norm",
-        type=float,
-        default=1.0,
-        help="FP logit margin value that maps margin risk to zero for TSER-Q.",
-    )
-    parser.add_argument("--tserq_graph_impact_weight", type=int, default=4)
-    parser.add_argument("--tserq_margin_weight", type=int, default=2)
-    parser.add_argument("--tserq_graph_context_weight", type=int, default=1)
-    parser.add_argument("--tserq_low_unique_weight", type=int, default=1)
-    parser.add_argument("--w4a4_safe_density_weight", type=int, default=2)
-    parser.add_argument("--w4a4_safe_agreement_weight", type=int, default=1)
-    parser.add_argument("--w4a4_safe_context_weight", type=int, default=2)
-    parser.add_argument("--w4a4_safe_low_propagation_weight", type=int, default=3)
-    parser.add_argument("--w4a4_safe_non_unique_weight", type=int, default=2)
-    parser.add_argument(
-        "--calib_proxy_size",
-        type=int,
-        default=256,
-        help="Number of calibration nodes used to estimate proxy quantization error for calibrated budget policies.",
-    )
-    parser.add_argument(
-        "--calib_proxy_strategy",
-        type=str,
-        default="score_stratified",
-        choices=["random", "score_stratified"],
-        help="Sampling strategy for calibrated quantization-error proxy nodes.",
-    )
-    parser.add_argument(
-        "--calib_proxy_bins",
-        type=int,
-        default=4,
-        help="Coarse bins per score dimension for the calibrated quantization-error LUT.",
-    )
-    parser.add_argument(
-        "--calib_proxy_sample_bins",
-        type=int,
-        default=8,
-        help="Number of quant-sensitivity strata for score-stratified proxy calibration sampling.",
     )
     parser.add_argument(
         "--controller_seed",
@@ -424,24 +412,6 @@ def build_parser():
     )
     parser.add_argument("--llm_name", type=str, default="ST")
     parser.add_argument("--emb_dim", type=int, default=768)
-    parser.add_argument(
-        "--reuse_embedding_model_name",
-        type=str,
-        default=None,
-        help="Optional oracle embedding model name for reuse experiments, e.g. llama2_7b.",
-    )
-    parser.add_argument(
-        "--reuse_embedding_tag",
-        type=str,
-        default="FP16",
-        help="Oracle embedding pool tag used with --reuse_embedding_model_name.",
-    )
-    parser.add_argument(
-        "--reuse_embedding_path",
-        type=str,
-        default=None,
-        help="Explicit oracle embedding pool path for reuse experiments.",
-    )
     return parser
 
 
@@ -581,6 +551,16 @@ def validate_args(parser, args):
         parser.error("--score_rare_threshold must be in [0, 15]")
     if args.score_rarity_bits <= 0:
         parser.error("--score_rarity_bits must be positive")
+    if args.score_rare_min_dist < 1:
+        parser.error("--score_rare_min_dist must be positive")
+    if args.score_rare_min_route_hits < 1 or args.score_rare_min_base_hits < 1:
+        parser.error("score rare support thresholds must be positive")
+    if args.score_pair_confidence_discount < 0:
+        parser.error("--score_pair_confidence_discount must be non-negative")
+    if args.score_pair_confidence_max_dist < 0:
+        parser.error("--score_pair_confidence_max_dist must be non-negative")
+    if args.score_pair_confidence_min_route_hits < 1 or args.score_pair_confidence_min_base_hits < 1:
+        parser.error("score pair confidence support thresholds must be positive")
     if args.score_propagation_weight < 0 or args.score_graph_context_weight < 0 or args.score_low_unique_weight < 0:
         parser.error("score weights must be non-negative")
     if args.quant_int4_threshold < 0 or args.quant_int8_threshold < 0:
@@ -591,6 +571,14 @@ def validate_args(parser, args):
         parser.error("quant fake bits must be at least 2")
     if args.quant_int4_bits > args.quant_int8_bits:
         parser.error("--quant_int4_bits should be <= --quant_int8_bits")
+    if (
+        args.quant_tser_propagation_weight < 0
+        or args.quant_tser_graph_context_weight < 0
+        or args.quant_tser_low_unique_weight < 0
+    ):
+        parser.error("quant TSER weights must be non-negative")
+    if args.quant_error_bias < 0:
+        parser.error("--quant_error_bias must be non-negative")
     if args.internal_calib_samples < 0:
         parser.error("--internal_calib_samples must be >= 0")
     if not (0.0 <= args.internal_calib_high_ratio <= 1.0):
@@ -621,29 +609,6 @@ def validate_args(parser, args):
         parser.error("--real_quant_int8_ratio must be in [0, 1]")
     if args.real_quant_fp_ratio + args.real_quant_int8_ratio > 1.0:
         parser.error("--real_quant_fp_ratio + --real_quant_int8_ratio must be <= 1")
-    if args.tserq_margin_norm <= 0:
-        parser.error("--tserq_margin_norm must be positive")
-    if (
-        args.tserq_graph_impact_weight < 0
-        or args.tserq_margin_weight < 0
-        or args.tserq_graph_context_weight < 0
-        or args.tserq_low_unique_weight < 0
-    ):
-        parser.error("TSER-Q weights must be non-negative")
-    if (
-        args.w4a4_safe_density_weight < 0
-        or args.w4a4_safe_agreement_weight < 0
-        or args.w4a4_safe_context_weight < 0
-        or args.w4a4_safe_low_propagation_weight < 0
-        or args.w4a4_safe_non_unique_weight < 0
-    ):
-        parser.error("W4A4-safe weights must be non-negative")
-    if args.calib_proxy_size < 0:
-        parser.error("--calib_proxy_size must be >= 0")
-    if args.calib_proxy_bins <= 0:
-        parser.error("--calib_proxy_bins must be positive")
-    if args.calib_proxy_sample_bins <= 0:
-        parser.error("--calib_proxy_sample_bins must be positive")
     if args.controller_seed is not None and args.controller_seed < 0:
         parser.error("--controller_seed must be >= 0")
     if args.hash_head_seed is not None and args.hash_head_seed < 0:

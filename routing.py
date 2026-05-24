@@ -242,7 +242,9 @@ def build_log_path(dataset_log_dir, ds_key, args):
     retrieval_tag = make_retrieval_tag(args)
     tau_tag = make_tau_tag(args.cosine_tau)
     config_tag = f"r{int(args.radius)}"
-    if getattr(args, "experiment_suite", None) == "real_quant_ablation":
+    if getattr(args, "experiment_suite", None) in ("real_quant_ablation", "reuse_real_quant"):
+        if getattr(args, "experiment_suite", None) == "reuse_real_quant":
+            config_tag += "_reuse"
         config_tag += (
             f"_rq{getattr(args, 'real_quant_policy_suite', 'standard')}"
             f"_{getattr(args, 'real_quant_fp_tag', 'FP')}"
@@ -255,6 +257,22 @@ def build_log_path(dataset_log_dir, ds_key, args):
                 f"_is{getattr(args, 'internal_split_priority', 'degree')}"
                 f"{float(getattr(args, 'internal_split_topk_ratio', 0.0)):.2f}".replace(".", "p")
             )
+        config_tag += (
+            f"_qts{float(getattr(args, 'quant_tser_propagation_weight', 4.0)):.1f}"
+            f"-{float(getattr(args, 'quant_tser_graph_context_weight', 1.0)):.1f}"
+            f"-{float(getattr(args, 'quant_tser_low_unique_weight', 0.0)):.1f}"
+            f"_qeb{float(getattr(args, 'quant_error_bias', 1.0)):.1f}"
+            f"_{getattr(args, 'quant_error_rank_source', 'continuous')}"
+        ).replace(".", "p")
+    if not bool(getattr(args, "disable_score_gate", True)):
+        config_tag += (
+            f"_sg{int(getattr(args, 'score_reuse_threshold', 45))}"
+            f"_{getattr(args, 'score_rare_gate_mode', 'support')}"
+            f"_rb{int(getattr(args, 'score_rarity_bits', 16))}"
+            f"_sw{int(getattr(args, 'score_propagation_weight', 3))}"
+            f"-{int(getattr(args, 'score_graph_context_weight', 2))}"
+            f"-{int(getattr(args, 'score_low_unique_weight', 2))}"
+        )
     filename = (
         f"{ds_key}_paper_R{args.radius}_bits_{args.sketch_bits}_"
         f"{hash_route_tag}_{projection_tag}_{route_weight_tag}_"
