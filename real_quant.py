@@ -82,6 +82,7 @@ def regenerate_real_quant_pools(ds_key, args, log_fn=print):
         awq_no_zero_point=False,
         awq_disable_auto_scale=False,
         awq_disable_mse_clip=False,
+        awq_force_mse_clip=False,
         awq_results_path=None,
         awq_overwrite_results=False,
         overwrite=True,

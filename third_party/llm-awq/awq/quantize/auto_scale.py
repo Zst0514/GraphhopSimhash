@@ -5,6 +5,7 @@ import torch.nn as nn
 from transformers.models.bloom.modeling_bloom import BloomBlock, BloomGelu
 from transformers.models.opt.modeling_opt import OPTDecoderLayer
 from transformers.models.llama.modeling_llama import LlamaDecoderLayer, LlamaRMSNorm
+from transformers.models.distilbert.modeling_distilbert import TransformerBlock as DistilBertTransformerBlock
 from transformers.activations import GELUActivation
 try:
     from transformers.models.qwen2.modeling_qwen2 import Qwen2RMSNorm, Qwen2DecoderLayer
@@ -91,8 +92,9 @@ def scale_gelu_fc(gelu, fc, scales):
 
 
 @torch.no_grad()
-def auto_scale_block(module, module_kwargs, w_bit, q_config, input_feat):
+def auto_scale_block(module, module_kwargs, w_bit, q_config, input_feat, module_args=None):
     from .quantizer import pseudo_quantize_tensor
+    module_args = tuple(module_args or ())
 
     # firstly, get the weight quantize function
     if w_bit is not None:
@@ -113,12 +115,12 @@ def auto_scale_block(module, module_kwargs, w_bit, q_config, input_feat):
         module_kwargs.pop("use_cache")
 
     # find the best scale ratio
-    def _search_module_scale(block, linears2scale: list, x, kwargs={}):
+    def _search_module_scale(block, linears2scale: list, x, args=(), kwargs={}):
         # w: co, ci
         # x: n, ci
         x = x.to(next(block.parameters()).device)
         with torch.no_grad():
-            org_out = block(x, **kwargs)
+            org_out = block(x, *args, **kwargs)
             if isinstance(org_out, tuple):
                 org_out = org_out[0]
 
@@ -139,7 +141,7 @@ def auto_scale_block(module, module_kwargs, w_bit, q_config, input_feat):
             for fc in linears2scale:
                 fc.weight.mul_(scales.view(1, -1).to(fc.weight.device))
                 fc.weight.data = w_quantize_func(fc.weight.data) / (scales.view(1, -1))
-            out = block(x, **kwargs)
+            out = block(x, *args, **kwargs)
             if isinstance(out, tuple):
                 out = out[0]
 
@@ -162,13 +164,13 @@ def auto_scale_block(module, module_kwargs, w_bit, q_config, input_feat):
         assert torch.isnan(best_scales).sum() == 0, best_scales
         return best_scales.detach()
 
-    def _auto_get_scale(prev_op, layers, inp, module2inspect=None, kwargs={}):
+    def _auto_get_scale(prev_op, layers, inp, module2inspect=None, args=(), kwargs={}):
         # module2inspect: if given, we will check the output diff of this module instead of layers
         if module2inspect is None:
             assert len(layers) == 1
             module2inspect = layers[0]
 
-        scales = _search_module_scale(module2inspect, layers, inp, kwargs)
+        scales = _search_module_scale(module2inspect, layers, inp, args, kwargs)
         scales = scales.detach().cpu()
         # prev_op_name, [layer_name], scale
         return (
@@ -298,6 +300,25 @@ def auto_scale_block(module, module_kwargs, w_bit, q_config, input_feat):
                 prev_op=module.mlp.gelu_impl,
                 layers=[module.mlp.dense_4h_to_h],
                 inp=input_feat["mlp.dense_4h_to_h"],
+            )
+        )
+    elif isinstance(module, DistilBertTransformerBlock):
+        # DistilBERT is post-norm. Scaling sa_layer_norm would also scale a
+        # residual branch, so only apply local transforms that can be absorbed
+        # without changing residual additions.
+        if module.attention.v_lin.weight.shape == module.attention.out_lin.weight.shape:
+            scales_list.append(
+                _auto_get_scale(
+                    prev_op=module.attention.v_lin,
+                    layers=[module.attention.out_lin],
+                    inp=input_feat["attention.out_lin"],
+                )
+            )
+        scales_list.append(
+            _auto_get_scale(
+                prev_op=module.ffn.activation,
+                layers=[module.ffn.lin2],
+                inp=input_feat["ffn.lin2"],
             )
         )
     elif "mpt" in str(module.__class__).lower():

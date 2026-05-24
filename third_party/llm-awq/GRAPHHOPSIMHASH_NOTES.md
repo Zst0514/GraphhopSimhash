@@ -24,6 +24,12 @@ awq/quantize/auto_scale.py
 awq/quantize/qmodule.py
     Keeps WQLinear importable without awq_inference_engine and raises a clear
     runtime error only if packed-kernel WQLinear inference is actually called.
+
+awq/quantize/pre_quant.py
+awq/quantize/auto_scale.py
+    Adds a local DistilBERT adapter for ST W4A16 pool generation. DistilBERT is
+    post-norm, so the adapter only applies scale pairs that can be absorbed
+    locally without changing residual additions.
 ```
 
 GraphhopSimhash currently uses official AWQ for W4A16 pool generation through:

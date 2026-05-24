@@ -9,6 +9,7 @@ from typing import List
 from transformers.models.bloom.modeling_bloom import BloomForCausalLM
 from transformers.models.opt.modeling_opt import OPTForCausalLM
 from transformers.models.llama.modeling_llama import LlamaForCausalLM
+from transformers.models.distilbert.modeling_distilbert import DistilBertModel
 try:
     from tinychat.models import LlavaLlamaForCausalLM
 except ImportError as e:
@@ -33,6 +34,8 @@ def get_named_linears(module):
 def get_blocks(model):
     if model.__class__.__name__ in ("LlamaForCausalLM", "Qwen2ForCausalLM"):
         layers = model.model.layers
+    elif isinstance(model, DistilBertModel):
+        layers = model.transformer.layer
     elif model.__class__.__name__ == "InternVL3":
         layers = model.language_model.model.layers
         # layers = [model.language_model.model.layers, model.vision_model.encoder.layers]
@@ -62,6 +65,8 @@ def move_embed(model, device):
     if isinstance(model, (LlamaForCausalLM, Qwen2ForCausalLM)):
         model.model.embed_tokens = model.model.embed_tokens.to(device)
         model.model.rotary_emb = model.model.rotary_emb.to(device)
+    elif isinstance(model, DistilBertModel):
+        model.embeddings = model.embeddings.to(device)
     elif model.__class__.__name__ == "InternVL3":
         model.language_model.model.embed_tokens = (
             model.language_model.model.embed_tokens.to(device)
@@ -130,6 +135,7 @@ def run_awq(
     samples = torch.cat(samples, dim=0)
 
     inps = []
+    layer_args = []
     layer_kwargs = {}
 
     layers[0] = layers[0].cuda()
@@ -143,8 +149,10 @@ def run_awq(
             super().__init__()
             self.module = module
 
-        def forward(self, inp, **kwargs):
+        def forward(self, inp, *args, **kwargs):
             inps.append(inp)
+            layer_args.clear()
+            layer_args.extend(args)
             layer_kwargs.update(kwargs)
             raise ValueError  # early exit to break later inference
 
@@ -162,6 +170,7 @@ def run_awq(
     del samples
     layers[0] = layers[0].module  # restore
     inps = inps[0]
+    layer_args = tuple(layer_args)
 
     layers[0] = layers[0].cpu()
     move_embed(model, "cpu")
@@ -196,7 +205,7 @@ def run_awq(
             )
         inps = inps.to(next(layer.parameters()).device)  # in case multi-gpu
         # get output as next layer's input
-        inps = layer(inps, **layer_kwargs)[0]
+        inps = layer(inps, *layer_args, **layer_kwargs)[0]
         for h in handles:
             h.remove()
         # now solve for scaling and clipping
@@ -214,6 +223,7 @@ def run_awq(
                 w_bit=w_bit,
                 q_config=q_config,
                 input_feat=input_feat,
+                module_args=layer_args,
             )
             # apply_scale(layer, scales_list, input_feat_dict=input_feat)
             apply_scale(layers[i], scales_list, input_feat_dict=input_feat)

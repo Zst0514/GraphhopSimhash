@@ -53,6 +53,7 @@ AWQ_SUPPORTED_CLASS_NAMES = {
     "Qwen2ForCausalLM",
     "OPTForCausalLM",
     "BloomForCausalLM",
+    "DistilBertModel",
 }
 
 
@@ -348,9 +349,10 @@ def apply_official_awq_w4a16(model, tokenizer, texts, dataset, llm_name, args):
     if not _is_awq_supported_model(model):
         raise NotImplementedError(
             "Official llm-awq W4A16 currently supports causal-LM blocks "
-            "(LLaMA/Qwen2/OPT/Bloom/MPT/Falcon/BigCode/NeoX). "
+            "(LLaMA/Qwen2/OPT/Bloom/MPT/Falcon/BigCode/NeoX) plus the "
+            "GraphhopSimhash DistilBERT adapter. "
             f"Got model class {model.__class__.__name__}. "
-            "ST/DistilBERT is not an AWQ-supported architecture in the official source."
+            "Unsupported encoder models should use --configs fp16 as the reference pool."
         )
 
     from awq.quantize.pre_quant import apply_awq, run_awq
@@ -362,6 +364,13 @@ def apply_official_awq_w4a16(model, tokenizer, texts, dataset, llm_name, args):
     }
     awq_results_path = args.awq_results_path or _default_awq_results_path(dataset, llm_name, args)
     os.makedirs(os.path.dirname(awq_results_path) or ".", exist_ok=True)
+
+    awq_already_applied = False
+    mse_range = not bool(args.awq_disable_mse_clip)
+    if model.__class__.__name__ == "DistilBertModel" and not bool(getattr(args, "awq_force_mse_clip", False)):
+        if mse_range:
+            print("[AWQ] DistilBERT adapter disables MSE clip by default to avoid large activation-clip memory spikes.")
+        mse_range = False
 
     if os.path.exists(awq_results_path) and not bool(args.awq_overwrite_results):
         print(f"[AWQ] Loading cached AWQ search results from {awq_results_path}")
@@ -380,14 +389,18 @@ def apply_official_awq_w4a16(model, tokenizer, texts, dataset, llm_name, args):
                 n_samples=int(args.awq_calib_samples),
                 seqlen=int(args.awq_seqlen),
                 auto_scale=not bool(args.awq_disable_auto_scale),
-                mse_range=not bool(args.awq_disable_mse_clip),
+                mse_range=mse_range,
                 calib_data="graph_text",
             )
         torch.save(awq_results, awq_results_path)
         print(f"[AWQ] Saved AWQ search results to {awq_results_path}")
+        awq_already_applied = True
 
-    print("[AWQ] Applying AWQ scales/clips and pseudo-quantizing weights to W4A16.")
-    apply_awq(model, awq_results)
+    if awq_already_applied:
+        print("[AWQ] AWQ scales/clips were applied during search; pseudo-quantizing weights to W4A16.")
+    else:
+        print("[AWQ] Applying cached AWQ scales/clips and pseudo-quantizing weights to W4A16.")
+        apply_awq(model, awq_results)
     pseudo_quantize_model_weight(model, w_bit=4, q_config=q_config)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model = model.to(device)
@@ -465,14 +478,6 @@ def maybe_align_output_embeddings(embs, dataset, llm_name, tag, config_spec, out
 def generate_pool(dataset, llm_name, config_name, args):
     _canonical, config_spec = resolve_config(config_name)
     tag = config_spec["tag"]
-    if config_spec["kind"] == "awq" and MODEL_SPECS[llm_name]["model_class"] != "llama":
-        raise NotImplementedError(
-            "Official llm-awq W4A16 is wired to causal-LM models in this project. "
-            f"llm_name={llm_name!r} uses model_class={MODEL_SPECS[llm_name]['model_class']!r}; "
-            "use --configs fp16 for the ST/BERT/e5 reference pool, or --configs W4A16_FAKE "
-            "to run the legacy fake W4A16 approximation."
-        )
-
     out_path = args.output_path
     if out_path is None:
         out_path = os.path.join("cache_data", f"{dataset}_{llm_name}_oracle_{tag}.pt")
@@ -571,6 +576,7 @@ def main():
     parser.add_argument("--awq_no_zero_point", action="store_true")
     parser.add_argument("--awq_disable_auto_scale", action="store_true")
     parser.add_argument("--awq_disable_mse_clip", action="store_true")
+    parser.add_argument("--awq_force_mse_clip", action="store_true")
     parser.add_argument("--awq_results_path", type=str, default=None)
     parser.add_argument("--awq_overwrite_results", action="store_true")
     parser.add_argument("--overwrite", action="store_true")
