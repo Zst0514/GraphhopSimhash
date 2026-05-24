@@ -1,6 +1,8 @@
 import argparse
 import gc
 import os
+import sys
+from contextlib import contextmanager
 
 import torch
 import torch.nn as nn
@@ -40,9 +42,17 @@ CONFIG_SPECS = {
     "fp16": {"tag": "FP16", "kind": "bnb", "w_bit": 16, "a_bit": 16},
     "int8": {"tag": "INT8", "kind": "bnb", "w_bit": 8, "a_bit": 8},
     "int4": {"tag": "INT4", "kind": "bnb", "w_bit": 4, "a_bit": 16},
-    "W4A16": {"tag": "W4A16", "kind": "fake_wa", "w_bit": 4, "a_bit": 16},
+    "W4A16": {"tag": "W4A16", "kind": "awq", "w_bit": 4, "a_bit": 16},
+    "W4A16_FAKE": {"tag": "W4A16_FAKE", "kind": "fake_wa", "w_bit": 4, "a_bit": 16},
     "W4A8": {"tag": "W4A8", "kind": "fake_wa", "w_bit": 4, "a_bit": 8},
     "W4A4": {"tag": "W4A4", "kind": "fake_wa", "w_bit": 4, "a_bit": 4},
+}
+
+AWQ_SUPPORTED_CLASS_NAMES = {
+    "LlamaForCausalLM",
+    "Qwen2ForCausalLM",
+    "OPTForCausalLM",
+    "BloomForCausalLM",
 }
 
 
@@ -169,7 +179,7 @@ def replace_linear_with_fake_quant(module, w_bit, a_bit, awq_grid=21, skip_names
             replace_linear_with_fake_quant(child, w_bit, a_bit, awq_grid=awq_grid, skip_names=skip_names)
 
 
-def load_model_and_tokenizer(llm_name, config_name, cache_dir):
+def load_model_and_tokenizer(llm_name, config_name, cache_dir, force_cpu=False):
     from transformers import AutoModel, AutoTokenizer, LlamaForCausalLM, LlamaTokenizer
 
     if llm_name not in MODEL_SPECS:
@@ -190,7 +200,7 @@ def load_model_and_tokenizer(llm_name, config_name, cache_dir):
         "cache_dir": cache_dir,
         "output_hidden_states": True,
     }
-    if spec["model_class"] == "llama":
+    if spec["model_class"] == "llama" and not force_cpu:
         kwargs["device_map"] = "auto"
     if quant_config is None:
         kwargs["torch_dtype"] = torch.float16
@@ -198,7 +208,9 @@ def load_model_and_tokenizer(llm_name, config_name, cache_dir):
         kwargs["quantization_config"] = quant_config
 
     model = model_cls.from_pretrained(model_path, **kwargs)
-    if "device_map" not in kwargs:
+    if force_cpu:
+        model = model.to("cpu")
+    elif "device_map" not in kwargs:
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         model = model.to(device)
     model.eval()
@@ -243,6 +255,144 @@ def encode_texts(model, tokenizer, texts, batch_size, max_length, device):
             embs = mean_pool(hidden, tokens["attention_mask"]).cpu()
             all_embs.append(embs)
     return torch.cat(all_embs, dim=0)
+
+
+def ensure_awq_project_on_path():
+    awq_path = os.path.join(os.path.dirname(__file__), "third_party", "llm-awq")
+    if not os.path.isdir(os.path.join(awq_path, "awq")):
+        raise FileNotFoundError(
+            "llm-awq source tree is missing. Expected official AWQ source at "
+            f"{awq_path}. Extract llm-awq-main.zip into GraphhopSimhash/third_party/llm-awq."
+        )
+    if awq_path not in sys.path:
+        sys.path.insert(0, awq_path)
+    return awq_path
+
+
+def _is_awq_supported_model(model):
+    class_name = model.__class__.__name__
+    class_text = str(model.__class__).lower()
+    return (
+        class_name in AWQ_SUPPORTED_CLASS_NAMES
+        or "mpt" in class_text
+        or "falcon" in class_text
+        or "bigcode" in class_text
+        or "neox" in class_text
+    )
+
+
+def build_local_awq_calib_getter(texts):
+    def get_calib_dataset(data="graph_text", tokenizer=None, n_samples=128, block_size=512):
+        del data
+        samples = []
+        for text in texts:
+            line = str(text).strip()
+            if not line:
+                continue
+            token_ids = tokenizer.encode(line)
+            if len(token_ids) == 0 or len(token_ids) > block_size:
+                continue
+            samples.append(torch.tensor([token_ids], dtype=torch.long))
+            if len(samples) >= int(n_samples):
+                break
+        if not samples:
+            raise ValueError("No usable graph texts were found for AWQ calibration.")
+
+        cat_samples = torch.cat(samples, dim=1)
+        if cat_samples.shape[1] < block_size:
+            pad_id = tokenizer.pad_token_id
+            if pad_id is None:
+                pad_id = tokenizer.eos_token_id
+            if pad_id is None:
+                pad_id = 0
+            pad = torch.full(
+                (1, block_size - cat_samples.shape[1]),
+                int(pad_id),
+                dtype=torch.long,
+            )
+            cat_samples = torch.cat([cat_samples, pad], dim=1)
+
+        n_split = max(1, cat_samples.shape[1] // block_size)
+        print(f"[AWQ] Local graph-text calibration blocks={n_split} | samples={len(samples)} | block_size={block_size}")
+        return [
+            cat_samples[:, i * block_size : (i + 1) * block_size]
+            for i in range(n_split)
+        ]
+
+    return get_calib_dataset
+
+
+@contextmanager
+def patch_awq_calibration_data(texts):
+    ensure_awq_project_on_path()
+    from awq.utils import calib_data as awq_calib_data
+
+    original_getter = awq_calib_data.get_calib_dataset
+    awq_calib_data.get_calib_dataset = build_local_awq_calib_getter(texts)
+    try:
+        yield
+    finally:
+        awq_calib_data.get_calib_dataset = original_getter
+
+
+def _default_awq_results_path(dataset, llm_name, args):
+    return os.path.join(
+        "cache_data",
+        "awq",
+        f"{dataset}_{llm_name}_w4_g{int(args.awq_q_group_size)}_n{int(args.awq_calib_samples)}_s{int(args.awq_seqlen)}.pt",
+    )
+
+
+def apply_official_awq_w4a16(model, tokenizer, texts, dataset, llm_name, args):
+    ensure_awq_project_on_path()
+    if not _is_awq_supported_model(model):
+        raise NotImplementedError(
+            "Official llm-awq W4A16 currently supports causal-LM blocks "
+            "(LLaMA/Qwen2/OPT/Bloom/MPT/Falcon/BigCode/NeoX). "
+            f"Got model class {model.__class__.__name__}. "
+            "ST/DistilBERT is not an AWQ-supported architecture in the official source."
+        )
+
+    from awq.quantize.pre_quant import apply_awq, run_awq
+    from awq.quantize.quantizer import pseudo_quantize_model_weight
+
+    q_config = {
+        "zero_point": not bool(args.awq_no_zero_point),
+        "q_group_size": int(args.awq_q_group_size),
+    }
+    awq_results_path = args.awq_results_path or _default_awq_results_path(dataset, llm_name, args)
+    os.makedirs(os.path.dirname(awq_results_path) or ".", exist_ok=True)
+
+    if os.path.exists(awq_results_path) and not bool(args.awq_overwrite_results):
+        print(f"[AWQ] Loading cached AWQ search results from {awq_results_path}")
+        awq_results = torch.load(awq_results_path, map_location="cpu")
+    else:
+        print(
+            "[AWQ] Running official llm-awq search "
+            f"| w_bit=4 | q_config={q_config} | samples={args.awq_calib_samples} | seqlen={args.awq_seqlen}"
+        )
+        with patch_awq_calibration_data(texts):
+            awq_results = run_awq(
+                model,
+                tokenizer,
+                w_bit=4,
+                q_config=q_config,
+                n_samples=int(args.awq_calib_samples),
+                seqlen=int(args.awq_seqlen),
+                auto_scale=not bool(args.awq_disable_auto_scale),
+                mse_range=not bool(args.awq_disable_mse_clip),
+                calib_data="graph_text",
+            )
+        torch.save(awq_results, awq_results_path)
+        print(f"[AWQ] Saved AWQ search results to {awq_results_path}")
+
+    print("[AWQ] Applying AWQ scales/clips and pseudo-quantizing weights to W4A16.")
+    apply_awq(model, awq_results)
+    pseudo_quantize_model_weight(model, w_bit=4, q_config=q_config)
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    model = model.to(device)
+    model.eval()
+    return model, device
 
 
 def _load_tensor(path):
@@ -315,6 +465,13 @@ def maybe_align_output_embeddings(embs, dataset, llm_name, tag, config_spec, out
 def generate_pool(dataset, llm_name, config_name, args):
     _canonical, config_spec = resolve_config(config_name)
     tag = config_spec["tag"]
+    if config_spec["kind"] == "awq" and MODEL_SPECS[llm_name]["model_class"] != "llama":
+        raise NotImplementedError(
+            "Official llm-awq W4A16 is wired to causal-LM models in this project. "
+            f"llm_name={llm_name!r} uses model_class={MODEL_SPECS[llm_name]['model_class']!r}; "
+            "use --configs fp16 for the ST/BERT/e5 reference pool, or --configs W4A16_FAKE "
+            "to run the legacy fake W4A16 approximation."
+        )
 
     out_path = args.output_path
     if out_path is None:
@@ -332,8 +489,13 @@ def generate_pool(dataset, llm_name, config_name, args):
         print("[Info] Reducing LLaMA batch_size to 4 to avoid OOM.")
         batch_size = 4
 
-    load_config_name = "fp16" if config_spec["kind"] == "fake_wa" else config_name
-    model, tokenizer, _tag = load_model_and_tokenizer(llm_name, load_config_name, args.cache_dir)
+    load_config_name = "fp16" if config_spec["kind"] in ("fake_wa", "awq") else config_name
+    model, tokenizer, _tag = load_model_and_tokenizer(
+        llm_name,
+        load_config_name,
+        args.cache_dir,
+        force_cpu=config_spec["kind"] == "awq",
+    )
     device = next(model.parameters()).device
 
     if config_spec["kind"] == "fake_wa":
@@ -353,6 +515,16 @@ def generate_pool(dataset, llm_name, config_name, args):
         if calib_count > 0:
             print(f"[FakeWA] Running calibration pass on {calib_count} node texts...")
             _ = encode_texts(model, tokenizer, texts[:calib_count], batch_size, args.max_length, device)
+    elif config_spec["kind"] == "awq":
+        print("[AWQ] Installing official llm-awq W4A16 weight-only quantization path.")
+        model, device = apply_official_awq_w4a16(
+            model=model,
+            tokenizer=tokenizer,
+            texts=texts,
+            dataset=dataset,
+            llm_name=llm_name,
+            args=args,
+        )
 
     embs = encode_texts(model, tokenizer, texts, batch_size, args.max_length, device)
     embs = maybe_align_output_embeddings(embs, dataset, llm_name, tag, config_spec, out_path, args)
@@ -393,6 +565,14 @@ def main():
     )
     parser.add_argument("--ptq_align_samples", type=int, default=512)
     parser.add_argument("--ptq_align_reference_path", type=str, default=None)
+    parser.add_argument("--awq_calib_samples", type=int, default=128)
+    parser.add_argument("--awq_seqlen", type=int, default=512)
+    parser.add_argument("--awq_q_group_size", type=int, default=128)
+    parser.add_argument("--awq_no_zero_point", action="store_true")
+    parser.add_argument("--awq_disable_auto_scale", action="store_true")
+    parser.add_argument("--awq_disable_mse_clip", action="store_true")
+    parser.add_argument("--awq_results_path", type=str, default=None)
+    parser.add_argument("--awq_overwrite_results", action="store_true")
     parser.add_argument("--overwrite", action="store_true")
     args = parser.parse_args()
 
@@ -408,6 +588,12 @@ def main():
         parser.error("--w4a_awq_grid must be positive")
     if args.ptq_align_samples <= 0:
         parser.error("--ptq_align_samples must be positive")
+    if args.awq_calib_samples <= 0:
+        parser.error("--awq_calib_samples must be positive")
+    if args.awq_seqlen <= 0:
+        parser.error("--awq_seqlen must be positive")
+    if args.awq_q_group_size == 0 or args.awq_q_group_size < -1:
+        parser.error("--awq_q_group_size must be -1 or a positive integer")
 
     for dataset in args.datasets:
         for config_name in args.configs:

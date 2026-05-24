@@ -76,11 +76,19 @@ def regenerate_real_quant_pools(ds_key, args, log_fn=print):
         ptq_align_output=True,
         ptq_align_samples=512,
         ptq_align_reference_path=None,
+        awq_calib_samples=128,
+        awq_seqlen=512,
+        awq_q_group_size=128,
+        awq_no_zero_point=False,
+        awq_disable_auto_scale=False,
+        awq_disable_mse_clip=False,
+        awq_results_path=None,
+        awq_overwrite_results=False,
         overwrite=True,
     )
 
     log_fn(
-        "[RealQuantAutoGen] Regenerating FP/INT8/INT4 feature pools before reuse_real_quant; "
+        "[RealQuantAutoGen] Regenerating real-quant feature pools before reuse_real_quant; "
         "existing cache files will be overwritten."
     )
     for role, tag, out_path in jobs:
@@ -114,8 +122,9 @@ def load_real_quant_pools(ds_key, args, data, device):
             f"{msg}\n"
             "Generate real FP/INT8/INT4 embeddings first, or pass explicit paths with "
             "--real_quant_fp_path/--real_quant_int8_path/--real_quant_int4_path. "
-            "If you only have the older W4A16/W4A8/W4A4 pools, run with "
-            "--real_quant_fp_tag W4A16 --real_quant_int8_tag W4A8 --real_quant_int4_tag W4A4."
+            "Use tags that match the generated cache files, for example "
+            "--real_quant_fp_tag FP16 --real_quant_int8_tag W4A8 --real_quant_int4_tag W4A4 for ST, "
+            "or --real_quant_fp_tag W4A16 for an official AWQ-supported causal LM."
         )
 
     pools = RealQuantPools(

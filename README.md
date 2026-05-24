@@ -126,7 +126,7 @@ python -m GraphhopSimhash \
   --experiment_suite reuse_real_quant \
   --real_quant_policy_suite w4a8_budget \
   --real_quant_model_name ST \
-  --real_quant_fp_tag W4A16 \
+  --real_quant_fp_tag FP16 \
   --real_quant_int8_tag W4A8 \
   --real_quant_int4_tag W4A4 \
   --real_quant_fp_ratio 0.0 \
@@ -139,6 +139,11 @@ python -m GraphhopSimhash \
   --main_hash_head_bits 16 16 16 16 16 16 16 16 \
   --route_min_support_hits 3
 ```
+
+`W4A16` now uses the vendored official `llm-awq` source under
+`third_party/llm-awq` and is intended for supported causal-LM models such as
+LLaMA. For ST/DistilBERT experiments, use `FP16` as the reference path; the old
+approximate W4A16 implementation remains available as `W4A16_FAKE`.
 
 In `reuse_real_quant`, reuse hits are counted as cache reads. The real
 W4A4/W4A8/FP policy is applied only to hash-miss nodes, so the reported
