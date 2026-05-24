@@ -245,6 +245,73 @@ def encode_texts(model, tokenizer, texts, batch_size, max_length, device):
     return torch.cat(all_embs, dim=0)
 
 
+def _load_tensor(path):
+    tensor = torch.load(path, map_location="cpu")
+    if isinstance(tensor, (tuple, list)):
+        tensor = tensor[0]
+    if not isinstance(tensor, torch.Tensor):
+        raise TypeError(f"{path} did not contain a torch.Tensor")
+    return tensor.to(dtype=torch.float32)
+
+
+def _default_reference_path(out_path, dataset, llm_name):
+    out_dir = os.path.dirname(out_path) or "."
+    return os.path.join(out_dir, f"{dataset}_{llm_name}_oracle_FP16.pt")
+
+
+def affine_align_to_reference(embs, reference_embs, sample_count):
+    sample_count = min(int(sample_count), int(embs.size(0)), int(reference_embs.size(0)))
+    if sample_count <= 0:
+        raise ValueError("ptq_align_samples must leave at least one sample")
+
+    quant_calib = embs[:sample_count].to(dtype=torch.float32)
+    ref_calib = reference_embs[:sample_count].to(dtype=torch.float32)
+    quant_mean = quant_calib.mean(dim=0)
+    ref_mean = ref_calib.mean(dim=0)
+    quant_centered = quant_calib - quant_mean
+    ref_centered = ref_calib - ref_mean
+    gamma = (quant_centered * ref_centered).sum(dim=0) / quant_centered.pow(2).sum(dim=0).clamp_min(1e-8)
+    beta = ref_mean - gamma * quant_mean
+    aligned = embs.to(dtype=torch.float32) * gamma + beta
+    return F.normalize(aligned, p=2, dim=1), sample_count
+
+
+def maybe_align_output_embeddings(embs, dataset, llm_name, tag, config_spec, out_path, args):
+    if config_spec["kind"] != "fake_wa":
+        return embs
+    if not bool(getattr(args, "ptq_align_output", True)):
+        return embs
+
+    reference_path = getattr(args, "ptq_align_reference_path", None)
+    if reference_path is None:
+        reference_path = _default_reference_path(out_path, dataset, llm_name)
+    if not os.path.exists(reference_path):
+        print(f"[Align] Skipped {tag}: FP16 reference not found at {reference_path}")
+        return embs
+
+    reference_embs = _load_tensor(reference_path)
+    if tuple(reference_embs.shape) != tuple(embs.shape):
+        raise ValueError(
+            f"Alignment reference shape must match generated embeddings: "
+            f"reference={tuple(reference_embs.shape)}, generated={tuple(embs.shape)}"
+        )
+
+    before_err = (1.0 - F.cosine_similarity(reference_embs, embs.to(dtype=torch.float32), dim=1)).clamp(min=0.0)
+    aligned, sample_count = affine_align_to_reference(
+        embs,
+        reference_embs,
+        getattr(args, "ptq_align_samples", 512),
+    )
+    after_err = (1.0 - F.cosine_similarity(reference_embs, aligned, dim=1)).clamp(min=0.0)
+    print(
+        "[Align] Output affine alignment to FP16 "
+        f"| tag={tag} | samples={sample_count} | reference={reference_path} "
+        f"| err_mean {before_err.mean().item():.5f}->{after_err.mean().item():.5f} "
+        f"| err_p95 {before_err.quantile(0.95).item():.5f}->{after_err.quantile(0.95).item():.5f}"
+    )
+    return aligned
+
+
 def generate_pool(dataset, llm_name, config_name, args):
     _canonical, config_spec = resolve_config(config_name)
     tag = config_spec["tag"]
@@ -288,6 +355,7 @@ def generate_pool(dataset, llm_name, config_name, args):
             _ = encode_texts(model, tokenizer, texts[:calib_count], batch_size, args.max_length, device)
 
     embs = encode_texts(model, tokenizer, texts, batch_size, args.max_length, device)
+    embs = maybe_align_output_embeddings(embs, dataset, llm_name, tag, config_spec, out_path, args)
 
     os.makedirs(os.path.dirname(out_path) or ".", exist_ok=True)
     torch.save(embs, out_path)
@@ -310,6 +378,21 @@ def main():
     parser.add_argument("--output_path", type=str, default=None, help="Only valid with one dataset and one config.")
     parser.add_argument("--w4a_calib_samples", type=int, default=64)
     parser.add_argument("--w4a_awq_grid", type=int, default=21)
+    parser.add_argument(
+        "--ptq_align_output",
+        dest="ptq_align_output",
+        action="store_true",
+        default=True,
+        help="Align fake W/A quantized embeddings back to the FP16 pool with a per-dimension affine map.",
+    )
+    parser.add_argument(
+        "--no_ptq_align_output",
+        dest="ptq_align_output",
+        action="store_false",
+        help="Disable FP16 output affine alignment for fake W/A quantized pools.",
+    )
+    parser.add_argument("--ptq_align_samples", type=int, default=512)
+    parser.add_argument("--ptq_align_reference_path", type=str, default=None)
     parser.add_argument("--overwrite", action="store_true")
     args = parser.parse_args()
 
@@ -323,6 +406,8 @@ def main():
         parser.error("--w4a_calib_samples must be >= 0")
     if args.w4a_awq_grid <= 0:
         parser.error("--w4a_awq_grid must be positive")
+    if args.ptq_align_samples <= 0:
+        parser.error("--ptq_align_samples must be positive")
 
     for dataset in args.datasets:
         for config_name in args.configs:

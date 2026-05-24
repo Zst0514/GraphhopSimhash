@@ -73,6 +73,9 @@ def regenerate_real_quant_pools(ds_key, args, log_fn=print):
         output_path=None,
         w4a_calib_samples=64,
         w4a_awq_grid=21,
+        ptq_align_output=True,
+        ptq_align_samples=512,
+        ptq_align_reference_path=None,
         overwrite=True,
     )
 
