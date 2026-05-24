@@ -1,5 +1,6 @@
 import argparse
 import gc
+import json
 import os
 import sys
 from contextlib import contextmanager
@@ -139,6 +140,54 @@ def affine_fake_quantize(x, bit_width, mode="per_tensor", dim=-1):
     return torch.nan_to_num((quantized - zero_point) * scale, nan=0.0, posinf=0.0, neginf=0.0)
 
 
+def _clip_activation_with_channel_thresholds(x, clip_abs=None, channel_clip_abs=None):
+    if clip_abs is None and channel_clip_abs is None:
+        return x
+
+    if channel_clip_abs is not None:
+        channel_clip = channel_clip_abs.to(device=x.device, dtype=x.dtype)
+        if channel_clip.numel() != x.shape[-1]:
+            raise ValueError(
+                f"activation channel clip size must match hidden dim {x.shape[-1]}, "
+                f"got {channel_clip.numel()}"
+            )
+        view_shape = [1] * (x.dim() - 1) + [int(channel_clip.numel())]
+        clip = channel_clip.view(*view_shape).clamp_min(1e-8)
+        return torch.maximum(torch.minimum(x, clip), -clip)
+
+    clip = torch.as_tensor(float(clip_abs), device=x.device, dtype=x.dtype).clamp_min(1e-8)
+    return torch.clamp(x, min=-clip, max=clip)
+
+
+def affine_fake_quantize_with_protected_channels(x, bit_width, protected_mask, protected_bit_width=8):
+    if protected_mask is None or int(protected_mask.sum().item()) <= 0:
+        return affine_fake_quantize(x, bit_width, mode="per_channel", dim=-1)
+    if int(bit_width) >= 16:
+        return x
+
+    protected_mask = protected_mask.to(device=x.device, dtype=torch.bool)
+    if protected_mask.numel() != x.shape[-1]:
+        raise ValueError(
+            f"protected channel mask size must match hidden dim {x.shape[-1]}, got {protected_mask.numel()}"
+        )
+    low_mask = ~protected_mask
+    if int(low_mask.sum().item()) <= 0:
+        return affine_fake_quantize(x, protected_bit_width, mode="per_channel", dim=-1)
+
+    qx = x.clone()
+    qx[..., low_mask] = affine_fake_quantize(x[..., low_mask], bit_width, mode="per_channel", dim=-1)
+    if int(protected_bit_width) >= 16:
+        qx[..., protected_mask] = x[..., protected_mask]
+    else:
+        qx[..., protected_mask] = affine_fake_quantize(
+            x[..., protected_mask],
+            protected_bit_width,
+            mode="per_channel",
+            dim=-1,
+        )
+    return qx
+
+
 class FakeQuantLinear(nn.Module):
     def __init__(self, original_linear, w_bit=4, a_bit=8, awq_grid=21):
         super().__init__()
@@ -206,24 +255,73 @@ def replace_linear_with_fake_quant(module, w_bit, a_bit, awq_grid=21, skip_names
 
 
 class ActivationQuantLinear(nn.Module):
-    def __init__(self, original_linear, a_bit=8):
+    def __init__(self, original_linear, a_bit=8, module_name=None, clip_config=None):
         super().__init__()
         self.linear = original_linear
         self.a_bit = int(a_bit)
         self.in_features = int(original_linear.in_features)
         self.out_features = int(original_linear.out_features)
+        self.module_name = module_name or ""
+        clip_config = clip_config or {}
+        clip_abs = clip_config.get("clip_abs")
+        self.clip_abs = None if clip_abs is None else float(clip_abs)
+        channel_clip_abs = clip_config.get("channel_clip_abs")
+        if channel_clip_abs is None:
+            self.register_buffer("channel_clip_abs", None)
+        else:
+            self.register_buffer("channel_clip_abs", torch.as_tensor(channel_clip_abs, dtype=torch.float32))
+        outlier_channel_mask = clip_config.get("outlier_channel_mask")
+        if outlier_channel_mask is None:
+            self.register_buffer("outlier_channel_mask", None)
+            self.has_outlier_channels = False
+        else:
+            outlier_channel_mask = torch.as_tensor(outlier_channel_mask, dtype=torch.bool)
+            self.register_buffer("outlier_channel_mask", outlier_channel_mask)
+            self.has_outlier_channels = bool(outlier_channel_mask.any().item())
+        self.outlier_channel_a_bit = int(clip_config.get("outlier_channel_a_bit", 8))
 
     def forward(self, x):
-        qx = affine_fake_quantize(x, self.a_bit, mode="per_channel", dim=-1)
+        if self.has_outlier_channels:
+            qx = affine_fake_quantize_with_protected_channels(
+                x,
+                self.a_bit,
+                self.outlier_channel_mask,
+                protected_bit_width=self.outlier_channel_a_bit,
+            )
+            return self.linear(qx)
+
+        clipped = _clip_activation_with_channel_thresholds(
+            x,
+            clip_abs=self.clip_abs,
+            channel_clip_abs=self.channel_clip_abs,
+        )
+        qx = affine_fake_quantize(clipped, self.a_bit, mode="per_channel", dim=-1)
         return self.linear(qx)
 
 
-def replace_linear_with_activation_quant(module, a_bit, skip_names=("lm_head",)):
+def replace_linear_with_activation_quant(module, a_bit, skip_names=("lm_head",), clip_config_by_name=None, prefix=""):
+    clip_config_by_name = clip_config_by_name or {}
     for name, child in list(module.named_children()):
+        full_name = f"{prefix}.{name}" if prefix else name
         if isinstance(child, nn.Linear) and name not in set(skip_names):
-            setattr(module, name, ActivationQuantLinear(child, a_bit=a_bit))
+            setattr(
+                module,
+                name,
+                ActivationQuantLinear(
+                    child,
+                    a_bit=a_bit,
+                    module_name=full_name,
+                    clip_config=clip_config_by_name.get(full_name),
+                ),
+            )
         else:
-            replace_linear_with_activation_quant(child, a_bit=a_bit, skip_names=skip_names)
+            replace_linear_with_activation_quant(
+                child,
+                a_bit=a_bit,
+                skip_names=skip_names,
+                clip_config_by_name=clip_config_by_name,
+                prefix=full_name,
+            )
 
 
 def load_model_and_tokenizer(llm_name, config_name, cache_dir, force_cpu=False):
@@ -534,6 +632,87 @@ def maybe_align_output_embeddings(embs, dataset, llm_name, tag, config_spec, out
     return aligned
 
 
+def default_activation_outlier_report_path(dataset, llm_name, args):
+    return os.path.join(
+        "output",
+        "graph_simhash",
+        dataset.lower(),
+        (
+            f"{dataset.lower()}_{llm_name}_activation_outliers_"
+            f"n{int(getattr(args, 'activation_outlier_calib_samples', 128))}_"
+            f"seed{int(getattr(args, 'activation_outlier_seed', 42))}.json"
+        ),
+    )
+
+
+def load_activation_outlier_clip_config(dataset, llm_name, a_bit, args):
+    if not bool(getattr(args, "activation_outlier_clip", False)):
+        return {}
+    if int(a_bit) > int(getattr(args, "activation_outlier_apply_max_a_bit", 4)):
+        return {}
+
+    report_path = getattr(args, "activation_outlier_report_path", None)
+    if not report_path:
+        report_path = default_activation_outlier_report_path(dataset, llm_name, args)
+    if not os.path.exists(report_path):
+        raise FileNotFoundError(
+            "Activation outlier clipping was requested, but the report is missing: "
+            f"{report_path}. Generate it with `python -m GraphhopSimhash.activation_outlier_calibration` "
+            "or pass --activation_outlier_report_path."
+        )
+
+    with open(report_path, "r", encoding="utf-8") as f:
+        report = json.load(f)
+
+    layer_clip_ratio = float(getattr(args, "activation_outlier_clip_ratio", 1.0))
+    channel_clip_ratio = float(getattr(args, "activation_outlier_channel_clip_ratio", 0.75))
+    min_clip = float(getattr(args, "activation_outlier_min_clip", 1e-4))
+    max_top_channels = int(getattr(args, "activation_outlier_max_top_channels", 64))
+    mode = str(getattr(args, "activation_outlier_mode", "channel_protect")).lower()
+    outlier_channel_a_bit = int(getattr(args, "activation_outlier_channel_a_bit", 8))
+
+    clip_config = {}
+    tuned_channels = 0
+    for layer in report.get("layers", []):
+        module_name = layer.get("module")
+        feature_dim = int(layer.get("feature_dim", 0))
+        threshold_abs = float(layer.get("threshold_abs", 0.0))
+        if not module_name or feature_dim <= 0 or threshold_abs <= 0.0:
+            continue
+
+        layer_clip = max(min_clip, threshold_abs * layer_clip_ratio)
+        channel_clip = torch.full((feature_dim,), float(layer_clip), dtype=torch.float32)
+        outlier_channel_mask = torch.zeros(feature_dim, dtype=torch.bool)
+        for channel in layer.get("top_channels", [])[:max_top_channels]:
+            channel_idx = int(channel.get("channel", -1))
+            if 0 <= channel_idx < feature_dim:
+                if mode == "channel_protect":
+                    outlier_channel_mask[channel_idx] = True
+                else:
+                    channel_clip[channel_idx] = max(min_clip, layer_clip * channel_clip_ratio)
+                tuned_channels += 1
+        if mode == "channel_protect":
+            clip_config[module_name] = {
+                "outlier_channel_mask": outlier_channel_mask,
+                "outlier_channel_a_bit": outlier_channel_a_bit,
+            }
+        elif mode == "clip":
+            clip_config[module_name] = {
+                "clip_abs": layer_clip,
+                "channel_clip_abs": channel_clip,
+            }
+        else:
+            raise ValueError(f"Unknown activation_outlier_mode={mode}")
+
+    print(
+        "[ActOutlierClip] Loaded activation clip config "
+        f"| report={report_path} | layers={len(clip_config)} | tuned_channels={tuned_channels} "
+        f"| mode={mode} | layer_clip_ratio={layer_clip_ratio:.3f} "
+        f"| channel_clip_ratio={channel_clip_ratio:.3f} | outlier_channel_a_bit={outlier_channel_a_bit}"
+    )
+    return clip_config
+
+
 def generate_pool(dataset, llm_name, config_name, args):
     _canonical, config_spec = resolve_config(config_name)
     tag = config_spec["tag"]
@@ -594,8 +773,21 @@ def generate_pool(dataset, llm_name, config_name, args):
             activation_bit=int(config_spec["a_bit"]),
         )
         if config_spec["kind"] == "awq_act":
-            print(f"[AWQ] Installing activation fake quant wrappers | A{int(config_spec['a_bit'])}")
-            replace_linear_with_activation_quant(model, a_bit=int(config_spec["a_bit"]))
+            act_clip_config = load_activation_outlier_clip_config(
+                dataset,
+                llm_name,
+                int(config_spec["a_bit"]),
+                args,
+            )
+            print(
+                f"[AWQ] Installing activation fake quant wrappers | A{int(config_spec['a_bit'])} "
+                f"| outlier_clip_layers={len(act_clip_config)}"
+            )
+            replace_linear_with_activation_quant(
+                model,
+                a_bit=int(config_spec["a_bit"]),
+                clip_config_by_name=act_clip_config,
+            )
 
     embs = encode_texts(model, tokenizer, texts, batch_size, args.max_length, device)
     embs = maybe_align_output_embeddings(embs, dataset, llm_name, tag, config_spec, out_path, args)
@@ -645,6 +837,45 @@ def main():
     parser.add_argument("--awq_force_mse_clip", action="store_true")
     parser.add_argument("--awq_results_path", type=str, default=None)
     parser.add_argument("--awq_overwrite_results", action="store_true")
+    parser.add_argument(
+        "--activation_outlier_clip",
+        action="store_true",
+        help="Use a layer/channel activation outlier report to clip A4/A8 inputs before affine activation quantization.",
+    )
+    parser.add_argument("--activation_outlier_report_path", type=str, default=None)
+    parser.add_argument("--activation_outlier_calib_samples", type=int, default=128)
+    parser.add_argument("--activation_outlier_seed", type=int, default=42)
+    parser.add_argument(
+        "--activation_outlier_apply_max_a_bit",
+        type=int,
+        default=4,
+        help="Apply outlier clipping only when activation bit width is <= this value. Default only affects A4.",
+    )
+    parser.add_argument(
+        "--activation_outlier_clip_ratio",
+        type=float,
+        default=1.0,
+        help="Layer-level clip multiplier applied to threshold_abs from the outlier report.",
+    )
+    parser.add_argument(
+        "--activation_outlier_mode",
+        type=str,
+        default="channel_protect",
+        choices=["channel_protect", "clip"],
+        help=(
+            "channel_protect excludes top outlier channels from A4 scale computation and quantizes them with "
+            "--activation_outlier_channel_a_bit; clip applies hard layer/channel clipping."
+        ),
+    )
+    parser.add_argument("--activation_outlier_channel_a_bit", type=int, default=8)
+    parser.add_argument(
+        "--activation_outlier_channel_clip_ratio",
+        type=float,
+        default=0.75,
+        help="Extra multiplier for top outlier channels listed in the report.",
+    )
+    parser.add_argument("--activation_outlier_min_clip", type=float, default=1e-4)
+    parser.add_argument("--activation_outlier_max_top_channels", type=int, default=64)
     parser.add_argument("--overwrite", action="store_true")
     args = parser.parse_args()
 
@@ -666,6 +897,22 @@ def main():
         parser.error("--awq_seqlen must be positive")
     if args.awq_q_group_size == 0 or args.awq_q_group_size < -1:
         parser.error("--awq_q_group_size must be -1 or a positive integer")
+    if args.activation_outlier_calib_samples <= 0:
+        parser.error("--activation_outlier_calib_samples must be positive")
+    if args.activation_outlier_seed < 0:
+        parser.error("--activation_outlier_seed must be >= 0")
+    if args.activation_outlier_apply_max_a_bit <= 0:
+        parser.error("--activation_outlier_apply_max_a_bit must be positive")
+    if args.activation_outlier_clip_ratio <= 0:
+        parser.error("--activation_outlier_clip_ratio must be positive")
+    if args.activation_outlier_channel_a_bit <= 0:
+        parser.error("--activation_outlier_channel_a_bit must be positive")
+    if args.activation_outlier_channel_clip_ratio <= 0:
+        parser.error("--activation_outlier_channel_clip_ratio must be positive")
+    if args.activation_outlier_min_clip <= 0:
+        parser.error("--activation_outlier_min_clip must be positive")
+    if args.activation_outlier_max_top_channels < 0:
+        parser.error("--activation_outlier_max_top_channels must be >= 0")
 
     for dataset in args.datasets:
         for config_name in args.configs:
