@@ -61,6 +61,9 @@ def regenerate_real_quant_pools(ds_key, args, log_fn=print):
     from .generate_real_quant_pools import generate_pool
 
     fp_path, int8_path, int4_path = resolve_pool_paths(ds_key, args)
+    is_st_model = str(args.real_quant_model_name).upper() == "ST"
+    awq_calib_samples = 16 if is_st_model else 128
+    awq_seqlen = 128 if is_st_model else 512
     jobs = [
         ("FP", args.real_quant_fp_tag, fp_path),
         ("INT8", args.real_quant_int8_tag, int8_path),
@@ -76,8 +79,8 @@ def regenerate_real_quant_pools(ds_key, args, log_fn=print):
         ptq_align_output=True,
         ptq_align_samples=512,
         ptq_align_reference_path=None,
-        awq_calib_samples=128,
-        awq_seqlen=512,
+        awq_calib_samples=awq_calib_samples,
+        awq_seqlen=awq_seqlen,
         awq_q_group_size=128,
         awq_no_zero_point=False,
         awq_disable_auto_scale=False,
@@ -97,7 +100,9 @@ def regenerate_real_quant_pools(ds_key, args, log_fn=print):
         gen_args.output_path = out_path
         log_fn(
             f"[RealQuantAutoGen] {role}: tag={tag} | config={config_name} "
-            f"| batch_size=64 | w4a_calib_samples=64 | output={out_path}"
+            f"| batch_size=64 | w4a_calib_samples=64 "
+            f"| awq_calib_samples={awq_calib_samples} | awq_seqlen={awq_seqlen} "
+            f"| output={out_path}"
         )
         generate_pool(ds_key, args.real_quant_model_name, config_name, gen_args)
 
@@ -124,8 +129,8 @@ def load_real_quant_pools(ds_key, args, data, device):
             "Generate real FP/INT8/INT4 embeddings first, or pass explicit paths with "
             "--real_quant_fp_path/--real_quant_int8_path/--real_quant_int4_path. "
             "Use tags that match the generated cache files, for example "
-            "--real_quant_fp_tag FP16 --real_quant_int8_tag W4A8 --real_quant_int4_tag W4A4 for ST, "
-            "or --real_quant_fp_tag W4A16 for an official AWQ-supported causal LM."
+            "--real_quant_fp_tag W4A16 --real_quant_int8_tag W4A8 --real_quant_int4_tag W4A4 "
+            "for the AWQ-family path, or --real_quant_fp_tag FP16 for a clean full-precision reference."
         )
 
     pools = RealQuantPools(

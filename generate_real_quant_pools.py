@@ -43,9 +43,11 @@ CONFIG_SPECS = {
     "int8": {"tag": "INT8", "kind": "bnb", "w_bit": 8, "a_bit": 8},
     "int4": {"tag": "INT4", "kind": "bnb", "w_bit": 4, "a_bit": 16},
     "W4A16": {"tag": "W4A16", "kind": "awq", "w_bit": 4, "a_bit": 16},
+    "W4A8": {"tag": "W4A8", "kind": "awq_act", "w_bit": 4, "a_bit": 8},
+    "W4A4": {"tag": "W4A4", "kind": "awq_act", "w_bit": 4, "a_bit": 4},
     "W4A16_FAKE": {"tag": "W4A16_FAKE", "kind": "fake_wa", "w_bit": 4, "a_bit": 16},
-    "W4A8": {"tag": "W4A8", "kind": "fake_wa", "w_bit": 4, "a_bit": 8},
-    "W4A4": {"tag": "W4A4", "kind": "fake_wa", "w_bit": 4, "a_bit": 4},
+    "W4A8_FAKE": {"tag": "W4A8_FAKE", "kind": "fake_wa", "w_bit": 4, "a_bit": 8},
+    "W4A4_FAKE": {"tag": "W4A4_FAKE", "kind": "fake_wa", "w_bit": 4, "a_bit": 4},
 }
 
 AWQ_SUPPORTED_CLASS_NAMES = {
@@ -114,6 +116,27 @@ def symmetric_fake_quantize(x, bit_width, mode="per_tensor", dim=-1):
     return quantized * scale
 
 
+def affine_fake_quantize(x, bit_width, mode="per_tensor", dim=-1):
+    if int(bit_width) >= 16:
+        return x
+
+    q_min = 0
+    q_max = (2 ** int(bit_width)) - 1
+    if mode == "per_tensor":
+        min_val = torch.min(x)
+        max_val = torch.max(x)
+    elif mode == "per_channel":
+        min_val = torch.min(x, dim=dim, keepdim=True).values
+        max_val = torch.max(x, dim=dim, keepdim=True).values
+    else:
+        raise ValueError(f"Invalid fake quant mode: {mode}")
+
+    scale = torch.clamp(max_val - min_val, min=1e-8) / q_max
+    zero_point = torch.round(q_min - min_val / scale).clamp(q_min, q_max)
+    quantized = torch.round(x / scale + zero_point).clamp(q_min, q_max)
+    return (quantized - zero_point) * scale
+
+
 class FakeQuantLinear(nn.Module):
     def __init__(self, original_linear, w_bit=4, a_bit=8, awq_grid=21):
         super().__init__()
@@ -178,6 +201,27 @@ def replace_linear_with_fake_quant(module, w_bit, a_bit, awq_grid=21, skip_names
             setattr(module, name, FakeQuantLinear(child, w_bit=w_bit, a_bit=a_bit, awq_grid=awq_grid))
         else:
             replace_linear_with_fake_quant(child, w_bit, a_bit, awq_grid=awq_grid, skip_names=skip_names)
+
+
+class ActivationQuantLinear(nn.Module):
+    def __init__(self, original_linear, a_bit=8):
+        super().__init__()
+        self.linear = original_linear
+        self.a_bit = int(a_bit)
+        self.in_features = int(original_linear.in_features)
+        self.out_features = int(original_linear.out_features)
+
+    def forward(self, x):
+        qx = affine_fake_quantize(x, self.a_bit, mode="per_channel", dim=-1)
+        return self.linear(qx)
+
+
+def replace_linear_with_activation_quant(module, a_bit, skip_names=("lm_head",)):
+    for name, child in list(module.named_children()):
+        if isinstance(child, nn.Linear) and name not in set(skip_names):
+            setattr(module, name, ActivationQuantLinear(child, a_bit=a_bit))
+        else:
+            replace_linear_with_activation_quant(child, a_bit=a_bit, skip_names=skip_names)
 
 
 def load_model_and_tokenizer(llm_name, config_name, cache_dir, force_cpu=False):
@@ -344,7 +388,7 @@ def _default_awq_results_path(dataset, llm_name, args):
     )
 
 
-def apply_official_awq_w4a16(model, tokenizer, texts, dataset, llm_name, args):
+def apply_official_awq_w4(model, tokenizer, texts, dataset, llm_name, args, activation_bit=16):
     ensure_awq_project_on_path()
     if not _is_awq_supported_model(model):
         raise NotImplementedError(
@@ -397,15 +441,27 @@ def apply_official_awq_w4a16(model, tokenizer, texts, dataset, llm_name, args):
         awq_already_applied = True
 
     if awq_already_applied:
-        print("[AWQ] AWQ scales/clips were applied during search; pseudo-quantizing weights to W4A16.")
+        print(f"[AWQ] AWQ scales/clips were applied during search; pseudo-quantizing weights to W4A{int(activation_bit)}.")
     else:
-        print("[AWQ] Applying cached AWQ scales/clips and pseudo-quantizing weights to W4A16.")
+        print(f"[AWQ] Applying cached AWQ scales/clips and pseudo-quantizing weights to W4A{int(activation_bit)}.")
         apply_awq(model, awq_results)
     pseudo_quantize_model_weight(model, w_bit=4, q_config=q_config)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model = model.to(device)
     model.eval()
     return model, device
+
+
+def apply_official_awq_w4a16(model, tokenizer, texts, dataset, llm_name, args):
+    return apply_official_awq_w4(
+        model=model,
+        tokenizer=tokenizer,
+        texts=texts,
+        dataset=dataset,
+        llm_name=llm_name,
+        args=args,
+        activation_bit=16,
+    )
 
 
 def _load_tensor(path):
@@ -494,12 +550,12 @@ def generate_pool(dataset, llm_name, config_name, args):
         print("[Info] Reducing LLaMA batch_size to 4 to avoid OOM.")
         batch_size = 4
 
-    load_config_name = "fp16" if config_spec["kind"] in ("fake_wa", "awq") else config_name
+    load_config_name = "fp16" if config_spec["kind"] in ("fake_wa", "awq", "awq_act") else config_name
     model, tokenizer, _tag = load_model_and_tokenizer(
         llm_name,
         load_config_name,
         args.cache_dir,
-        force_cpu=config_spec["kind"] == "awq",
+        force_cpu=config_spec["kind"] in ("awq", "awq_act"),
     )
     device = next(model.parameters()).device
 
@@ -520,16 +576,23 @@ def generate_pool(dataset, llm_name, config_name, args):
         if calib_count > 0:
             print(f"[FakeWA] Running calibration pass on {calib_count} node texts...")
             _ = encode_texts(model, tokenizer, texts[:calib_count], batch_size, args.max_length, device)
-    elif config_spec["kind"] == "awq":
-        print("[AWQ] Installing official llm-awq W4A16 weight-only quantization path.")
-        model, device = apply_official_awq_w4a16(
+    elif config_spec["kind"] in ("awq", "awq_act"):
+        print(
+            "[AWQ] Installing official llm-awq W4 weight quantization path "
+            f"| target=W4A{int(config_spec['a_bit'])}"
+        )
+        model, device = apply_official_awq_w4(
             model=model,
             tokenizer=tokenizer,
             texts=texts,
             dataset=dataset,
             llm_name=llm_name,
             args=args,
+            activation_bit=int(config_spec["a_bit"]),
         )
+        if config_spec["kind"] == "awq_act":
+            print(f"[AWQ] Installing activation fake quant wrappers | A{int(config_spec['a_bit'])}")
+            replace_linear_with_activation_quant(model, a_bit=int(config_spec["a_bit"]))
 
     embs = encode_texts(model, tokenizer, texts, batch_size, args.max_length, device)
     embs = maybe_align_output_embeddings(embs, dataset, llm_name, tag, config_spec, out_path, args)

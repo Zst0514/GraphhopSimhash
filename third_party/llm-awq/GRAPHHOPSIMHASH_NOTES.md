@@ -36,5 +36,8 @@ GraphhopSimhash currently uses official AWQ for W4A16 pool generation through:
 
 ```text
 GraphhopSimhash/generate_real_quant_pools.py
-    apply_official_awq_w4a16
+    apply_official_awq_w4
 ```
+
+`W4A8` and `W4A4` reuse the same AWQ W4 weight path and then add local dynamic
+affine activation fake quantization.
