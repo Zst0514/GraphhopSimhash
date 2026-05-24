@@ -1,123 +1,184 @@
 # GraphHop SimHash
 
-Project-style refactor of `GraphAdaptiveMask.py`.
+`GraphhopSimhash` 当前主线做三件事：
 
-The package keeps the original experiment behavior by default. In particular,
-the score gate is available but disabled unless `--enable_score_gate` is passed.
+1. **GraphHop SimHash reuse**：用图上下文 hash 找可复用节点，减少 embedding 计算。
+2. **TSER score gate**：用图风险分数过滤危险复用，降低复用带来的精度掉点。
+3. **AWQ W4A8/W4A4 embedding pool**：生成真实低精度 embedding，并评估固定预算下的 W4A8/W4A4 路由。
 
-## Layout
+## 文档结构
 
-- `cli.py`: command-line arguments and validation.
-- `runner.py`: experiment orchestration, baseline training, route construction, evaluation.
-- `controller.py`: SimHash cache, multi-route retrieval, structure checks, optional score gate.
-- `scoring.py`: degree/context/rare-leaf sensitivity scoring and quantization policy.
-- `real_quant.py`: real pre-generated FP/INT8/INT4 feature-pool policy evaluation.
-- `internal_split_calibration.py`: high-bit/low-bit node split and per-split calibration sampling.
-- `features.py`: self/1-hop/2-hop hash feature construction.
-- `projections.py`: raw and learned multi-head hash projections.
-- `data.py`: OFA data loading and cheap-feature loading.
-- `models.py`: lightweight GNN wrapper used for evaluation.
-- `runtime.py`, `paths.py`, `config.py`: environment, paths, and dataset config helpers.
-
-## Risk Gate
-
-The default score gate keeps the original degree protection and adds a
-low-degree uniqueness term:
+当前 root 目录只保留主线文档：
 
 ```text
-PropagationRisk_q      = quantized degree risk, 0..15
-GraphContextRisk_q     = max(boundary risk, self-vs-context shift), 0..15
-RarityRisk_q           = global SimHash bucket rarity from self cheap features, 0..15
-LowDegreeUniqueRisk_q  = (15 - PropagationRisk_q) * RarityRisk_q / 15
+README.md
+    项目入口、常用命令、文档索引。
 
-Sensitivity_q =
-  3 * PropagationRisk_q
-  + 2 * GraphContextRisk_q
-  + 2 * LowDegreeUniqueRisk_q
+SCORE_DEFINITIONS.md
+    TSER reuse gate 与 TSER quant routing 的分数定义。
 
-ReuseError_q = 1 for dist=0, 2 for dist=1, 4 for dist=2
-Risk_q = Sensitivity_q * ReuseError_q
+AWQ_W4A8_W4A4_GENERATION.md
+    当前 AWQ-based W4A16/W4A8/W4A4 embedding pool 生成方式。
+
+量化+哈希命令.md
+    reuse_real_quant 联合实验命令与结果解释。
 ```
 
-Decision rules:
+旧的 `REAL_QUANT.md`、`PTQ_EMBEDDING_QUANT.md`、`量化配置.md` 已经合并到上面几个文档中，避免重复和过时说明。
 
-- High-degree nodes are protected by `--score_hub_threshold`.
-- Low-degree rare fuzzy candidates use `--score_rare_gate_mode support` by
-  default: only weakly supported rare candidates are hard-blocked. The old
-  behavior is `--score_rare_gate_mode hard`; `risk` leaves rare nodes to the
-  risk threshold only.
-- Pair-level confidence can reduce `ReuseError_q` when candidates have enough
-  route/base support or a strong cosine margin.
-- Remaining candidates use `Risk_q <= --score_reuse_threshold`.
-
-## Risk-Guided Quantization
-
-The optional quantization policy reuses the same sensitivity score, but changes
-the approximation error by action:
+## 代码结构
 
 ```text
-INT4Risk_q = Sensitivity_q * --quant_int4_error
-INT8Risk_q = Sensitivity_q * --quant_int8_error
+cli.py
+    命令行参数。
 
-INT4 if INT4Risk_q <= --quant_int4_threshold
-else INT8 if INT8Risk_q <= --quant_int8_threshold
-else Protected/full precision
+runner.py
+    实验流程、baseline 训练、reuse / quant 评估。
+
+controller.py
+    SimHash cache、候选检索、结构检查、score gate。
+
+scoring.py
+    propagation / graph context / low-degree uniqueness 分数。
+
+generate_real_quant_pools.py
+    FP16 / W4A16 / W4A8 / W4A4 embedding pool 生成。
+
+real_quant.py
+    真实 embedding pool 的固定预算评估和联合实验装配。
+
+activation_outlier_calibration.py
+    activation outlier 统计，可选用于 W4A4 outlier channel 保护。
+
+features.py / projections.py
+    cheap feature、hash feature、多头 learned hash projection。
 ```
 
-This is an evaluation proxy: computed embeddings are fake-quantized per node
-before they enter the cache, so later reuse also sees the quantization error.
+## 1. 生成 AWQ Embedding Pool
 
-## Run
-
-Legacy-compatible baseline run:
+ST / Cora + PubMed：
 
 ```bash
-python -m GraphhopSimhash --datasets cora --runs 1 --learned_hash_epochs 10 --learned_hash_dim 128 --hamming_only_acceptor
+python -m GraphhopSimhash.generate_real_quant_pools \
+  --datasets cora pubmed \
+  --llm_name ST \
+  --configs W4A16 W4A8 W4A4 \
+  --batch_size 64 \
+  --awq_calib_samples 16 \
+  --awq_seqlen 128 \
+  --overwrite
 ```
 
-Fast smoke test:
+LLaMA-7B / Cora：
 
 ```bash
-python -m GraphhopSimhash --datasets cora --runs 1 --max_test 100 --no_learned_hash_projection
+python -m GraphhopSimhash.generate_real_quant_pools \
+  --datasets cora \
+  --llm_name llama2_7b \
+  --configs W4A16 W4A8 W4A4 \
+  --batch_size 4 \
+  --awq_calib_samples 128 \
+  --awq_seqlen 512 \
+  --overwrite
 ```
 
-Score-gate run with the same base configuration:
+输出路径格式：
+
+```text
+cache_data/{dataset}_{model}_oracle_{tag}.pt
+```
+
+例如：
+
+```text
+cache_data/cora_ST_oracle_W4A16.pt
+cache_data/cora_ST_oracle_W4A8.pt
+cache_data/cora_ST_oracle_W4A4.pt
+```
+
+## 2. 真实量化固定预算评估
+
+这组实验不做 hash reuse，只看 W4A8/W4A4 路由本身：
 
 ```bash
-python -m GraphhopSimhash --datasets cora --runs 1 --learned_hash_epochs 10 --learned_hash_dim 128 --hamming_only_acceptor --enable_score_gate
+python -m GraphhopSimhash \
+  --datasets cora \
+  --runs 10 \
+  --experiment_suite real_quant_ablation \
+  --real_quant_policy_suite w4a8_budget \
+  --real_quant_model_name ST \
+  --real_quant_fp_tag W4A16 \
+  --real_quant_int8_tag W4A8 \
+  --real_quant_int4_tag W4A4 \
+  --real_quant_fp_ratio 0.0 \
+  --real_quant_int8_ratio 0.20 \
+  --real_quant_error_norm 1.0
 ```
 
-Risk-aware reuse plus quantization:
+主表只保留可部署策略：
+
+```text
+AllFP
+UniformW4A8
+UniformW4A4
+RandomTopK_W4A8
+DegreeTopK_W4A8
+TSERTopK_W4A8
+```
+
+`DegreeErrorTopK` / `TSERErrorTopK` 这类真实误差 oracle 行不作为主线，因为它们需要提前知道每个节点的 FP-vs-W4A4 误差。
+
+## 3. Hash Reuse + TSER Gate
+
+只评估 reuse，不叠加真实量化：
 
 ```bash
-python -m GraphhopSimhash --datasets cora --runs 1 --learned_hash_epochs 10 --learned_hash_dim 128 --hamming_only_acceptor --enable_score_gate --enable_quant_policy
+python -m GraphhopSimhash \
+  --datasets cora \
+  --runs 10 \
+  --experiment_suite score_ablation \
+  --radius 2 \
+  --hash_heads_per_route 4 \
+  --main_hash_head_bits 16 16 16 16 \
+  --learned_hash_epochs 10 \
+  --learned_hash_dim 128 \
+  --hamming_only_acceptor
 ```
 
-Build only the internal high-bit/low-bit calibration split:
+输出会比较：
 
-```bash
-python -m GraphhopSimhash --datasets cora --runs 1 --internal_split_calibration_only --internal_calib_samples 512 --internal_split_priority degree
+```text
+R2_NoScore
+R2_DegreeOnly
+R2_TSER
 ```
 
-One-command ablation under the same trained baseline:
+含义：
 
-```bash
-python -m GraphhopSimhash --datasets cora pubmed --runs 3 --learned_hash_epochs 10 --learned_hash_dim 128 --hamming_only_acceptor --experiment_suite quant_ablation
+```text
+NoScore:
+    只看 hash/hamming，复用率高但掉点大。
+
+DegreeOnly:
+    只保护高传播节点。
+
+TSER:
+    degree + graph context + low-degree uniqueness。
 ```
 
-Real quantized feature-pool ablation:
+## 4. Reuse + Real Quant 联合实验
 
-```bash
-python -m GraphhopSimhash --datasets cora pubmed --runs 3 --experiment_suite real_quant_ablation --real_quant_model_name llama2_7b --real_quant_fp_ratio 0.10 --real_quant_int8_ratio 0.20
+联合实验中：
+
+```text
+reuse hit:
+    直接读 cache，cost = 0。
+
+reuse miss:
+    再进入 W4A8 / W4A4 / FP 路径。
 ```
 
-W4A4/W4A8 fixed-budget ablation with the internal split row:
-
-```bash
-python -m GraphhopSimhash --datasets cora --runs 3 --experiment_suite real_quant_ablation --real_quant_policy_suite w4a8_budget --real_quant_model_name llama2_7b --real_quant_fp_tag W4A16 --real_quant_int8_tag W4A8 --real_quant_int4_tag W4A4 --real_quant_fp_ratio 0.0 --real_quant_int8_ratio 0.90 --internal_split_calibration --internal_split_priority degree --internal_split_topk_ratio 0.90
-```
-
-Joint hash reuse plus real W4A4/W4A8 feature-pool execution:
+命令：
 
 ```bash
 python -m GraphhopSimhash \
@@ -140,30 +201,52 @@ python -m GraphhopSimhash \
   --route_min_support_hits 3
 ```
 
-`W4A16` now uses the vendored official `llm-awq` source under
-`third_party/llm-awq`. LLaMA follows the upstream AWQ path; ST/DistilBERT is
-handled by a local GraphhopSimhash adapter. Use `W4A16` for the AWQ-family
-reference, or `FP16` for a clean full-precision reference. The old approximate
-W4A16 implementation remains available as `W4A16_FAKE`. `W4A8` and `W4A4` are
-now built on the same official AWQ W4 weight path, with dynamic affine
-activation fake quantization added on top. The previous local fake
-implementations remain available as `W4A8_FAKE` and `W4A4_FAKE`.
+## 5. TSER 参数探索
 
-In `reuse_real_quant`, reuse hits are counted as cache reads. The real
-W4A4/W4A8/FP policy is applied only to hash-miss nodes, so the reported
-W4A8/W4A4/FP percentages are actual compute percentages over all nodes.
-
-The `w4a8_budget` suite also reports quantization-aware `QuantTSERTopK`,
-`DegreeErrorTopK`, and `TSERErrorTopK` rows. `DegreeErrorTopK` and
-`TSERErrorTopK` rank nodes by graph importance multiplied by the actual W4A4
-embedding error. See `REAL_QUANT.md` for required cache files and the exact
-policy definitions.
-
-Useful score ablations:
+Cora：
 
 ```bash
-python -m GraphhopSimhash --datasets cora --runs 1 --enable_score_gate --score_reuse_threshold 45
-python -m GraphhopSimhash --datasets cora --runs 1 --enable_score_gate --score_rare_gate_mode hard --score_reuse_threshold 120
-python -m GraphhopSimhash --datasets cora --runs 1 --enable_score_gate --score_rare_gate_mode risk
-python -m GraphhopSimhash --datasets cora --runs 1 --experiment_suite score_ablation
+RUNS=5 bash GraphhopSimhash/run_cora_tser_reuse_sweep.sh
 ```
+
+PubMed：
+
+```bash
+RUNS=5 bash GraphhopSimhash/run_pubmed_tser_reuse_sweep.sh
+```
+
+结果目录：
+
+```text
+output/tser_reuse_sweep/cora/
+output/tser_reuse_sweep/pubmed/
+```
+
+重点看：
+
+```text
+Reuse %
+Acc
+Drop %
+Reuse n/d
+```
+
+## 6. 当前实验口径
+
+论文叙事建议分清边界：
+
+```text
+SimHash:
+    负责找可复用节点，贡献是减少计算。
+
+TSER score gate:
+    负责过滤危险复用，贡献是在复用率和精度之间做可调折中。
+
+AWQ W4A8/W4A4:
+    负责让低精度 embedding pool 本身可用。
+
+Degree / TSER quant routing:
+    负责在固定 W4A8 预算下选择哪些节点走安全路径。
+```
+
+不要把 oracle error-aware 策略写成主系统贡献；它们只能作为上界或 debug 参考。
