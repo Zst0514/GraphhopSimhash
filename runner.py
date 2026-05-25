@@ -632,6 +632,9 @@ def run_internal_split_calibration_step(
 
 
 def build_real_quant_policy_configs(args):
+    if bool(getattr(args, "reuse_real_quant_allfp_only", False)):
+        return [("AllFP", "all_fp")]
+
     if args.real_quant_policy_suite == "w4a8_budget":
         int8_tag = str(args.real_quant_int8_tag)
         int4_tag = str(args.real_quant_int4_tag)
@@ -903,7 +906,12 @@ def run_reuse_real_quant_experiment(args):
                 "[JointPolicy] Reuse hits are free cache reads; "
                 "real-quant budgets are allocated only over hash-miss nodes."
             )
-            regenerate_real_quant_pools(ds_key, args, log_important)
+            if bool(getattr(args, "disable_real_quant_autogen", False)):
+                log_important(
+                    "[RealQuantAutoGen] disabled; using existing real-quant feature pools."
+                )
+            else:
+                regenerate_real_quant_pools(ds_key, args, log_important)
 
             seeds = [int(args.seed) + run_idx for run_idx in range(args.runs)]
             for run_idx, seed in enumerate(seeds):

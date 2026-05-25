@@ -359,6 +359,16 @@ def build_parser():
     parser.add_argument("--real_quant_int8_path", type=str, default=None)
     parser.add_argument("--real_quant_int4_path", type=str, default=None)
     parser.add_argument(
+        "--disable_real_quant_autogen",
+        action="store_true",
+        help="For reuse_real_quant, use existing real-quant pools instead of regenerating and overwriting them.",
+    )
+    parser.add_argument(
+        "--reuse_real_quant_allfp_only",
+        action="store_true",
+        help="For reuse_real_quant sweeps, report only the AllFP miss path so the run isolates hash reuse.",
+    )
+    parser.add_argument(
         "--real_quant_policy_suite",
         type=str,
         default="standard",

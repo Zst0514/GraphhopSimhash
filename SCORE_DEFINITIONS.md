@@ -91,6 +91,8 @@ boundary_risk(v) =
     for u in N(v)
 ```
 
+它是逐边比较：看 `v` 和每个邻居是否相似，用来捕捉局部边界混杂。`sketch_bits` 是 hash bit 数，除以它是为了把 Hamming 距离归一化到约 `[0, 1]`。
+
 `context_shift` 来自 self feature 和 context signature 的 cosine 偏移：
 
 ```text
@@ -100,6 +102,10 @@ context_signature(v) =
 context_shift(v) =
     0.5 * clamp(1 - cosine(self(v), context_signature(v)), 0, 2)
 ```
+
+它是整体上下文比较：先把邻居聚合成 `neighbor_mean`，再看节点自己和局部上下文中心是否偏离。加入 `0.5 * self` 是为了让低度节点的上下文估计更平滑。
+
+二者相关但不重复：`boundary_risk` 抓逐边异质性，`context_shift` 抓整体上下文偏移。取 `max` 表示任一风险高，都应提高复用保护。
 
 ### 2.3 `low_degree_unique_q`
 
