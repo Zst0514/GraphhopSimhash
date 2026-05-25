@@ -268,6 +268,118 @@ TSER 3/1/1 下扫描 `T = 20 / 30 / 45 / 60 / 90`：
 
 结论：residual curve 整体低于 direct curve。它的价值不是在单点上“救回很多精度”，而是把 reuse-drop Pareto 曲线整体向更优方向移动。
 
+### 7.5 How to Reproduce
+
+下面命令都在仓库根目录运行：
+
+```bash
+cd /home/zhangshangtong/Transformer/OFA
+```
+
+固定使用 Cora/ST、4 个 16-bit hash head、TSER `3/1/1`：
+
+```bash
+BASE=(python -m GraphhopSimhash
+  --datasets cora
+  --runs 3
+  --experiment_suite residual_reuse
+  --radius 2
+  --hash_heads_per_route 4
+  --main_hash_head_bits 16 16 16 16
+  --learned_hash_epochs 10
+  --learned_hash_dim 128
+  --hamming_only_acceptor
+  --enable_score_gate
+  --allow_rare_fuzzy
+  --score_propagation_weight 3
+  --score_graph_context_weight 1
+  --score_low_unique_weight 1
+  --residual_rank 32
+  --residual_epochs 100
+  --residual_max_train_pairs 1024
+  --residual_min_dist 1.0)
+```
+
+复现 `TSER 3/1/1, T=45`：
+
+```bash
+"${BASE[@]}" --score_reuse_threshold 45
+```
+
+复现 `TSER 3/1/1, T=30`：
+
+```bash
+"${BASE[@]}" --score_reuse_threshold 30
+```
+
+复现 CAM anchor 消融：
+
+```bash
+# Exact-only CAM: only exact hash reuse, no residual correction.
+python -m GraphhopSimhash \
+  --datasets cora \
+  --runs 3 \
+  --experiment_suite residual_reuse \
+  --radius 0 \
+  --hash_heads_per_route 4 \
+  --main_hash_head_bits 16 16 16 16 \
+  --learned_hash_epochs 10 \
+  --learned_hash_dim 128 \
+  --hamming_only_acceptor \
+  --enable_score_gate \
+  --allow_rare_fuzzy \
+  --score_reuse_threshold 45 \
+  --score_propagation_weight 3 \
+  --score_graph_context_weight 1 \
+  --score_low_unique_weight 1 \
+  --residual_rank 32 \
+  --residual_epochs 0 \
+  --residual_max_train_pairs 1024
+
+# Fuzzy CAM + residual.
+"${BASE[@]}" --score_reuse_threshold 45
+
+# Random anchor + residual: keep the same hit set, replace CAM source with random source.
+"${BASE[@]}" \
+  --score_reuse_threshold 45 \
+  --residual_anchor_mode random
+```
+
+复现 `T = 20 / 30 / 45 / 60 / 90` 曲线：
+
+```bash
+for T in 20 30 45 60 90; do
+  "${BASE[@]}" --score_reuse_threshold "$T"
+done
+```
+
+复现 `residual_min_dist` 阈值扫描：
+
+```bash
+for MD in 0.0 1.0 2.0 3.0; do
+  "${BASE[@]}" \
+    --score_reuse_threshold 30 \
+    --residual_min_dist "$MD"
+done
+```
+
+其中：
+
+```text
+residual_min_dist=0.0: exact + fuzzy 都修正
+residual_min_dist=1.0: 只修正 fuzzy hit，当前最稳
+residual_min_dist=2.0: 只修正 dist>=2 的候选
+residual_min_dist=3.0: 基本退化为 direct reuse
+```
+
+当前 Cora/ST、TSER `3/1/1`、`T=30` 下的扫描结果支持：
+
+```text
+dist=0 exact hit -> direct reuse
+dist=1 fuzzy hit -> residual correction
+dist>=2 hit      -> 当前 gate 下样本极少，通常不进入 residual 主路径
+```
+
 ## 8. Current Limitations
 
 当前版本仍是第一版机制验证，有几个边界需要注意：
@@ -300,4 +412,3 @@ Hash lookup < residual correction < full Transformer encoder
 2. TSER gate 负责图语义风险控制；
 3. low-rank residual adapter 在 accepted fuzzy reuse 上提供轻量纠错；
 4. 整体目标是在精度约束下最大化 encoder computation saving。
-
