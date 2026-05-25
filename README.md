@@ -138,8 +138,8 @@ TSERTopK_W4A8
 第 1 项在线不可得；第 2 项最直接的可部署代理是 degree / propagation risk。
 ```
 
-因此固定预算量化路由中，`DegreeTopK_W4A8` 是更稳定的 deployable baseline；
-`TSERTopK_W4A8` 作为图语义修正消融保留，但不要写成 TSER 在量化路由上优于 Degree。
+因此固定预算量化路由中，实验结果显示 `DegreeTopK_W4A8` 优于 `TSERTopK_W4A8`。
+`TSERTopK_W4A8` 作为图语义修正消融保留。
 
 ## 3. Hash Reuse + TSER Gate
 
@@ -260,7 +260,7 @@ AWQ W4A8/W4A4:
 
 Degree / TSER quant routing:
     负责在固定 W4A8 预算下选择哪些节点走安全路径。
-    当前实验中 Degree / propagation risk 是量化路由更稳的可部署依据；
+    当前实验中 DegreeTopK_W4A8 优于 TSERTopK_W4A8；
     TSER quant routing 主要作为图语义修正消融。
 ```
 

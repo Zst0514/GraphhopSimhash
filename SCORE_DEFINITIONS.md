@@ -308,11 +308,10 @@ graph context boundary
 low-degree uniqueness
 ```
 
-量化路由这里不要写成“TSER 优于 Degree”。目前实验更支持：
+量化路由这里经过实验发现：
 
 ```text
-Degree / propagation risk 是更稳定的 deployable 路由依据；
-TSERTopK_W4A8 更适合作为图语义修正消融，而不是主结论。
+DegreeTopK_W4A8 优于 TSERTopK_W4A8。
 ```
 
 原因是量化损伤主要由两个因素决定：
@@ -324,7 +323,7 @@ TSERTopK_W4A8 更适合作为图语义修正消融，而不是主结论。
 
 第 1 项需要真实 FP/quant embedding 对比，在线不可得；第 2 项最直接的代理就是
 `propagation_q` / degree。因此在不使用 oracle error 的前提下，DegreeTopK_W4A8
-通常比加入 context / low-unique 的 TSERTopK_W4A8 更稳。
+比加入 context / low-unique 的 TSERTopK_W4A8 更符合当前实验结果。
 
 TSER 的优势边界主要在 hash reuse gate：reuse 是“用别的节点 embedding 替代自己”，
 语义边界和稀有低度节点会显著影响错复用风险；而量化是“自己的 embedding 被扰动”，
