@@ -107,6 +107,19 @@ context_shift(v) =
 
 二者相关但不重复：`boundary_risk` 抓逐边异质性，`context_shift` 抓整体上下文偏移。取 `max` 表示任一风险高，都应提高复用保护。
 
+简单例子：
+
+```text
+boundary_risk 高：
+    v 的一半邻居像自己，另一半邻居属于别的语义簇。
+    逐边 Hamming 平均会变大，说明 v 位于混杂边界。
+
+context_shift 高：
+    每个邻居和 v 的单边差异不一定很大，
+    但邻居整体平均方向一致地偏离 v。
+    neighbor_mean 会把这种整体偏移累积出来。
+```
+
 ### 2.3 `low_degree_unique_q`
 
 低 degree 节点传播影响小，但如果它语义很稀有，错误复用会直接破坏自身预测。
