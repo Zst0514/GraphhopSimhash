@@ -264,6 +264,15 @@ def build_log_path(dataset_log_dir, ds_key, args):
             f"_qeb{float(getattr(args, 'quant_error_bias', 1.0)):.1f}"
             f"_{getattr(args, 'quant_error_rank_source', 'continuous')}"
         ).replace(".", "p")
+    if getattr(args, "experiment_suite", None) == "residual_reuse":
+        config_tag += (
+            f"_resr{int(getattr(args, 'residual_rank', 32))}"
+            f"_e{int(getattr(args, 'residual_epochs', 200))}"
+            f"_md{float(getattr(args, 'residual_min_dist', 1.0)):.1f}"
+            f"_td{float(getattr(args, 'residual_direct_threshold', -1.0)):.1f}"
+            f"_{getattr(args, 'residual_anchor_mode', 'cam')}"
+            f"_mx{int(getattr(args, 'residual_max_train_pairs', 4096))}"
+        ).replace(".", "p").replace("-", "m")
     if not bool(getattr(args, "disable_score_gate", True)):
         config_tag += (
             f"_sg{int(getattr(args, 'score_reuse_threshold', 45))}"

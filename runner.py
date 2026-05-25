@@ -24,6 +24,11 @@ from .real_quant import (
     select_real_quant_policy_actions,
     summarize_real_quant_policy,
 )
+from .residual_reuse import (
+    apply_residual_adapter,
+    embedding_error,
+    train_residual_adapter,
+)
 from .routing import (
     apply_table_weight_decay,
     build_log_path,
@@ -496,7 +501,9 @@ def run_single_config(model, data, verify_features, oracle_embs, route_bundle, c
     )
 
 
-def evaluate_gnn_embeddings(model, data, node_embs):
+def evaluate_gnn_embeddings(model, data, node_embs, mask=None):
+    if mask is None:
+        mask = data.test_mask
     with torch.no_grad():
         out = model.forward_gnn_only(
             node_embs,
@@ -505,8 +512,92 @@ def evaluate_gnn_embeddings(model, data, node_embs):
             data.edge_attr,
         )
         pred = out.argmax(dim=1)
-        acc = (pred[data.test_mask] == data.y[data.test_mask]).sum().item() / data.test_mask.sum().item()
+        acc = (pred[mask] == data.y[mask]).sum().item() / mask.sum().item()
     return float(acc)
+
+
+def evaluate_raw_node_features(model, data, raw_features, mask=None):
+    with torch.no_grad():
+        hidden = model.encoder(raw_features)
+    return evaluate_gnn_embeddings(model, data, hidden, mask=mask)
+
+
+def build_residual_correction_mask(trace, risk_gate, direct_threshold, device):
+    hit_mask = trace["hit_mask"].to(device=device, dtype=torch.bool)
+    source_ok = trace["source_ids"].to(device=device) >= 0
+    correction_mask = hit_mask & source_ok
+    if float(direct_threshold) < 0.0 or risk_gate is None:
+        return correction_mask, {
+            "direct_threshold": float(direct_threshold),
+            "direct_low_risk": 0,
+            "residual_candidates": int(correction_mask.sum().item()),
+        }
+
+    hit_nodes = correction_mask.nonzero(as_tuple=False).view(-1)
+    active = torch.zeros_like(correction_mask)
+    direct_low_risk = 0
+    for node_idx in hit_nodes.detach().cpu().tolist():
+        decision = risk_gate.evaluate(
+            int(node_idx),
+            int(trace["best_dists"][node_idx].item()),
+            route_hit_count=int(trace["route_hit_counts"][node_idx].item()),
+            base_route_hit_count=int(trace["base_route_hit_counts"][node_idx].item()),
+            cos_margin=None,
+        )
+        if float(decision["risk"]) > float(direct_threshold):
+            active[node_idx] = True
+        else:
+            direct_low_risk += 1
+
+    return active, {
+        "direct_threshold": float(direct_threshold),
+        "direct_low_risk": int(direct_low_risk),
+        "residual_candidates": int(active.sum().item()),
+    }
+
+
+def replace_reuse_anchors_with_random(trace, direct_features, target_features, verify_features, seed):
+    random_trace = {}
+    for key, value in trace.items():
+        if torch.is_tensor(value):
+            random_trace[key] = value.clone()
+        elif isinstance(value, list):
+            random_trace[key] = list(value)
+        else:
+            random_trace[key] = value
+
+    hit_nodes = (random_trace["hit_mask"] & (random_trace["source_ids"] >= 0)).nonzero(as_tuple=False).view(-1)
+    if hit_nodes.numel() == 0:
+        return random_trace, direct_features, {"randomized": 0}
+
+    generator = torch.Generator(device="cpu")
+    generator.manual_seed(int(seed) + 7919)
+    random_sources = torch.randint(
+        low=0,
+        high=int(target_features.size(0)),
+        size=(int(hit_nodes.numel()),),
+        generator=generator,
+        device="cpu",
+    ).to(device=target_features.device, dtype=torch.long)
+    random_sources = torch.where(
+        random_sources == hit_nodes.to(random_sources.device),
+        (random_sources + 1) % int(target_features.size(0)),
+        random_sources,
+    )
+
+    random_trace["source_ids"][hit_nodes] = random_sources
+    random_trace["best_dists"][hit_nodes] = torch.clamp(random_trace["best_dists"][hit_nodes], min=1)
+    random_trace["best_cosines"][hit_nodes] = F.cosine_similarity(
+        verify_features[hit_nodes],
+        verify_features[random_sources],
+        dim=1,
+    )
+    for node_idx in hit_nodes.detach().cpu().tolist():
+        random_trace["hit_kinds"][node_idx] = "random"
+
+    random_direct = direct_features.clone()
+    random_direct[hit_nodes] = target_features[random_sources]
+    return random_trace, random_direct, {"randomized": int(hit_nodes.numel())}
 
 
 def summarize_reuse_real_quant_execution(actions, hit_mask, errors, fp_embs, final_embs):
@@ -546,6 +637,261 @@ def summarize_reuse_real_quant_execution(actions, hit_mask, errors, fp_embs, fin
         "miss_avg_selected_error": float(selected_err[miss_mask].sum().item() / miss_count),
         "final_avg_error": float(final_err.mean().item()),
     }
+
+
+def run_residual_reuse_experiment(args):
+    target_datasets = args.datasets if args.datasets else ["cora"]
+    log_dir = os.path.join("output", "residual_reuse")
+    os.makedirs(log_dir, exist_ok=True)
+
+    for ds_key in target_datasets:
+        if ds_key not in DATASET_CONFIGS:
+            continue
+
+        dataset_log_dir = os.path.join(log_dir, ds_key)
+        os.makedirs(dataset_log_dir, exist_ok=True)
+        log_path = build_log_path(dataset_log_dir, ds_key, args)
+
+        results = {
+            "baseline": [],
+            "direct_acc": [],
+            "direct_drop": [],
+            "residual_acc": [],
+            "residual_drop": [],
+            "reuse": [],
+            "reuse_num": [],
+            "reuse_den": [],
+            "train_pairs": [],
+            "direct_err": [],
+            "direct_hit_err": [],
+            "residual_err": [],
+            "residual_hit_err": [],
+            "residual_alpha": [],
+        }
+
+        with open(log_path, "w", encoding="utf-8") as summary_file:
+            def log_important(msg):
+                print(msg)
+                summary_file.write(msg + "\n")
+                summary_file.flush()
+
+            log_important(f"\n{'=' * 72}")
+            log_important(f"Running Low-Rank Residual Reuse on {ds_key.upper()}")
+            log_important(f"{'=' * 72}")
+            log_important(
+                "[ResidualReuse] "
+                f"rank={int(args.residual_rank)} | epochs={int(args.residual_epochs)} "
+                f"| train_split={args.residual_train_split} "
+                f"| max_pairs={int(args.residual_max_train_pairs)} "
+                f"| alpha={'auto' if float(args.residual_alpha) < 0.0 else float(args.residual_alpha)} "
+                f"| min_dist={float(args.residual_min_dist):.1f} "
+                f"| T_direct={'none' if float(args.residual_direct_threshold) < 0.0 else float(args.residual_direct_threshold)} "
+                f"| anchor={args.residual_anchor_mode}"
+            )
+
+            seeds = [int(args.seed) + run_idx for run_idx in range(args.runs)]
+            for run_idx, seed in enumerate(seeds):
+                log_important(f"\n--- Run {run_idx + 1}/{args.runs} (Seed {seed}) ---")
+                run_args = make_run_args(args, seed)
+                _conf, data, verify_features, device = load_run_state(ds_key, run_args, seed)
+                log_important(
+                    f"[Seed] run={int(seed)} | controller={int(run_args.controller_seed)} "
+                    f"| hash_head={int(run_args.hash_head_seed)} "
+                    f"| topology_sketch={int(run_args.topology_sketch_seed)}"
+                )
+
+                model, base_acc, baseline_embs, oracle_logits = train_baseline_model(data, run_args, device)
+                results["baseline"].append(base_acc)
+                log_important(f"[Baseline] Acc: {base_acc:.4f}")
+
+                route_bundle = build_route_bundle(
+                    verify_features,
+                    data,
+                    baseline_embs,
+                    oracle_logits,
+                    run_args,
+                    log_important,
+                    device,
+                )
+                controller = build_controller(
+                    data,
+                    verify_features,
+                    route_bundle,
+                    {"name": "ResidualReuse", "overrides": {}},
+                    run_args,
+                    device,
+                )
+
+                target_features = data.x.detach()
+                direct_features, _hits = controller.query_full_batch(
+                    route_bundle["hash_route_features"],
+                    verify_features,
+                    target_features,
+                )
+                trace = controller.last_query_trace
+                if args.residual_anchor_mode == "random":
+                    trace, direct_features, anchor_info = replace_reuse_anchors_with_random(
+                        trace,
+                        direct_features,
+                        target_features,
+                        verify_features,
+                        seed,
+                    )
+                else:
+                    anchor_info = {"randomized": 0}
+                stats = controller.stats
+                hit_mask = trace["hit_mask"]
+                correction_mask, correction_info = build_residual_correction_mask(
+                    trace,
+                    controller.risk_gate,
+                    args.residual_direct_threshold,
+                    device,
+                )
+
+                direct_acc = evaluate_raw_node_features(model, data, direct_features)
+                direct_drop = base_acc - direct_acc
+                direct_err = embedding_error(target_features, direct_features)
+
+                adapter, train_info = train_residual_adapter(
+                    target_embeddings=target_features,
+                    verify_features=verify_features,
+                    edge_index=data.edge_index,
+                    trace=trace,
+                    data=data,
+                    risk_scores=controller.node_risk_scores,
+                    rank=args.residual_rank,
+                    epochs=args.residual_epochs,
+                    lr=args.residual_lr,
+                    weight_decay=args.residual_weight_decay,
+                    residual_l2=args.residual_l2,
+                    train_split=args.residual_train_split,
+                    max_pairs=args.residual_max_train_pairs,
+                    correction_mask=correction_mask,
+                )
+
+                if adapter is not None and float(args.residual_alpha) < 0.0:
+                    selected_alpha = float(args.residual_alpha_grid[0])
+                    selected_val_acc = -1.0
+                    for alpha in sorted(float(value) for value in args.residual_alpha_grid):
+                        candidate_features, _candidate_info = apply_residual_adapter(
+                            direct_embeddings=direct_features,
+                            target_embeddings=target_features,
+                            verify_features=verify_features,
+                            edge_index=data.edge_index,
+                            trace=trace,
+                            adapter=adapter,
+                            risk_scores=controller.node_risk_scores,
+                            alpha=alpha,
+                            min_dist=args.residual_min_dist,
+                            correction_mask=correction_mask,
+                        )
+                        val_acc = evaluate_raw_node_features(model, data, candidate_features, mask=data.val_mask)
+                        if val_acc > selected_val_acc + 1e-12:
+                            selected_val_acc = val_acc
+                            selected_alpha = alpha
+                    alpha_for_apply = selected_alpha
+                    alpha_note = f"auto(val_acc={selected_val_acc:.4f})"
+                else:
+                    alpha_for_apply = max(0.0, float(args.residual_alpha))
+                    alpha_note = "fixed"
+
+                residual_features, apply_info = apply_residual_adapter(
+                    direct_embeddings=direct_features,
+                    target_embeddings=target_features,
+                    verify_features=verify_features,
+                    edge_index=data.edge_index,
+                    trace=trace,
+                    adapter=adapter,
+                    risk_scores=controller.node_risk_scores,
+                    alpha=alpha_for_apply,
+                    min_dist=args.residual_min_dist,
+                    correction_mask=correction_mask,
+                )
+                residual_acc = evaluate_raw_node_features(model, data, residual_features)
+                residual_drop = base_acc - residual_acc
+                residual_err = embedding_error(target_features, residual_features)
+
+                hit_den = max(1, int(hit_mask.sum().item()))
+                direct_hit_err = float(direct_err[hit_mask].mean().item()) if hit_den > 0 else 0.0
+                residual_hit_err = float(residual_err[hit_mask].mean().item()) if hit_den > 0 else 0.0
+                reuse_rate = stats["reuse"] / max(1, stats["total_queries"])
+
+                results["direct_acc"].append(direct_acc)
+                results["direct_drop"].append(direct_drop)
+                results["residual_acc"].append(residual_acc)
+                results["residual_drop"].append(residual_drop)
+                results["reuse"].append(float(reuse_rate))
+                results["reuse_num"].append(int(stats["reuse"]))
+                results["reuse_den"].append(int(stats["reuse_denominator"]))
+                results["train_pairs"].append(int(train_info["train_pairs"]))
+                results["direct_err"].append(float(direct_err.mean().item()))
+                results["direct_hit_err"].append(direct_hit_err)
+                results["residual_err"].append(float(residual_err.mean().item()))
+                results["residual_hit_err"].append(residual_hit_err)
+                results["residual_alpha"].append(float(apply_info["alpha"]))
+
+                log_important(
+                    f"[DirectReuse] Reuse={reuse_rate:.1%} "
+                    f"| AnchorMode={args.residual_anchor_mode} "
+                    f"| Randomized={anchor_info['randomized']} "
+                    f"| Acc={direct_acc:.4f} | Drop={direct_drop:.2%} "
+                    f"| AvgErr={float(direct_err.mean().item()):.5f} "
+                    f"| HitErr={direct_hit_err:.5f}"
+                )
+                log_important(
+                    f"[ResidualReuse] Corrected={apply_info['corrected']} "
+                    f"| DirectLowRisk={correction_info['direct_low_risk']} "
+                    f"| ResidualCand={correction_info['residual_candidates']} "
+                    f"| TrainPairs={train_info['train_pairs']} "
+                    f"| Alpha={apply_info['alpha']:.3f} ({alpha_note}) "
+                    f"| TrainLoss={train_info['loss']:.6f} "
+                    f"| Acc={residual_acc:.4f} | Drop={residual_drop:.2%} "
+                    f"| AvgErr={float(residual_err.mean().item()):.5f} "
+                    f"| HitErr={residual_hit_err:.5f}"
+                )
+                log_important(
+                    f"  ReuseDetail: numerator={stats['reuse']} "
+                    f"(exact={stats['exact_reuse']}, fuzzy={stats['fuzzy_reuse']}) "
+                    f"/ denominator={stats['reuse_denominator']} "
+                    f"| computed={stats['computed']} "
+                    f"| score_reject={stats['score_reject']} "
+                    f"(hub={stats['score_reject_hub_protect']}, "
+                    f"rare={stats['score_reject_rare_leaf']}, "
+                    f"risk={stats['score_reject_risk']})"
+                )
+
+            log_important(f"\n{'=' * 72}")
+            log_important(f"FINAL RESIDUAL REUSE SUMMARY ({args.runs} Runs) | {ds_key.upper()}")
+            log_important(f"{'=' * 72}")
+            base_mean = float(np.mean(results["baseline"]))
+            log_important(f"Baseline Acc: {base_mean:.4f}")
+            log_important("-" * 112)
+            log_important(
+                f"{'Config':<18} | {'Reuse %':<9} | {'TrainPairs':<10} | {'Acc':<10} | "
+                f"{'Drop %':<10} | {'AvgErr':<10} | {'HitErr':<10} | {'Alpha':<7} | {'Reuse n/d':<15}"
+            )
+            log_important("-" * 112)
+            reuse_mean = float(np.mean(results["reuse"]))
+            reuse_num = float(np.mean(results["reuse_num"]))
+            reuse_den = float(np.mean(results["reuse_den"]))
+            reuse_frac = f"{reuse_num:.1f}/{reuse_den:.1f}" if args.runs > 1 else f"{int(reuse_num)}/{int(reuse_den)}"
+            train_pairs = float(np.mean(results["train_pairs"]))
+            log_important(
+                f"{'DirectReuse':<18} | {reuse_mean:<9.1%} | {'-':<10} | "
+                f"{float(np.mean(results['direct_acc'])):<10.4f} | "
+                f"{float(np.mean(results['direct_drop'])):<10.2%} | "
+                f"{float(np.mean(results['direct_err'])):<10.5f} | "
+                f"{float(np.mean(results['direct_hit_err'])):<10.5f} | {'-':<7} | {reuse_frac:<15}"
+            )
+            log_important(
+                f"{'ResidualReuse':<18} | {reuse_mean:<9.1%} | {train_pairs:<10.1f} | "
+                f"{float(np.mean(results['residual_acc'])):<10.4f} | "
+                f"{float(np.mean(results['residual_drop'])):<10.2%} | "
+                f"{float(np.mean(results['residual_err'])):<10.5f} | "
+                f"{float(np.mean(results['residual_hit_err'])):<10.5f} | "
+                f"{float(np.mean(results['residual_alpha'])):<7.3f} | {reuse_frac:<15}"
+            )
+            log_important(f"{'=' * 72}\n")
 
 
 def evaluate_with_controller_real_quant(
@@ -1138,6 +1484,8 @@ def run_adaptive_simulation(args):
         return run_real_quant_ablation(args)
     if args.experiment_suite == "reuse_real_quant":
         return run_reuse_real_quant_experiment(args)
+    if args.experiment_suite == "residual_reuse":
+        return run_residual_reuse_experiment(args)
 
     target_datasets = args.datasets if args.datasets else ["cora"]
     log_dir = os.path.join("output", "graph_simhash")

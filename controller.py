@@ -1150,6 +1150,9 @@ class PaperHashReuseController(HeatPlusPlus_NDP_Controller):
             "best_entry": top_item["entry"],
             "best_cos": top_item["cos"],
             "best_dist": top_item["dist"],
+            "route_hit_count": int(top_item.get("route_hit_count", 1)),
+            "base_route_hit_count": int(top_item.get("base_route_hit_count", 1)),
+            "winning_base_table_hit_count": int(top_item.get("winning_base_table_hit_count", 1)),
             "voted_emb": top_item["entry"]["cached_emb"],
         }
 
@@ -1211,6 +1214,13 @@ class PaperHashReuseController(HeatPlusPlus_NDP_Controller):
 
         final_embs_list = [None] * num_nodes
         hits_list = [False] * num_nodes
+        source_ids = [-1] * num_nodes
+        hit_kinds = ["miss"] * num_nodes
+        best_dists = [-1] * num_nodes
+        best_cosines = [0.0] * num_nodes
+        route_hit_counts = [0] * num_nodes
+        base_route_hit_counts = [0] * num_nodes
+        winning_base_table_hit_counts = [0] * num_nodes
         indices_compute = []
 
         for node_idx in range(num_nodes):
@@ -1237,6 +1247,13 @@ class PaperHashReuseController(HeatPlusPlus_NDP_Controller):
                     self._touch_route_entry(vote_result["best_route_idx"], vote_result["best_hash"], best_entry)
                     final_embs_list[node_idx] = vote_result["voted_emb"]
                     hits_list[node_idx] = True
+                    source_ids[node_idx] = int(best_entry["node_id"])
+                    hit_kinds[node_idx] = "exact"
+                    best_dists[node_idx] = int(vote_result["best_dist"])
+                    best_cosines[node_idx] = float(vote_result["best_cos"])
+                    route_hit_counts[node_idx] = int(vote_result.get("route_hit_count", 1))
+                    base_route_hit_counts[node_idx] = int(vote_result.get("base_route_hit_count", 1))
+                    winning_base_table_hit_counts[node_idx] = int(vote_result.get("winning_base_table_hit_count", 1))
                     self.stats["reuse"] += 1
                     self.stats["exact_reuse"] += 1
                     continue
@@ -1253,6 +1270,13 @@ class PaperHashReuseController(HeatPlusPlus_NDP_Controller):
                 self._touch_route_entry(vote_result["best_route_idx"], vote_result["best_hash"], best_entry)
                 final_embs_list[node_idx] = vote_result["voted_emb"]
                 hits_list[node_idx] = True
+                source_ids[node_idx] = int(best_entry["node_id"])
+                hit_kinds[node_idx] = "fuzzy"
+                best_dists[node_idx] = int(vote_result["best_dist"])
+                best_cosines[node_idx] = float(vote_result["best_cos"])
+                route_hit_counts[node_idx] = int(vote_result.get("route_hit_count", 1))
+                base_route_hit_counts[node_idx] = int(vote_result.get("base_route_hit_count", 1))
+                winning_base_table_hit_counts[node_idx] = int(vote_result.get("winning_base_table_hit_count", 1))
                 self.stats["reuse"] += 1
                 self.stats["fuzzy_reuse"] += 1
                 self.stats["fuzzy"] += 1
@@ -1309,4 +1333,18 @@ class PaperHashReuseController(HeatPlusPlus_NDP_Controller):
 
         final_embs = torch.stack(final_embs_list, dim=0)
         hits_tensor = torch.tensor(hits_list, dtype=torch.bool, device=self.device)
+        self.last_query_trace = {
+            "hit_mask": hits_tensor,
+            "source_ids": torch.tensor(source_ids, dtype=torch.long, device=self.device),
+            "hit_kinds": hit_kinds,
+            "best_dists": torch.tensor(best_dists, dtype=torch.long, device=self.device),
+            "best_cosines": torch.tensor(best_cosines, dtype=torch.float32, device=self.device),
+            "route_hit_counts": torch.tensor(route_hit_counts, dtype=torch.long, device=self.device),
+            "base_route_hit_counts": torch.tensor(base_route_hit_counts, dtype=torch.long, device=self.device),
+            "winning_base_table_hit_counts": torch.tensor(
+                winning_base_table_hit_counts,
+                dtype=torch.long,
+                device=self.device,
+            ),
+        }
         return final_embs, hits_tensor

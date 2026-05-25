@@ -21,8 +21,9 @@ def build_parser():
             "quant_ablation",
             "real_quant_ablation",
             "reuse_real_quant",
+            "residual_reuse",
         ],
-        help="Run one config, score-gate ablations, quantization ablations, real-quantization ablations, or joint reuse+real-quantization.",
+        help="Run one config, score/quant ablations, real quantization, joint reuse+real-quantization, or residual reuse validation.",
     )
     parser.add_argument(
         "--seed",
@@ -291,6 +292,51 @@ def build_parser():
         default="continuous",
         choices=["continuous", "quantized"],
         help="Error signal used by DegreeErrorTopK/TSERErrorTopK ranking.",
+    )
+    parser.add_argument("--residual_rank", type=int, default=32)
+    parser.add_argument("--residual_epochs", type=int, default=200)
+    parser.add_argument("--residual_lr", type=float, default=1e-3)
+    parser.add_argument("--residual_weight_decay", type=float, default=1e-4)
+    parser.add_argument("--residual_l2", type=float, default=1e-4)
+    parser.add_argument(
+        "--residual_alpha",
+        type=float,
+        default=-1.0,
+        help="Residual application strength. Use a negative value to select from --residual_alpha_grid on val.",
+    )
+    parser.add_argument(
+        "--residual_alpha_grid",
+        nargs="+",
+        type=float,
+        default=[0.0, 0.125, 0.25, 0.5, 0.75, 1.0],
+        help="Candidate residual strengths when --residual_alpha is negative.",
+    )
+    parser.add_argument(
+        "--residual_min_dist",
+        type=float,
+        default=1.0,
+        help="Only apply residual correction to reuse hits with Hamming distance at least this value.",
+    )
+    parser.add_argument(
+        "--residual_direct_threshold",
+        type=float,
+        default=-1.0,
+        help="If non-negative, hits with reuse risk at or below this threshold stay direct; only higher-risk hits are corrected.",
+    )
+    parser.add_argument(
+        "--residual_anchor_mode",
+        type=str,
+        default="cam",
+        choices=["cam", "random"],
+        help="Use CAM-selected anchors or replace hit anchors with random nodes for ablation.",
+    )
+    parser.add_argument("--residual_max_train_pairs", type=int, default=4096)
+    parser.add_argument(
+        "--residual_train_split",
+        type=str,
+        default="train_val",
+        choices=["train", "train_val", "all_hits"],
+        help="Reuse-hit nodes used to fit the low-rank residual adapter.",
     )
     parser.add_argument(
         "--internal_split_calibration",
@@ -589,6 +635,26 @@ def validate_args(parser, args):
         parser.error("quant TSER weights must be non-negative")
     if args.quant_error_bias < 0:
         parser.error("--quant_error_bias must be non-negative")
+    if args.residual_rank <= 0:
+        parser.error("--residual_rank must be positive")
+    if args.residual_epochs < 0:
+        parser.error("--residual_epochs must be non-negative")
+    if args.residual_lr <= 0:
+        parser.error("--residual_lr must be positive")
+    if args.residual_weight_decay < 0:
+        parser.error("--residual_weight_decay must be non-negative")
+    if args.residual_l2 < 0:
+        parser.error("--residual_l2 must be non-negative")
+    if not args.residual_alpha_grid:
+        parser.error("--residual_alpha_grid must contain at least one value")
+    if any(alpha < 0 for alpha in args.residual_alpha_grid):
+        parser.error("--residual_alpha_grid values must be non-negative")
+    if args.residual_min_dist < 0:
+        parser.error("--residual_min_dist must be non-negative")
+    if args.residual_direct_threshold < -1:
+        parser.error("--residual_direct_threshold must be >= -1")
+    if args.residual_max_train_pairs < 0:
+        parser.error("--residual_max_train_pairs must be non-negative")
     if args.internal_calib_samples < 0:
         parser.error("--internal_calib_samples must be >= 0")
     if not (0.0 <= args.internal_calib_high_ratio <= 1.0):
