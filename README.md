@@ -15,7 +15,7 @@ README.md
     项目入口、常用命令、文档索引。
 
 SCORE_DEFINITIONS.md
-    TSER reuse gate 与 TSER quant routing 的分数定义。
+    TSER reuse gate 的分数定义，以及量化路由中 Degree/TSER 的边界说明。
 
 AWQ_W4A8_W4A4_GENERATION.md
     当前 AWQ-based W4A16/W4A8/W4A4 embedding pool 生成方式。
@@ -127,6 +127,19 @@ TSERTopK_W4A8
 ```
 
 `DegreeErrorTopK` / `TSERErrorTopK` 这类真实误差 oracle 行不作为主线，因为它们需要提前知道每个节点的 FP-vs-W4A4 误差。
+
+当前量化路由结论要和 reuse gate 分开：
+
+```text
+量化掉点主要由两件事决定：
+    1. 节点自身量化误差
+    2. 量化误差沿图传播的范围
+
+第 1 项在线不可得；第 2 项最直接的可部署代理是 degree / propagation risk。
+```
+
+因此固定预算量化路由中，`DegreeTopK_W4A8` 是更稳定的 deployable baseline；
+`TSERTopK_W4A8` 作为图语义修正消融保留，但不要写成 TSER 在量化路由上优于 Degree。
 
 ## 3. Hash Reuse + TSER Gate
 
@@ -247,6 +260,8 @@ AWQ W4A8/W4A4:
 
 Degree / TSER quant routing:
     负责在固定 W4A8 预算下选择哪些节点走安全路径。
+    当前实验中 Degree / propagation risk 是量化路由更稳的可部署依据；
+    TSER quant routing 主要作为图语义修正消融。
 ```
 
-不要把 oracle error-aware 策略写成主系统贡献；它们只能作为上界或 debug 参考。
+不能把 oracle error-aware 策略当成可部署系统策略；它们只能作为离线上界或 debug 参考。
