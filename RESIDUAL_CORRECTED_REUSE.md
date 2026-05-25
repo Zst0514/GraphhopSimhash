@@ -380,6 +380,45 @@ dist=1 fuzzy hit -> residual correction
 dist>=2 hit      -> 当前 gate 下样本极少，通常不进入 residual 主路径
 ```
 
+
+<!-- PUBMED_ST_RESIDUAL_BIAS_SWEEP_START -->
+## 7.6 PubMed/ST 3/1/1 Confidence-Bias Sweep
+
+这组实验固定 PubMed/ST、TSER `3/1/1`、`residual_min_dist=1.0`，扫描复用阈值 `T` 和 `score_pair_confidence_discount`。
+
+这里的 `confidence_bias` 指的是在计算 `reuse_risk = sensitivity_q * reuse_error_q` 之前，对高置信候选的 `reuse_error_q` 做折扣：
+
+```text
+reuse_error_q <- max(1, reuse_error_q - confidence_bias)
+```
+
+因此它不是 oracle error，而是基于 route support / base support / cosine margin 的在线置信修正。
+
+| Bias | T | Direct Reuse | Direct Drop | Residual Reuse | Residual Drop | Residual HitErr | Alpha | TrainPairs |
+|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| 0 | 20 | 28.6% | 2.45% | 28.6% | 2.72% | 0.40267 | 0.500 | 160.0 |
+| 0 | 30 | 70.0% | 5.83% | 70.0% | 7.32% | 0.37287 | 0.917 | 403.3 |
+| 0 | 45 | 78.7% | 7.38% | 78.7% | 6.53% | 0.36921 | 0.500 | 455.7 |
+| 0 | 60 | 80.3% | 7.56% | 80.3% | 7.13% | 0.37755 | 0.500 | 466.3 |
+| 1 | 20 | 28.6% | 2.45% | 28.6% | 2.72% | 0.40267 | 0.500 | 160.0 |
+| 1 | 30 | 70.0% | 5.83% | 70.0% | 7.32% | 0.37287 | 0.917 | 403.3 |
+| 1 | 45 | 78.7% | 7.38% | 78.7% | 6.53% | 0.36921 | 0.500 | 455.7 |
+| 1 | 60 | 80.3% | 7.56% | 80.3% | 7.13% | 0.37755 | 0.500 | 466.3 |
+| 2 | 20 | 28.6% | 2.45% | 28.6% | 2.72% | 0.40267 | 0.500 | 160.0 |
+| 2 | 30 | 70.0% | 5.83% | 70.0% | 7.32% | 0.37287 | 0.917 | 403.3 |
+| 2 | 45 | 78.7% | 7.38% | 78.7% | 6.53% | 0.36921 | 0.500 | 455.7 |
+| 2 | 60 | 80.3% | 7.56% | 80.3% | 7.14% | 0.37755 | 0.500 | 466.3 |
+
+结果日志：
+
+```text
+/home/zhangshangtong/Transformer/OFA/output/residual_reuse/pubmed_st_bias_sweep/summary.tsv
+/home/zhangshangtong/Transformer/OFA/output/residual_reuse/pubmed_st_bias_sweep/summary.md
+output/residual_reuse/pubmed_st_bias_sweep/*.log
+```
+
+<!-- PUBMED_ST_RESIDUAL_BIAS_SWEEP_END -->
+
 ## 8. Current Limitations
 
 当前版本仍是第一版机制验证，有几个边界需要注意：
