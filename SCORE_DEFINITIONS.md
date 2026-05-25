@@ -308,12 +308,27 @@ graph context boundary
 low-degree uniqueness
 ```
 
-但不能写成“TSER 总是优于 Degree”。更稳的结论是：
+量化路由这里不要写成“TSER 优于 Degree”。目前实验更支持：
 
 ```text
-TSER 是 degree risk 的图语义修正项；
-是否优于 degree 取决于 dataset、backend、budget 和 T/weight 设置。
+Degree / propagation risk 是更稳定的 deployable 路由依据；
+TSERTopK_W4A8 更适合作为图语义修正消融，而不是主结论。
 ```
+
+原因是量化损伤主要由两个因素决定：
+
+```text
+1. 节点自身的量化误差大小
+2. 这个误差沿图传播的范围
+```
+
+第 1 项需要真实 FP/quant embedding 对比，在线不可得；第 2 项最直接的代理就是
+`propagation_q` / degree。因此在不使用 oracle error 的前提下，DegreeTopK_W4A8
+通常比加入 context / low-unique 的 TSERTopK_W4A8 更稳。
+
+TSER 的优势边界主要在 hash reuse gate：reuse 是“用别的节点 embedding 替代自己”，
+语义边界和稀有低度节点会显著影响错复用风险；而量化是“自己的 embedding 被扰动”，
+更多受量化误差大小和传播范围控制。
 
 ## 6. Oracle / Error-aware 行
 
@@ -342,7 +357,7 @@ debug / profiling baseline
 说明真实量化误差信息确实有价值
 ```
 
-论文主线不要把它们作为系统策略。
+因此不能把这类 error-aware 策略当成可部署系统策略；它们只能用于离线分析和上界参照。
 
 ## 7. 常用命令
 
