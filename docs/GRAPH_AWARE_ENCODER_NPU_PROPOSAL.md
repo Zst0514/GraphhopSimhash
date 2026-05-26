@@ -749,3 +749,569 @@ Baseline:
 ```
 
 这套方案的优点是：每个模块都有当前实验支撑，也能自然接到 NPU 设计，不会只停留在软件启发式。
+
+## 13. Beyond FFN Gating: NPU 内部设计空间
+
+前面的 P0/P1/P2/P3 更像系统执行层级，还不够深入到 NPU 内部。真正面向 HPCA/ISCA/MICRO 的设计，需要回答：
+
+```text
+当一个节点必须跑 LLM encoder 时，
+NPU 内部的 array、datatype、bit-serial datapath、activation format、outlier path、tile schedule
+如何利用 graph 后端信息进一步减少计算和访存？
+```
+
+因此 FFN channel gating 只能算一个候选点，不应该限制整个设计空间。下面是更深入的候选机制。
+
+## 14. Graph-Conditioned Bit-Serial Early Termination
+
+### 14.1 思路来源
+
+参考 PADE / BETA / BitMod 这类 bit-serial 或 bit-grained accelerator：
+
+```text
+不是先完整计算再判断是否重要，
+而是在 bit-plane 逐步计算过程中提前判断：
+    当前 partial sum 是否已经足够确定？
+    后续低位 bit 是否不可能改变最终重要性？
+```
+
+PADE 的关键是 predictor-free：用 bit-level upper/lower bound 控制 early termination，避免额外 predictor 成本。
+
+### 14.2 迁移到 graph-text encoder
+
+普通 bit-serial early termination 对所有 token/node 使用同一停止规则。但在 graph-text workload 中，不同节点对数值误差的容忍度不同：
+
+```text
+high-risk node:
+    高 degree / 高 propagation / 边界节点 / 低置信 reuse
+    -> 需要更严格 bit-bound
+    -> 多算低位 bit
+
+low-risk node:
+    低传播风险 / 高置信 / 同质社区内节点
+    -> 可以更早停止
+    -> 少算低位 bit
+```
+
+这会形成一个新的机制：
+
+```text
+Graph-conditioned bit-plane termination
+```
+
+核心不是“跳过某个 FFN channel”，而是在 GEMM 内部让每个 node-batch 使用不同 bit-depth / termination bound。
+
+### 14.3 硬件实现
+
+NPU 内部增加：
+
+```text
+1. bit-serial W4A8 / BFP datapath
+2. partial-sum scoreboard
+3. upper/lower bound estimator
+4. per-batch risk tolerance register
+5. early-stop mask generator
+```
+
+执行流程：
+
+```text
+for each node batch:
+    load graph_risk_tolerance
+    for each bit-plane:
+        update partial sum
+        estimate remaining error bound
+        if bound < tolerance:
+            stop remaining low-bit planes
+```
+
+这里的 `tolerance` 不是 oracle error，而是由 graph risk 映射得到：
+
+```text
+tolerance = f(propagation_q, graph_context_q, low_unique_q, confidence)
+```
+
+### 14.4 为什么这是图场景的新点
+
+普通 LLM accelerator 的 early termination 是 sequence/token 级数值优化。这里变成：
+
+```text
+graph risk controls arithmetic precision at runtime
+```
+
+也就是图后端信息直接控制 NPU 内部 bit-plane 计算深度。
+
+这是比 FFN gating 更“内部”的设计点，值得优先尝试。
+
+## 15. Graph-Adaptive Mixed Datatype / Mantissa Allocation
+
+### 15.1 思路来源
+
+参考 BitMod / Anda / Harmonia：
+
+```text
+BitMod:
+    per-group datatype adaptation, FP3/FP4/INT mixed datatype
+
+Anda:
+    variable-length grouped activation mantissa
+
+Harmonia:
+    all-layer BFP activation, BFP-INT + BFP-BFP PE
+```
+
+这些工作说明：低比特不应该只写成 W4A8/W4A4 二选一，而应该细到 group / datatype / mantissa。
+
+### 15.2 迁移到 graph-text encoder
+
+对 graph-text node，可以让风险决定 activation/weight group 的数据格式：
+
+```text
+high-risk node / high-risk layer / high-risk channel group:
+    safer datatype
+    longer mantissa
+    exact W4A8 / BFP8
+
+low-risk node / low-risk channel group:
+    cheaper datatype
+    shorter mantissa
+    FP4/INT4/sub-W4
+```
+
+也就是说，routing 不再只是：
+
+```text
+node -> W4A8 or W4A4
+```
+
+而是：
+
+```text
+node/layer/channel-group -> datatype mode
+```
+
+### 15.3 硬件实现
+
+需要的 NPU 模块：
+
+```text
+1. mixed-datatype PE
+    支持 INT4 / FP4 / BFP mantissa 等格式
+
+2. per-group datatype tag buffer
+    每个 channel group 或 activation group 存 2-3 bit mode
+
+3. runtime activation compressor
+    把 FP/W4A8 activation 压到 variable mantissa / BFP group
+
+4. mode-aware scheduler
+    把相同 datatype mode 的节点聚成 batch，减少 mode switch
+```
+
+### 15.4 图后端的新意
+
+普通 BitMod/Anda 是按 weight/activation distribution 自适应；我们的新点是加入 graph semantics：
+
+```text
+datatype selection = numerical distribution + graph task risk
+```
+
+例如：
+
+```text
+同样 activation 分布下，
+高传播节点保守；
+低传播且高置信节点激进。
+```
+
+这个比 degree-guided W4A4 更细，也更靠近 NPU 内部。
+
+## 16. Graph-Aware Outlier Channel Protection
+
+### 16.1 思路来源
+
+W4A4/W4A8 的问题经常不是平均误差，而是少量 outlier channel / outlier node 破坏 embedding。Harmonia、llm.npu、Oaken 等工作都强调 outlier/hot channel 需要特殊路径。
+
+### 16.2 迁移到 graph-text encoder
+
+当前可以设计：
+
+```text
+Graph-risk-aware outlier preservation
+```
+
+机制：
+
+```text
+1. offline calibration 找出每层 activation outlier channel group
+2. online 根据 node graph risk 决定 outlier group 的保护强度
+```
+
+例如：
+
+```text
+high-risk nodes:
+    outlier channels use A8/BFP8
+    normal channels use A4/BFP4
+
+low-risk nodes:
+    fewer outlier channels protected
+    or all channels use cheaper format
+```
+
+### 16.3 硬件实现
+
+```text
+outlier channel table:
+    per layer, top-k channel group ids
+
+risk-conditioned precision mask:
+    high-risk node -> protect more groups
+    low-risk node  -> protect fewer groups
+
+dual-path PE:
+    protected groups -> safer precision lane
+    normal groups    -> low precision lane
+```
+
+### 16.4 为什么有意义
+
+这比全局 outlier protection 更有新意：
+
+```text
+不是所有节点都为最坏 outlier 付出代价；
+只有图上重要/敏感节点保护更多 outlier channel。
+```
+
+这条线特别适合和 W4A4/W4A8 的经验结合，因为你已经观察到 W4A4 的损伤主要来自 backend/outlier，而不是分数机制本身。
+
+## 17. Graph-Routed Approximate GEMM
+
+### 17.1 思路来源
+
+参考 AxCore / FIGLUT / Panacea：
+
+```text
+AxCore:
+    approximate FP multiplication, multiplier-free GEMM
+
+FIGLUT:
+    LUT/RAC 替代低比特乘法
+
+Panacea:
+    asymmetric quantization + bit-slice sparsity + compensation
+```
+
+这些工作说明：低风险计算不一定要使用 exact MAC。
+
+### 17.2 迁移到 graph-text encoder
+
+可以设计两条 GEMM lane：
+
+```text
+Exact lane:
+    high-risk nodes
+    exact W4A8 / BFP-INT
+
+Approx lane:
+    low-risk nodes
+    approximate GEMM / LUT-RAC / bit-slice skip
+```
+
+图风险控制 lane selection：
+
+```text
+propagation high -> exact lane
+confidence high + propagation low -> approximate lane
+```
+
+### 17.3 硬件实现
+
+NPU PE cluster 支持：
+
+```text
+1. exact low-bit MAC lane
+2. approximate / LUT / RAC lane
+3. correction / compensation unit
+4. per-batch lane mode register
+```
+
+执行时：
+
+```text
+batch low-risk nodes:
+    route to approximate lane
+
+batch high-risk nodes:
+    route to exact lane
+```
+
+### 17.4 风险
+
+这条线很有硬件味，但实验风险也更高：
+
+```text
+1. approximate GEMM 是否损伤 embedding 需要单独验证；
+2. 低风险 proxy 是否真的能筛出可近似节点；
+3. 如果近似误差和图风险不相关，收益会不稳定。
+```
+
+建议作为第二阶段创新，而不是当前唯一主线。
+
+## 18. Graph-Aware Tile and Dataflow Scheduling
+
+### 18.1 不是复用别人的 Q/K/V
+
+需要明确：graph/hash 相似并不意味着可以直接拿别人的 Q/K/V 替代自己的 Q/K/V。每个节点的 Q/K/V 仍由自己的 token 和权重生成。
+
+因此不要把 Graph-aware FlashAttention 写成：
+
+```text
+similar nodes reuse Q/K/V tiles
+```
+
+这个说法不靠谱。
+
+### 18.2 真正可做的是 dataflow scheduling
+
+图信息可以控制 execution ordering 和 mode grouping：
+
+```text
+1. path-aware batching:
+    P0/P1/P2/P3 分别聚成 batch
+
+2. risk-aware mode grouping:
+    同 precision mode / datatype mode 的节点聚成 batch
+
+3. length-aware within graph bucket:
+    在同一社区/同一 hash bucket 内按 token length 排序，减少 padding
+
+4. cache-aware anchor ordering:
+    让使用同一 anchor 或同一 bucket 的 P1 节点相邻执行，提高 embedding cache locality
+```
+
+这不是复用 Q/K/V，而是减少：
+
+```text
+mode switch
+padding waste
+cache miss
+metadata fetch
+```
+
+### 18.3 硬件实现
+
+```text
+graph-aware work queue:
+    queue[P0], queue[P1], queue[P2_mode0], queue[P2_mode1], queue[P3]
+
+batch builder:
+    packs nodes with same path/mode/length bucket
+
+NPU controller:
+    configures PE mode once per batch
+    streams grouped weights/activations
+```
+
+这个模块比较系统，但非常必要。否则多路径设计会因为调度混乱导致 array utilization 掉下去。
+
+## 19. Graph-Aware Attention Early Exit / Sparse Attention
+
+### 19.1 为什么不能直接主打
+
+attention skipping 很吸引人，但比 FFN/channel 更危险：
+
+```text
+1. attention softmax 对局部误差敏感；
+2. 不规则 sparse attention 硬件复杂；
+3. encoder 文本长度不一定长到 attention 成为主要瓶颈；
+4. 当前 graph-text embedding 对 attention sparsity 的容忍性还没验证。
+```
+
+### 19.2 可行的保守方案
+
+更合理的是采用 predictor-free / bounded 方案：
+
+```text
+high-risk nodes:
+    exact attention
+
+low-risk nodes:
+    bounded bit-serial early termination
+    or top-k attention with strict error bound
+```
+
+核心是：
+
+```text
+graph risk controls attention approximation tolerance
+```
+
+而不是 graph/hash 直接决定哪些 token 互相 attend。
+
+## 20. 推荐的 NPU 内部创新优先级
+
+如果从“最靠谱 + 最像硬件论文 + 最能体现 graph 场景新意”排序，我建议：
+
+### Priority 1: Graph-conditioned bit-serial / precision-depth execution
+
+```text
+机制:
+    bit-plane early termination / variable mantissa / mixed datatype
+
+图场景新意:
+    graph risk controls arithmetic effort
+
+优点:
+    深入 NPU datapath
+    不局限 FFN
+    可作用于 QKV/FFN/attention GEMM
+```
+
+### Priority 2: Graph-risk-aware outlier channel protection
+
+```text
+机制:
+    high-risk nodes protect more outlier channels
+    low-risk nodes use cheaper activation format
+
+图场景新意:
+    outlier protection budget is allocated by graph task sensitivity
+
+优点:
+    与 W4A4/W4A8 实验经验强相关
+    硬件实现清晰
+```
+
+### Priority 3: Graph-routed approximate GEMM lane
+
+```text
+机制:
+    low-risk nodes use AxCore/FIGLUT/Panacea-like cheaper GEMM
+    high-risk nodes use exact W4A8/BFP-INT
+
+图场景新意:
+    approximate computing is no longer uniform, but graph-risk conditioned
+
+优点:
+    硬件味强
+    可作为 NPU 内部 array 创新
+```
+
+### Priority 4: FFN/channel gating
+
+```text
+机制:
+    grouped FFN channel skip
+
+图场景新意:
+    graph-aware scheduler selects safe nodes
+
+优点:
+    已有实验支撑
+    实现最直接
+
+不足:
+    如果只写它，NPU 内部创新略窄
+```
+
+### Priority 5: Graph-aware batching/dataflow scheduler
+
+```text
+机制:
+    path/mode/length/cache-aware work queue
+
+图场景新意:
+    graph/hash metadata controls NPU execution order
+
+优点:
+    能提高实际 utilization
+
+不足:
+    更偏系统调度，单独作为主创新不够硬
+```
+
+## 21. 建议重新组织最终架构
+
+更强的版本可以写成：
+
+```text
+Graph-conditioned adaptive arithmetic NPU for LLM encoders
+```
+
+而不是：
+
+```text
+Graph-aware FFN gating NPU
+```
+
+推荐最终结构：
+
+```text
+Frontend:
+    SimHash/CAM + TSER risk engine
+
+Scheduler:
+    maps node -> path + arithmetic mode
+
+Datapath:
+    mode-adaptive W4A8/BFP/bit-serial PE array
+    supports:
+        exact W4A8
+        variable mantissa / mixed datatype
+        outlier protected mode
+        approximate low-risk mode
+
+Side engine:
+    residual correction engine
+
+Memory:
+    anchor embedding cache
+    channel/outlier/mode metadata buffer
+```
+
+这套设计里，图后端不只是决定“跑不跑 encoder”，而是决定：
+
+```text
+1. 算多少 bit-plane
+2. 用多长 mantissa
+3. 保护多少 outlier channel
+4. 走 exact 还是 approximate lane
+5. 是否启用 FFN/channel gating
+6. 如何 batch 和 cache
+```
+
+这才真正深入到了 NPU 内部。
+
+## 22. 下一步最该验证什么
+
+不要一口气全做。建议按风险最小、硬件味最强的顺序：
+
+```text
+Step 1:
+    先做 graph-risk-conditioned activation precision / mantissa allocation。
+    用已有 embedding pool 模拟：
+        high-risk -> W4A8
+        low-risk  -> W4A4 / BFP4 / approximate pool
+    观察 Degree/TSER/risk 是否能稳定筛出可激进节点。
+
+Step 2:
+    做 outlier channel protection sweep。
+    比较：
+        uniform outlier protection
+        graph-risk-aware outlier protection
+        random outlier budget
+
+Step 3:
+    做 bit-plane early termination 的软件仿真。
+    不必先写 RTL，先在 GEMM/embedding 层模拟：
+        full bit-plane
+        low-risk fewer bit-plane
+        high-risk full bit-plane
+
+Step 4:
+    保留 FFN gating 作为已验证路径，
+    但把它升级成 mode-adaptive PE array 的一个实例。
+```
+
+如果 Step 1/2 能跑通，论文的新意会比单纯 FFN gating 强很多。
