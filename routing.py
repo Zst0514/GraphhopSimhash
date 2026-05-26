@@ -265,14 +265,33 @@ def build_log_path(dataset_log_dir, ds_key, args):
             f"_{getattr(args, 'quant_error_rank_source', 'continuous')}"
         ).replace(".", "p")
     if getattr(args, "experiment_suite", None) == "residual_reuse":
+        embedding_tag = getattr(args, "residual_embedding_source", "data_x")
+        if embedding_tag == "real_quant_fp":
+            embedding_tag = (
+                f"{getattr(args, 'real_quant_model_name', 'model')}"
+                f"_{getattr(args, 'real_quant_fp_tag', 'fp')}"
+            )
         config_tag += (
             f"_resr{int(getattr(args, 'residual_rank', 32))}"
             f"_e{int(getattr(args, 'residual_epochs', 200))}"
             f"_md{float(getattr(args, 'residual_min_dist', 1.0)):.1f}"
             f"_td{float(getattr(args, 'residual_direct_threshold', -1.0)):.1f}"
             f"_{getattr(args, 'residual_anchor_mode', 'cam')}"
+            f"_{embedding_tag}"
             f"_mx{int(getattr(args, 'residual_max_train_pairs', 4096))}"
         ).replace(".", "p").replace("-", "m")
+    if getattr(args, "experiment_suite", None) == "partial_encoder":
+        layers_tag = "-".join(str(int(layer)) for layer in getattr(args, "partial_encoder_layers", [4, 8, 16]))
+        config_tag += (
+            f"_pe{getattr(args, 'real_quant_model_name', 'model')}"
+            f"_{getattr(args, 'partial_encoder_reference_tag', 'ref')}"
+            f"_{getattr(args, 'partial_encoder_full_tag', 'full')}"
+            f"_{getattr(args, 'partial_encoder_partial_tag', 'partial')}"
+            f"_L{layers_tag}"
+            f"_fr{float(getattr(args, 'partial_encoder_full_ratio', 0.2)):.2f}"
+            f"_dr{float(getattr(args, 'partial_encoder_deep_ratio', 0.3)):.2f}"
+            f"_mr{float(getattr(args, 'partial_encoder_mid_ratio', 0.3)):.2f}"
+        ).replace(".", "p")
     if not bool(getattr(args, "disable_score_gate", True)):
         config_tag += (
             f"_sg{int(getattr(args, 'score_reuse_threshold', 45))}"

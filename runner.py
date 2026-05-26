@@ -19,6 +19,8 @@ from .real_quant import (
     assemble_real_quant_embeddings,
     build_real_quant_scores,
     compute_real_quant_errors,
+    default_pool_path,
+    load_tensor_pool,
     load_real_quant_pools,
     regenerate_real_quant_pools,
     select_real_quant_policy_actions,
@@ -505,15 +507,26 @@ def evaluate_gnn_embeddings(model, data, node_embs, mask=None):
     if mask is None:
         mask = data.test_mask
     with torch.no_grad():
-        out = model.forward_gnn_only(
-            node_embs,
-            data.edge_index,
-            data.edge_type,
-            data.edge_attr,
-        )
+        out = forward_gnn_logits(model, data, node_embs)
         pred = out.argmax(dim=1)
         acc = (pred[mask] == data.y[mask]).sum().item() / mask.sum().item()
     return float(acc)
+
+
+def forward_gnn_logits(model, data, node_embs):
+    return model.forward_gnn_only(
+        node_embs,
+        data.edge_index,
+        data.edge_type,
+        data.edge_attr,
+    )
+
+
+def node_logit_margin(logits):
+    if logits.size(1) <= 1:
+        return torch.zeros(logits.size(0), dtype=torch.float32, device=logits.device)
+    top2 = torch.topk(logits, k=2, dim=1).values
+    return (top2[:, 0] - top2[:, 1]).to(dtype=torch.float32)
 
 
 def evaluate_raw_node_features(model, data, raw_features, mask=None):
@@ -522,14 +535,284 @@ def evaluate_raw_node_features(model, data, raw_features, mask=None):
     return evaluate_gnn_embeddings(model, data, hidden, mask=mask)
 
 
-def build_residual_correction_mask(trace, risk_gate, direct_threshold, device):
+def infer_partial_encoder_total_layers(model_name, layers):
+    known = {
+        "llama2_7b": 32,
+        "llama2_13b": 40,
+        "ST": 6,
+        "BERT": 12,
+        "e5": 24,
+    }
+    if model_name in known:
+        return int(known[model_name])
+    return max(int(max(layers)), 1)
+
+
+def load_partial_encoder_pools(ds_key, args, data, device, log_important):
+    model_name = args.real_quant_model_name
+    reference_tag = str(args.partial_encoder_reference_tag)
+    full_tag = str(args.partial_encoder_full_tag)
+    partial_tag = str(args.partial_encoder_partial_tag)
+    layers = sorted(int(layer_idx) for layer_idx in args.partial_encoder_layers)
+
+    reference_path = default_pool_path(ds_key, model_name, reference_tag)
+    full_path = default_pool_path(ds_key, model_name, full_tag)
+    partial_paths = {
+        layer_idx: default_pool_path(ds_key, model_name, f"{partial_tag}_L{layer_idx}")
+        for layer_idx in layers
+    }
+
+    missing = [
+        path
+        for path in [reference_path, full_path, *partial_paths.values()]
+        if not os.path.exists(path)
+    ]
+    if missing:
+        msg = "\n".join(f"  - {path}" for path in missing)
+        raise FileNotFoundError(
+            "Partial encoder pools are missing:\n"
+            f"{msg}\n"
+            "Generate partial pools with generate_real_quant_pools, e.g. "
+            "--configs W4A8 --partial_layers 4 8 16."
+        )
+
+    reference = load_tensor_pool(reference_path, device)
+    full = load_tensor_pool(full_path, device)
+    partial = {layer_idx: load_tensor_pool(path, device) for layer_idx, path in partial_paths.items()}
+
+    expected_nodes = int(data.num_nodes)
+    expected_shape = tuple(reference.shape)
+    for label, tensor in [("full", full), *[(f"L{layer_idx}", tensor) for layer_idx, tensor in partial.items()]]:
+        if int(tensor.size(0)) != expected_nodes:
+            raise ValueError(f"{label} pool has wrong node count: {tuple(tensor.shape)} vs {expected_nodes}")
+        if tuple(tensor.shape) != expected_shape:
+            raise ValueError(f"{label} pool shape {tuple(tensor.shape)} must match reference {expected_shape}")
+
+    log_important(
+        "[PartialPools] "
+        f"reference={reference_path} | full={full_path} | "
+        f"partials={', '.join(f'L{k}:{v}' for k, v in partial_paths.items())}"
+    )
+    log_important(f"[PartialPools] shape={expected_shape} | layers={layers}")
+    return {
+        "reference": reference,
+        "full": full,
+        "partial": partial,
+        "layers": layers,
+        "reference_path": reference_path,
+        "full_path": full_path,
+        "partial_paths": partial_paths,
+    }
+
+
+def build_partial_encoder_policy_configs(args, layers):
+    layers = sorted(int(layer_idx) for layer_idx in layers)
+    configs = [("FullW4A8", {"kind": "all_full"})]
+    for layer_idx in layers:
+        configs.append((f"AllL{layer_idx}", {"kind": "all_layer", "layer": layer_idx}))
+    configs.extend(
+        [
+            ("RandomCascade", {"kind": "cascade", "priority": "random"}),
+            ("DegreeCascade", {"kind": "cascade", "priority": "degree"}),
+            ("TSERCascade", {"kind": "cascade", "priority": "tser"}),
+            ("EarlyExitBudget", {"kind": "early_exit"}),
+        ]
+    )
+    return configs
+
+
+def select_partial_encoder_actions(policy, scores, args, num_nodes, layers, seed, device):
+    layers = sorted(int(layer_idx) for layer_idx in layers)
+    full_action = -1
+    if policy["kind"] == "all_full":
+        return torch.full((num_nodes,), full_action, dtype=torch.int64, device=device)
+    if policy["kind"] == "all_layer":
+        return torch.full((num_nodes,), int(policy["layer"]), dtype=torch.int64, device=device)
+    if policy["kind"] != "cascade":
+        raise ValueError(f"Unknown partial encoder policy: {policy}")
+
+    if policy["priority"] == "degree":
+        priority = scores["propagation_q"].to(dtype=torch.float32)
+    elif policy["priority"] == "tser":
+        priority = scores["sensitivity_q"].to(dtype=torch.float32)
+    elif policy["priority"] == "random":
+        generator = torch.Generator(device="cpu")
+        generator.manual_seed(int(seed) + 104729)
+        priority = torch.rand(num_nodes, generator=generator, device="cpu").to(device=device)
+    else:
+        raise ValueError(f"Unknown partial priority: {policy['priority']}")
+
+    actions = torch.full((num_nodes,), layers[0], dtype=torch.int64, device=device)
+    order = torch.argsort(priority, descending=True)
+
+    full_count = int(round(float(args.partial_encoder_full_ratio) * num_nodes))
+    deep_count = int(round(float(args.partial_encoder_deep_ratio) * num_nodes))
+    mid_count = int(round(float(args.partial_encoder_mid_ratio) * num_nodes))
+    full_count = max(0, min(full_count, num_nodes))
+    deep_count = max(0, min(deep_count, num_nodes - full_count))
+    mid_count = max(0, min(mid_count, num_nodes - full_count - deep_count))
+
+    actions[order[:full_count]] = full_action
+    cursor = full_count
+    if len(layers) >= 3:
+        deep_layer = layers[-1]
+        mid_layer = layers[-2]
+    elif len(layers) == 2:
+        deep_layer = layers[-1]
+        mid_layer = layers[-1]
+    else:
+        deep_layer = layers[0]
+        mid_layer = layers[0]
+    actions[order[cursor : cursor + deep_count]] = deep_layer
+    cursor += deep_count
+    actions[order[cursor : cursor + mid_count]] = mid_layer
+    return actions
+
+
+def assemble_partial_encoder_embeddings(actions, full_embs, partial_embs):
+    mixed = full_embs.clone()
+    for layer_idx, embs in partial_embs.items():
+        mask = actions == int(layer_idx)
+        if bool(mask.any()):
+            mixed[mask] = embs[mask]
+    return mixed
+
+
+def summarize_partial_encoder_policy(actions, errors_by_action, layers, total_layers, cost_scale):
+    total = max(1, int(actions.numel()))
+    rates = {"full": float((actions == -1).float().mean().item())}
+    cost = rates["full"] * float(cost_scale)
+    selected_err = torch.zeros(total, dtype=torch.float32, device=actions.device)
+    selected_err[actions == -1] = errors_by_action[-1][actions == -1]
+    for layer_idx in layers:
+        mask = actions == int(layer_idx)
+        rate = float(mask.float().mean().item())
+        rates[int(layer_idx)] = rate
+        cost += rate * float(cost_scale) * (float(layer_idx) / float(total_layers))
+        selected_err[mask] = errors_by_action[int(layer_idx)][mask]
+    return {
+        "rates": rates,
+        "cost": float(cost),
+        "avg_err": float(selected_err.mean().item()),
+    }
+
+
+def rank01(values, descending=False):
+    values = values.to(dtype=torch.float32)
+    if values.numel() <= 1:
+        return torch.ones_like(values)
+    order = torch.argsort(values, descending=descending)
+    ranks = torch.empty_like(values, dtype=torch.float32)
+    ranks[order] = torch.linspace(0.0, 1.0, steps=int(values.numel()), device=values.device)
+    return ranks
+
+
+def select_top_from_mask(score, candidate_mask, count):
+    selected = torch.zeros_like(candidate_mask, dtype=torch.bool)
+    count = int(count)
+    candidate_idx = candidate_mask.nonzero(as_tuple=False).view(-1)
+    if count <= 0 or candidate_idx.numel() == 0:
+        return selected
+    count = min(count, int(candidate_idx.numel()))
+    local_order = torch.argsort(score[candidate_idx], descending=True)
+    selected[candidate_idx[local_order[:count]]] = True
+    return selected
+
+
+def select_partial_early_exit_actions(scores, partial_embs, model, data, args, layers, device):
+    layers = sorted(int(layer_idx) for layer_idx in layers)
+    if len(layers) < 1:
+        raise ValueError("partial early exit needs at least one partial layer")
+
+    num_nodes = int(data.num_nodes)
+    full_action = -1
+    actions = torch.full((num_nodes,), full_action, dtype=torch.int64, device=device)
+
+    risk = scores["sensitivity_q"].to(dtype=torch.float32)
+    low_risk_score = rank01(-risk, descending=False)
+
+    margins = {}
+    for layer_idx in layers:
+        with torch.no_grad():
+            logits = forward_gnn_logits(model, data, partial_embs[int(layer_idx)])
+        margins[int(layer_idx)] = rank01(node_logit_margin(logits), descending=False)
+
+    stability = {}
+    for prev_layer, curr_layer in zip(layers[:-1], layers[1:]):
+        cos = F.cosine_similarity(partial_embs[int(prev_layer)], partial_embs[int(curr_layer)], dim=1)
+        stability[int(curr_layer)] = rank01(cos, descending=False)
+
+    shallow_count = int(
+        round(
+            max(
+                0.0,
+                1.0
+                - float(args.partial_encoder_full_ratio)
+                - float(args.partial_encoder_deep_ratio)
+                - float(args.partial_encoder_mid_ratio),
+            )
+            * num_nodes
+        )
+    )
+    mid_count = int(round(float(args.partial_encoder_mid_ratio) * num_nodes))
+    deep_count = int(round(float(args.partial_encoder_deep_ratio) * num_nodes))
+    full_count = int(round(float(args.partial_encoder_full_ratio) * num_nodes))
+
+    shallow_layer = layers[0]
+    mid_layer = layers[-2] if len(layers) >= 3 else layers[-1]
+    deep_layer = layers[-1]
+
+    remaining = torch.ones(num_nodes, dtype=torch.bool, device=device)
+    stage_counts = {"full_budget": int(full_count)}
+
+    shallow_score = 0.55 * margins[shallow_layer] + 0.45 * low_risk_score
+    shallow_sel = select_top_from_mask(shallow_score, remaining, shallow_count)
+    actions[shallow_sel] = int(shallow_layer)
+    remaining &= ~shallow_sel
+    stage_counts[f"L{shallow_layer}"] = int(shallow_sel.sum().item())
+
+    if len(layers) >= 2:
+        mid_score = 0.40 * margins[mid_layer] + 0.30 * low_risk_score + 0.30 * stability[mid_layer]
+        mid_sel = select_top_from_mask(mid_score, remaining, mid_count)
+        actions[mid_sel] = int(mid_layer)
+        remaining &= ~mid_sel
+        stage_counts[f"L{mid_layer}"] = int(mid_sel.sum().item())
+
+    if len(layers) >= 3:
+        deep_score = 0.40 * margins[deep_layer] + 0.30 * low_risk_score + 0.30 * stability[deep_layer]
+        deep_sel = select_top_from_mask(deep_score, remaining, deep_count)
+        actions[deep_sel] = int(deep_layer)
+        remaining &= ~deep_sel
+        stage_counts[f"L{deep_layer}"] = int(deep_sel.sum().item())
+
+    # Any remaining nodes consume the full-depth W4A8 path.
+    actions[remaining] = full_action
+    stage_counts["Full"] = int(remaining.sum().item())
+    return actions, stage_counts
+
+
+def build_residual_correction_mask(
+    trace,
+    risk_gate,
+    direct_threshold,
+    device,
+    min_route_hits=1,
+    min_base_hits=1,
+):
     hit_mask = trace["hit_mask"].to(device=device, dtype=torch.bool)
     source_ok = trace["source_ids"].to(device=device) >= 0
     correction_mask = hit_mask & source_ok
+    support_mask = (
+        (trace["route_hit_counts"].to(device=device) >= int(min_route_hits))
+        | (trace["base_route_hit_counts"].to(device=device) >= int(min_base_hits))
+    )
+    support_filtered = int((correction_mask & ~support_mask).sum().item())
+    correction_mask = correction_mask & support_mask
     if float(direct_threshold) < 0.0 or risk_gate is None:
         return correction_mask, {
             "direct_threshold": float(direct_threshold),
             "direct_low_risk": 0,
+            "support_filtered": support_filtered,
             "residual_candidates": int(correction_mask.sum().item()),
         }
 
@@ -552,6 +835,7 @@ def build_residual_correction_mask(trace, risk_gate, direct_threshold, device):
     return active, {
         "direct_threshold": float(direct_threshold),
         "direct_low_risk": int(direct_low_risk),
+        "support_filtered": support_filtered,
         "residual_candidates": int(active.sum().item()),
     }
 
@@ -598,6 +882,39 @@ def replace_reuse_anchors_with_random(trace, direct_features, target_features, v
     random_direct = direct_features.clone()
     random_direct[hit_nodes] = target_features[random_sources]
     return random_trace, random_direct, {"randomized": int(hit_nodes.numel())}
+
+
+def load_residual_target_features(ds_key, data, args, device, log_important):
+    source = str(getattr(args, "residual_embedding_source", "data_x"))
+    explicit_path = getattr(args, "residual_embedding_path", None)
+    if explicit_path:
+        path = explicit_path
+        target = load_tensor_pool(path, device)
+        source_label = "explicit"
+    elif source == "real_quant_fp":
+        path = (
+            getattr(args, "real_quant_fp_path", None)
+            or default_pool_path(ds_key, args.real_quant_model_name, args.real_quant_fp_tag)
+        )
+        target = load_tensor_pool(path, device)
+        source_label = f"{args.real_quant_model_name}:{args.real_quant_fp_tag}"
+    elif source == "data_x":
+        path = "<data.x>"
+        target = data.x.detach().to(device=device, dtype=torch.float32)
+        source_label = "data_x"
+    else:
+        raise ValueError(f"Unknown residual embedding source: {source}")
+
+    if target.size(0) != int(data.num_nodes):
+        raise ValueError(
+            f"Residual target node count mismatch for {ds_key}: "
+            f"target={tuple(target.shape)}, data.num_nodes={int(data.num_nodes)}"
+        )
+    log_important(
+        "[ResidualTarget] "
+        f"source={source_label} | path={path} | shape={tuple(target.shape)}"
+    )
+    return target
 
 
 def summarize_reuse_real_quant_execution(actions, hit_mask, errors, fp_embs, final_embs):
@@ -685,6 +1002,8 @@ def run_residual_reuse_experiment(args):
                 f"| max_pairs={int(args.residual_max_train_pairs)} "
                 f"| alpha={'auto' if float(args.residual_alpha) < 0.0 else float(args.residual_alpha)} "
                 f"| min_dist={float(args.residual_min_dist):.1f} "
+                f"| min_route_hits={int(args.residual_min_route_hits)} "
+                f"| min_base_hits={int(args.residual_min_base_hits)} "
                 f"| T_direct={'none' if float(args.residual_direct_threshold) < 0.0 else float(args.residual_direct_threshold)} "
                 f"| anchor={args.residual_anchor_mode}"
             )
@@ -700,6 +1019,8 @@ def run_residual_reuse_experiment(args):
                     f"| topology_sketch={int(run_args.topology_sketch_seed)}"
                 )
 
+                target_features = load_residual_target_features(ds_key, data, run_args, device, log_important)
+                data.x = target_features
                 model, base_acc, baseline_embs, oracle_logits = train_baseline_model(data, run_args, device)
                 results["baseline"].append(base_acc)
                 log_important(f"[Baseline] Acc: {base_acc:.4f}")
@@ -722,7 +1043,6 @@ def run_residual_reuse_experiment(args):
                     device,
                 )
 
-                target_features = data.x.detach()
                 direct_features, _hits = controller.query_full_batch(
                     route_bundle["hash_route_features"],
                     verify_features,
@@ -746,6 +1066,8 @@ def run_residual_reuse_experiment(args):
                     controller.risk_gate,
                     args.residual_direct_threshold,
                     device,
+                    min_route_hits=args.residual_min_route_hits,
+                    min_base_hits=args.residual_min_base_hits,
                 )
 
                 direct_acc = evaluate_raw_node_features(model, data, direct_features)
@@ -767,6 +1089,7 @@ def run_residual_reuse_experiment(args):
                     train_split=args.residual_train_split,
                     max_pairs=args.residual_max_train_pairs,
                     correction_mask=correction_mask,
+                    min_dist=args.residual_min_dist,
                 )
 
                 if adapter is not None and float(args.residual_alpha) < 0.0:
@@ -841,6 +1164,7 @@ def run_residual_reuse_experiment(args):
                 log_important(
                     f"[ResidualReuse] Corrected={apply_info['corrected']} "
                     f"| DirectLowRisk={correction_info['direct_low_risk']} "
+                    f"| SupportFiltered={correction_info['support_filtered']} "
                     f"| ResidualCand={correction_info['residual_candidates']} "
                     f"| TrainPairs={train_info['train_pairs']} "
                     f"| Alpha={apply_info['alpha']:.3f} ({alpha_note}) "
@@ -1055,6 +1379,185 @@ def run_internal_split_calibration_only(args):
                     log_important=log_important,
                 )
 
+            log_important(f"{'=' * 72}\n")
+
+
+def run_partial_encoder_experiment(args):
+    target_datasets = args.datasets if args.datasets else ["cora"]
+    log_dir = os.path.join("output", "partial_encoder")
+    os.makedirs(log_dir, exist_ok=True)
+
+    for ds_key in target_datasets:
+        if ds_key not in DATASET_CONFIGS:
+            continue
+
+        dataset_log_dir = os.path.join(log_dir, ds_key)
+        os.makedirs(dataset_log_dir, exist_ok=True)
+        log_path = build_log_path(dataset_log_dir, ds_key, args)
+        layers = sorted(int(layer_idx) for layer_idx in args.partial_encoder_layers)
+        total_layers = (
+            int(args.partial_encoder_total_layers)
+            if int(args.partial_encoder_total_layers) > 0
+            else infer_partial_encoder_total_layers(args.real_quant_model_name, layers)
+        )
+        if max(layers) > total_layers:
+            raise ValueError(f"partial_encoder_layers={layers} exceed total_layers={total_layers}")
+        configs = build_partial_encoder_policy_configs(args, layers)
+
+        results = {
+            name: {
+                "acc": [],
+                "drop": [],
+                "avg_err": [],
+                "cost": [],
+                "full": [],
+                **{f"L{layer_idx}": [] for layer_idx in layers},
+            }
+            for name, _policy in configs
+        }
+        results["baseline"] = []
+
+        with open(log_path, "w", encoding="utf-8") as summary_file:
+            def log_important(msg):
+                print(msg)
+                summary_file.write(msg + "\n")
+                summary_file.flush()
+
+            log_important(f"\n{'=' * 72}")
+            log_important(f"Running Partial Encoder Routing on {ds_key.upper()}")
+            log_important(f"{'=' * 72}")
+            log_important(
+                "[PartialCost] "
+                f"model={args.real_quant_model_name} | reference={args.partial_encoder_reference_tag} "
+                f"| full={args.partial_encoder_full_tag} | partial={args.partial_encoder_partial_tag} "
+                f"| layers={layers} | total_layers={total_layers} "
+                f"| full_ratio={args.partial_encoder_full_ratio:.2f} "
+                f"| deep_ratio={args.partial_encoder_deep_ratio:.2f} "
+                f"| mid_ratio={args.partial_encoder_mid_ratio:.2f} "
+                f"| w4a8_cost_scale={args.partial_encoder_cost_scale:.2f}"
+            )
+
+            seeds = [int(args.seed) + run_idx for run_idx in range(args.runs)]
+            for run_idx, seed in enumerate(seeds):
+                log_important(f"\n--- Run {run_idx + 1}/{args.runs} (Seed {seed}) ---")
+                run_args = make_run_args(args, seed)
+                _conf, data, verify_features, device = load_run_state(ds_key, run_args, seed)
+                pools = load_partial_encoder_pools(ds_key, run_args, data, device, log_important)
+
+                data.x = pools["reference"]
+                model, base_acc, ref_embs, _oracle_logits = train_baseline_model(data, run_args, device)
+                results["baseline"].append(base_acc)
+                log_important(f"[Baseline:{run_args.partial_encoder_reference_tag}] Acc: {base_acc:.4f}")
+
+                model.eval()
+                with torch.no_grad():
+                    full_embs = model.encoder(pools["full"])
+                    partial_embs = {
+                        layer_idx: model.encoder(layer_pool)
+                        for layer_idx, layer_pool in pools["partial"].items()
+                    }
+
+                scores = build_real_quant_scores(verify_features, data, run_args, device)
+                errors_by_action = {-1: embedding_error(ref_embs, full_embs)}
+                for layer_idx, embs in partial_embs.items():
+                    errors_by_action[int(layer_idx)] = embedding_error(ref_embs, embs)
+
+                log_important(
+                    "[PartialScore] "
+                    f"sensitivity min={scores['sensitivity_q'].float().min().item():.1f}, "
+                    f"mean={scores['sensitivity_q'].float().mean().item():.1f}, "
+                    f"max={scores['sensitivity_q'].float().max().item():.1f}"
+                )
+                err_parts = [
+                    f"Full={errors_by_action[-1].mean().item():.5f}",
+                    *[
+                        f"L{layer_idx}={errors_by_action[int(layer_idx)].mean().item():.5f}"
+                        for layer_idx in layers
+                    ],
+                ]
+                log_important("[PartialError] " + " | ".join(err_parts))
+
+                for name, policy in configs:
+                    if policy["kind"] == "early_exit":
+                        actions, early_info = select_partial_early_exit_actions(
+                            scores,
+                            partial_embs,
+                            model,
+                            data,
+                            run_args,
+                            layers,
+                            device,
+                        )
+                    else:
+                        actions = select_partial_encoder_actions(
+                            policy,
+                            scores,
+                            run_args,
+                            int(data.num_nodes),
+                            layers,
+                            seed,
+                            device,
+                        )
+                        early_info = None
+                    mixed_embs = assemble_partial_encoder_embeddings(actions, full_embs, partial_embs)
+                    acc = evaluate_gnn_embeddings(model, data, mixed_embs)
+                    drop = base_acc - acc
+                    stats = summarize_partial_encoder_policy(
+                        actions,
+                        errors_by_action,
+                        layers,
+                        total_layers,
+                        run_args.partial_encoder_cost_scale,
+                    )
+
+                    results[name]["acc"].append(acc)
+                    results[name]["drop"].append(drop)
+                    results[name]["avg_err"].append(stats["avg_err"])
+                    results[name]["cost"].append(stats["cost"])
+                    results[name]["full"].append(stats["rates"]["full"])
+                    for layer_idx in layers:
+                        results[name][f"L{layer_idx}"].append(stats["rates"][int(layer_idx)])
+
+                    layer_rate_text = " | ".join(
+                        f"L{layer_idx}={stats['rates'][int(layer_idx)]:.1%}"
+                        for layer_idx in layers
+                    )
+                    log_important(
+                        f"[{name}] Full={stats['rates']['full']:.1%} | {layer_rate_text} "
+                        f"| Cost={stats['cost']:.3f} | Acc={acc:.4f} "
+                        f"| Drop={drop:.2%} | AvgErr={stats['avg_err']:.5f}"
+                    )
+                    if early_info is not None:
+                        log_important(
+                            "  EarlyExitDetail: "
+                            + " | ".join(f"{key}={value}" for key, value in early_info.items())
+                        )
+
+            log_important(f"\n{'=' * 72}")
+            log_important(f"FINAL PARTIAL ENCODER SUMMARY ({args.runs} Runs) | {ds_key.upper()}")
+            log_important(f"{'=' * 72}")
+            base_mean = float(np.mean(results["baseline"]))
+            log_important(f"Baseline Acc: {base_mean:.4f}")
+            layer_headers = [f"L{layer_idx} %" for layer_idx in layers]
+            log_important("-" * 132)
+            log_important(
+                f"{'Config':<22} | {'Full %':<8} | "
+                + " | ".join(f"{header:<8}" for header in layer_headers)
+                + f" | {'Cost':<8} | {'Acc':<10} | {'Drop %':<10} | {'AvgErr':<10}"
+            )
+            log_important("-" * 132)
+            for name, _policy in configs:
+                full_rate = float(np.mean(results[name]["full"]))
+                layer_rate_values = [float(np.mean(results[name][f"L{layer_idx}"])) for layer_idx in layers]
+                cost = float(np.mean(results[name]["cost"]))
+                acc = float(np.mean(results[name]["acc"]))
+                drop = float(np.mean(results[name]["drop"]))
+                avg_err = float(np.mean(results[name]["avg_err"]))
+                log_important(
+                    f"{name:<22} | {full_rate:<8.1%} | "
+                    + " | ".join(f"{rate:<8.1%}" for rate in layer_rate_values)
+                    + f" | {cost:<8.3f} | {acc:<10.4f} | {drop:<10.2%} | {avg_err:<10.5f}"
+                )
             log_important(f"{'=' * 72}\n")
 
 
@@ -1486,6 +1989,8 @@ def run_adaptive_simulation(args):
         return run_reuse_real_quant_experiment(args)
     if args.experiment_suite == "residual_reuse":
         return run_residual_reuse_experiment(args)
+    if args.experiment_suite == "partial_encoder":
+        return run_partial_encoder_experiment(args)
 
     target_datasets = args.datasets if args.datasets else ["cora"]
     log_dir = os.path.join("output", "graph_simhash")

@@ -75,12 +75,21 @@ def build_residual_pair_inputs(verify_features, edge_index, trace, node_indices,
     return torch.cat([cheap_delta, context_delta, scalars], dim=1)
 
 
-def select_residual_train_nodes(trace, data, split="train_val", max_pairs=4096, correction_mask=None):
+def select_residual_train_nodes(
+    trace,
+    data,
+    split="train_val",
+    max_pairs=4096,
+    correction_mask=None,
+    min_dist=0.0,
+):
     hit_mask = trace["hit_mask"]
     source_ok = trace["source_ids"] >= 0
     mask = hit_mask & source_ok
     if correction_mask is not None:
         mask = mask & correction_mask.to(device=mask.device, dtype=torch.bool)
+    if float(min_dist) > 0.0:
+        mask = mask & (trace["best_dists"].to(device=mask.device, dtype=torch.float32) >= float(min_dist))
     if split == "train":
         mask = mask & data.train_mask
     elif split == "train_val":
@@ -114,6 +123,7 @@ def train_residual_adapter(
     train_split="train_val",
     max_pairs=4096,
     correction_mask=None,
+    min_dist=0.0,
 ):
     device = target_embeddings.device
     train_nodes = select_residual_train_nodes(
@@ -122,6 +132,7 @@ def train_residual_adapter(
         split=train_split,
         max_pairs=max_pairs,
         correction_mask=correction_mask,
+        min_dist=min_dist,
     )
     if train_nodes.numel() == 0:
         return None, {"train_pairs": 0, "loss": 0.0}
