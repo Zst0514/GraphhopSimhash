@@ -1,146 +1,24 @@
-# Recent LLM / Transformer Accelerator Survey
+# Encoder / General Transformer Accelerator Survey
 
-本文档基于当前整理的多篇 Transformer / LLM 加速器论文，重点分析这些加速器本身的核心 idea、技术挑战、细粒度创新点，以及它们大致可以分成哪些类别。
+本文档聚焦 **encoder-only / 通用 Transformer / NPU 计算阵列** 相关的加速器论文，主要服务 GraphHopSimhash 后续的硬件架构设计：W4A8/W4A4 数值路径、FFN/channel gating、attention dataflow、near-memory / in-memory compute、低比特与压缩执行等。
 
-这里的“LLM 加速器”包含几类相关但不完全相同的对象：
+为了让分类更清晰，decoder / serving / KV-cache / prefill-decode overlap / decode-stage MVM 等内容已经拆到：[LLM_DECODER_ACCELERATOR_SURVEY.md](./LLM_DECODER_ACCELERATOR_SURVEY.md)。当前文件只保留：
 
 ```text
-1. LLM serving / adapter / KV-cache 系统
-2. Decoder LLM 推理加速器
-3. Encoder / BERT / ViT / Transformer 加速器
-4. 稀疏 attention / FFN 动态稀疏硬件
-5. 量化 / 近存 / 存内计算 / 数据流优化
+1. Encoder / BERT / ViT / 通用 Transformer block 加速器
+2. Attention / FFN / QKV 的动态稀疏与 exact dataflow
+3. 低比特量化、outlier、scale alignment、dequant path
+4. PIM / PNM / IMC / 3D / in-memory 或 near-core 数据流
+5. 可迁移到 LLM-for-GNN encoder NPU 的通用设计思想
 ```
 
-因此阅读时需要注意：有些工作主要服务 autoregressive decode，有些更适合 encoder-only Transformer，有些是通用 Transformer block 级优化。
+阅读时需要注意：部分论文原本面向 LLM prefill 或通用 Transformer，但只要其核心机制不是 decoder-only KV cache / serving scheduling，就保留在这里作为 encoder NPU 的参考。
 
 ---
 
-## 1. Chameleon: 多 LoRA Adapter LLM Serving 的自适应缓存与调度
+## 1. FIGNA: 保持数值精度的 FP-INT GEMM
 
-### 核心问题
-
-云端 LLM serving 往往共享一个 base model，同时为不同任务动态加载不同 LoRA adapter。传统方案的问题是：
-
-```text
-1. Adapter 在 CPU/GPU 间频繁搬运，造成 PCIe / GPU memory bandwidth 压力；
-2. 不同 adapter rank 不同，执行时间差异大；
-3. 请求长度和 adapter 大小共同导致队头阻塞和长尾延迟。
-```
-
-### 核心 idea
-
-Chameleon 把 LoRA adapter 看成 LLM serving 中的动态资源，围绕 adapter 做：
-
-```text
-1. GPU adapter cache
-2. cost-aware eviction
-3. adapter-aware multi-level queue scheduling
-```
-
-它不是优化单个 Transformer 算子，而是优化多 adapter serving 系统的吞吐和尾延迟。
-
-### 细粒度创新
-
-**Adapter Cache**
-
-利用 GPU 中动态空闲的显存缓存热门 adapter，而不是每次用完就丢弃。Cache manager 根据当前显存压力动态调整 cache 大小。
-
-**Cost-aware eviction**
-
-驱逐策略不只看 LRU / LFU，还考虑 adapter 重载成本：
-
-```text
-eviction cost ~= adapter size + recent/frequent usage
-```
-
-大的 adapter 重新加载更贵，因此不应只按时间驱逐。
-
-**Adapter-aware MLQ scheduler**
-
-定义加权请求大小 WRS：
-
-```text
-WRS = f(input length, predicted output length, adapter size/rank)
-```
-
-然后把请求分到不同优先级队列，短请求走 fast lane，降低 head-of-line blocking，同时通过资源再分配避免长请求饥饿。
-
-### 加速对象
-
-```text
-LLM serving scheduling
-LoRA adapter loading
-GPU memory residency
-tail latency
-```
-
-### 局限
-
-它不改变 Transformer block 内部计算，也不减少单次 encoder/decoder 的 MAC；核心收益来自系统调度和缓存。
-
----
-
-## 2. FlightLLM: FPGA 上的完整 LLM 映射流
-
-### 核心问题
-
-LLM 压缩技术理论上能降低计算和内存开销，但 FPGA/GPU 很难直接高效利用：
-
-```text
-1. 动态稀疏导致计算阵列负载不均；
-2. Decode 阶段逐 token 生成，activation 是小向量，访存利用率差；
-3. 混合精度需要灵活数据通路；
-4. 可变长度输入如果逐长度编译，会产生巨大指令存储。
-```
-
-### 核心 idea
-
-FlightLLM 提供完整 FPGA mapping flow，使压缩后的 LLM 能真正落到 FPGA 上：
-
-```text
-1. configurable sparse DSP chain
-2. always-on-chip decode
-3. length-adaptive compilation
-4. mixed precision dequant support
-```
-
-### 细粒度创新
-
-**CSD-Chain**
-
-通过 Sparse MUX 和 reduction node 灵活重连 DSP48 级联路径，支持分块稀疏、N:M 稀疏等多种模式。
-
-关键是让 DSP 不因稀疏模式变化而空转。
-
-**Always-On-Chip Decode**
-
-Decode 阶段 activation 是向量，体积较小。FlightLLM 让中间 activation 常驻 FPGA SRAM，并融合矩阵计算引擎 MPE 和特殊函数单元 SFU，避免中间结果反复写回片外。
-
-**长度自适应编译**
-
-把连续 token 长度分 bucket，共享一套指令模板：
-
-```text
-TB-level instruction storage -> MB-level
-```
-
-### 加速对象
-
-```text
-LLM FPGA inference
-decode activation movement
-sparse / mixed-precision linear layers
-instruction storage
-```
-
-### 局限
-
-主要面向 decoder LLM 与 FPGA 部署；对 encoder-only batch encoding 的直接迁移需要重新定义数据流和 batch scheduling。
-
----
-
-## 3. FIGNA: 保持数值精度的 FP-INT GEMM
+**发表信息**：HPCA 2024；Sungkyunkwan University 等团队；定位是面向 weight-only / FP-INT GEMM 的数值等价整数计算加速器。
 
 ### 核心问题
 
@@ -201,7 +79,9 @@ integer MAC replacement
 
 ---
 
-## 4. FAS-Trans: FFN 与 Attention 联合动态稀疏
+## 2. FAS-Trans: FFN 与 Attention 联合动态稀疏
+
+**发表信息**：ICCAD 2024；复旦大学等团队；定位是同时挖掘 FFN 和 attention 稀疏性的 Transformer 加速器。
 
 ### 核心问题
 
@@ -261,73 +141,9 @@ predictor reuse
 
 ---
 
-## 5. MECLA: 缩放子矩阵划分的 LLM 加速器
+## 3. Ayaka: 低秩估计与异构数据流 Transformer 加速器
 
-### 核心问题
-
-Autoregressive LLM decode 阶段每生成一个 token 都要读一遍巨大权重矩阵，典型 memory-bound：
-
-```text
-batch 小
-MVM 为主
-权重复用差
-HBM bandwidth 成为瓶颈
-```
-
-### 核心 idea
-
-MECLA 用 scaled sub-matrix partition 压缩权重并重组计算：
-
-```text
-Derived Sub-Matrix ~= scalar × Source Sub-Matrix
-```
-
-不完整存储所有权重块，而是用少量源子矩阵和缩放标量表示大量派生子矩阵。
-
-### 细粒度创新
-
-**SSMP compression**
-
-把权重矩阵划分为：
-
-```text
-SS: source sub-matrix
-DS: derived sub-matrix = scalar × SS
-```
-
-DS 只存 scalar，从而显著减少权重存储。
-
-**Fine-tuning recovery**
-
-这种强线性相关约束会损伤模型，因此通过知识蒸馏式微调恢复精度，只训练少量 SS 参数和 DS scalar。
-
-**PSum reuse**
-
-对于外积复用：
-
-```text
-input × SS -> PSum
-input × DS -> scalar × PSum
-```
-
-硬件不需要恢复 DS，也不需要重复完整 MAC。
-
-### 加速对象
-
-```text
-LLM decode MVM
-weight storage
-weight bandwidth
-partial-sum reuse
-```
-
-### 局限
-
-需要模型压缩和微调。适合 decoder memory-bound 场景，对 encoder batch GEMM 场景需要重新评估。
-
----
-
-## 6. Ayaka: 低秩估计与异构数据流 Transformer 加速器
+**发表信息**：IEEE JSSC 2024；清华大学等团队；定位是面向 Transformer 的低秩估计、注意力预测和异构数据流加速器。
 
 ### 核心问题
 
@@ -373,7 +189,9 @@ Ayaka 的重点是“预测 + 数据流自适应”，比单纯 attention sparsi
 
 ---
 
-## 7. STAR: Cross-Stage Tiling 的 Sparse Attention Spatial Architecture
+## 4. STAR: Cross-Stage Tiling 的 Sparse Attention Spatial Architecture
+
+**发表信息**：MICRO 2024 / arXiv 扩展线；清华大学、上海交通大学等团队；定位是 sparse attention 的 cross-stage tiling spatial architecture。
 
 ### 核心问题
 
@@ -429,7 +247,9 @@ STAR 是从算法到 spatial architecture 的长序列 sparse attention 全链�
 
 ---
 
-## 8. SOFA: Compute-Memory Optimized Sparse Attention Accelerator
+## 5. SOFA: Compute-Memory Optimized Sparse Attention Accelerator
+
+**发表信息**：MICRO 2024；清华大学、上海交通大学等团队；定位是面向 LTPP sparse attention 的 compute-memory 协同 tiling 加速器。
 
 ### 核心问题
 
@@ -473,7 +293,9 @@ SOFA 的亮点是把动态稀疏从“算得少”推进到“搬得少”。
 
 ---
 
-## 9. SALO2 / Static-Dynamic Sparse Attention Co-Design
+## 6. SALO2 / Static-Dynamic Sparse Attention Co-Design
+
+**发表信息**：SALO / SALO2 sparse attention accelerator 论文线；上海交通大学等团队；定位是同时支持 static 与 dynamic sparse attention 的软硬件协同设计。
 
 ### 核心问题
 
@@ -512,7 +334,9 @@ K/V reuse
 
 ---
 
-## 10. ESACT: 基于 Local Similarity 的端到端稀疏 Transformer
+## 7. ESACT: 基于 Local Similarity 的端到端稀疏 Transformer
+
+**发表信息**：arXiv 2025；Hongxiang Liu、Zhifang Deng、Tong Pu、Shengli Lu 等作者团队；定位是利用 local similarity 做端到端 sparse Transformer 加速。
 
 ### 核心问题
 
@@ -556,96 +380,9 @@ ESACT 是端到端 sparse Transformer 思路，强调低开销 predictor 和 pip
 
 ---
 
-## 11. AccLLM: 长上下文 LLM 的 FPGA 协同设计
+## 8. IMCsim: 面向深度学习的全系统 IMC 模拟框架
 
-### 核心问题
-
-长上下文 LLM 在边缘设备上受限于：
-
-```text
-1. 模型参数大；
-2. decode memory-bound；
-3. KV cache 随上下文长度膨胀；
-4. 混合精度和稀疏不易映射到 FPGA。
-```
-
-### 核心 idea
-
-用激进压缩算法和可重构 FPGA 引擎协同支持 long-context inference。
-
-### 细粒度创新
-
-**Compression stack**
-
-包括 2:4 pruning、W2A8KV4 量化、A-shape attention，用来同时压缩 weight、activation、KV cache。
-
-**RCE**
-
-Reconfigurable Computing Engine 支持 prefill MMM 和 decode MVM 两种模式切换。
-
-**DSP packing**
-
-针对 2/4/8-bit 混合精度，把多个低位运算映射到同一个 DSP，提高利用率。
-
-**Kernel/layer fusion**
-
-融合 attention 和 decode 层间中间结果，减少片外访问。
-
-### 加速对象
-
-```text
-long-context LLM
-KV cache
-prefill/decode dual mode
-mixed precision FPGA execution
-```
-
-### 局限
-
-主要服务 decoder 和 long-context，不直接适用于没有 KV-cache 的 encoder-only workload。
-
----
-
-## 12. CENT / PIM Is All You Need
-
-### 核心问题
-
-LLM decode 阶段 operational intensity 很低，GPU 算力利用率差，性能受内存带宽限制。
-
-### 核心 idea
-
-构建 GPU-free LLM inference system，用 CXL 扩展容量，并用 PIM/PNM 提供高内存带宽。
-
-### 细粒度创新
-
-**CXL-scaled memory**
-
-通过 CXL 交换网络连接多个 memory device，突破单设备容量限制。
-
-**Hierarchical PIM-PNM**
-
-PIM 负责大量 MAC，PNM 负责 softmax、SiLU、sqrt 等复杂但低频操作。
-
-**Parallel mapping**
-
-支持 pipeline parallelism、tensor parallelism 及混合映射。
-
-### 加速对象
-
-```text
-memory-bound LLM decode
-large model capacity
-weight bandwidth
-distributed memory system
-```
-
-### 核心价值
-
-它从系统结构上回答：当 LLM 主要瓶颈是访存时，是否还需要 GPU。
-
----
-
-## 13. IMCsim: 面向深度学习的全系统 IMC 模拟框架
+**发表信息**：DAC 2025；UIUC 等团队；定位是面向 LLM / DiT 等 workload 的 full-system IMC simulator。
 
 ### 核心问题
 
@@ -679,7 +416,9 @@ IMC 设计缺少能支持 LLM/DiT 等大模型的全系统、可编程、周期�
 
 ---
 
-## 14. Balanced Systolic Array Attention Accelerator
+## 9. Balanced Systolic Array Attention Accelerator
+
+**发表信息**：DAC 2025；作者团队围绕 balanced systolic array 与 multi-row interleaved attention dataflow 展开；定位是 attention 的 exact dataflow 与高利用率阵列设计。
 
 ### 核心问题
 
@@ -726,7 +465,9 @@ systolic array utilization
 
 ---
 
-## 15. DESA: Dataflow Efficient Systolic Array for Transformers
+## 10. DESA: Dataflow Efficient Systolic Array for Transformers
+
+**发表信息**：IEEE Transactions on Computers 2025；Z. Wang、H. Fan、G. He 等作者团队；定位是面向 encoder-only Transformer 的 dataflow-efficient systolic array。
 
 ### 核心问题
 
@@ -765,7 +506,9 @@ matrix workload diversity
 
 ---
 
-## 16. H3D-Transformer: 异构 3D Transformer 平台
+## 11. H3D-Transformer: 异构 3D Transformer 平台
+
+**发表信息**：ACM TODAES 2024；Georgia Institute of Technology 等团队；定位是面向 edge Transformer 的 heterogeneous 3D / CIM + digital TPU 平台。
 
 ### 核心问题
 
@@ -810,7 +553,9 @@ on-chip model residency
 
 ---
 
-## 17. PADE: Predictor-Free Sparse Attention
+## 12. PADE: Predictor-Free Sparse Attention
+
+**发表信息**：arXiv 2025 / HPCA 2026 论文线；清华大学、上海交通大学等团队；定位是 predictor-free sparse attention accelerator。
 
 ### 核心问题
 
@@ -853,126 +598,9 @@ PADE 的重要性在于“预测器无关”的安全早停，精度控制比纯
 
 ---
 
-## 18. Oaken: Online-Offline Hybrid KV Cache Quantization
+## 13. Energon / PNM Transformer Throughput Maximization
 
-### 核心问题
-
-LLM decode 阶段 KV cache 巨大，KV quantization 可降内存，但在线检测 outliers 成本高。
-
-### 核心 idea
-
-把 outlier 阈值从在线检测改为离线统计，并在线快速分类和量化。
-
-### 细粒度创新
-
-**Offline thresholds**
-
-观察到不同层 KV 分布与 prompt 关系弱，离线统计 outer/middle/inner 阈值。
-
-**Group-shift quantization**
-
-对 outer/inner outlier 先用阈值平移到近原点，再低位量化，避免 FP16 outlier path。
-
-**Dense-sparse fused encoding**
-
-Middle dense 紧凑存储，outer/inner 稀疏编码融合到 dense 矩阵空位中，减少索引和访存开销。
-
-### 加速对象
-
-```text
-KV cache memory
-decode bandwidth
-online outlier detection
-mixed-format storage
-```
-
-### 局限
-
-纯 encoder 场景没有 autoregressive KV cache，因此不能直接迁移。
-
----
-
-## 19. Hybrid Systolic Array for Edge LLM
-
-### 核心问题
-
-边缘 LLM 同时有：
-
-```text
-prefill: MMM, compute-intensive
-decode: MVM, memory-bound, batch small
-```
-
-传统 2D systolic array 在 decode batch=1 时利用率很低。
-
-### 核心 idea
-
-设计 Hybrid Systolic Architecture，在 prefill 和 decode 两种模式间切换。
-
-### 细粒度创新
-
-**HSA mode switching**
-
-Prefill 时 PE 组成大阵列处理矩阵-矩阵；decode 时拆成多个 cluster 处理矩阵-向量，提高 batch=1 利用率。
-
-**MXINT4 dequant dataflow**
-
-利用 decode 阶段空闲 PE 执行反量化，隐藏低位权重恢复开销。
-
-**Fused RMSNorm/RoPE**
-
-优化后处理和位置编码，减少额外 buffer 和 DRAM 表访问。
-
-### 加速对象
-
-```text
-edge LLM prefill/decode
-systolic utilization
-low-bit dequant
-post-processing ops
-```
-
----
-
-## 20. MATA: Look-Back KV Cache Pruning
-
-### 核心问题
-
-长上下文 LLM decode 中，KV cache 随序列长度线性增长，带来巨大 DRAM 存取和容量压力。
-
-### 核心 idea
-
-在线回顾历史 token 的重要性，把低价值 KV 丢弃，使 KV cache 接近固定预算。
-
-### 细粒度创新
-
-**Look-back pruning**
-
-动态评估历史 token 是否仍重要，并从 KV cache 中移除不重要 token。
-
-**Lightweight scoring**
-
-用轻量综合评分避免 pruning 决策本身成为瓶颈。
-
-**Hardware memory manager**
-
-支持剪枝后不规则 KV 存取和压缩存储。
-
-### 加速对象
-
-```text
-long-context decode
-KV cache capacity
-KV memory bandwidth
-```
-
-### 局限
-
-主要适用于 decoder KV cache；encoder-only workload 没有持续增长的 KV cache。
-
----
-
-## 21. Energon / PNM Transformer Throughput Maximization
+**发表信息**：Energon / PNM Transformer inference 论文线；作者团队聚焦 processing-near-memory 的 Transformer throughput mapping；定位是 PNM/NDP 路线的系统建模与映射。
 
 ### 核心问题
 
@@ -1010,7 +638,9 @@ data movement
 
 ---
 
-## 22. Low-Power ViT Accelerator with Hardware-Aware Pruning
+## 14. Low-Power ViT Accelerator with Hardware-Aware Pruning
+
+**发表信息**：近年 edge ViT / Transformer accelerator 方向论文；作者团队聚焦 hardware-aware pruning 与 low-power dataflow；定位是 FFN/token pruning 路线的对照。
 
 ### 核心问题
 
@@ -1048,7 +678,9 @@ edge low-power inference
 
 ---
 
-## 23. BETA: Bit-Grained Transformer Attention Accelerator
+## 15. BETA: Bit-Grained Transformer Attention Accelerator
+
+**发表信息**：IEEE TCAS-II 2025；清华大学团队；定位是 bit-grained attention early termination accelerator。
 
 ### 核心问题
 
@@ -1084,331 +716,597 @@ bit-level sparse execution
 
 BETA 和 PADE 类似，代表 bit-level bounded / early-stop attention 加速路线。
 
+# 顶会新论文补充：DAC / ISCA / MICRO / HPCA / ASPLOS
+
+这一节保留近年顶会中更贴近 encoder / 通用 Transformer / NPU 数据流的工作。decoder-only 的 KV cache、serving 调度、decode MVM 和 prefill-decode overlap 已移动到 decoder 专门文档。
+
+## 16. Tender: Tensor Decomposition + Runtime Requantization
+
+**发表信息**：ISCA 2024；作者团队围绕 LLM low-bit tensor decomposition 与 tensor compute hardware；定位是低比特 scale alignment / runtime requantization。
+
+来源：[ISCA 2024 / arXiv](https://arxiv.org/abs/2406.12930)
+
+### 核心问题
+
+低比特 LLM 推理不仅是把权重量化到 INT4/INT8。难点在于：
+
+```text
+1. outlier 破坏低比特量化精度；
+2. 多个低比特 partial sum 合并时需要 dequant / requant；
+3. 如果硬件路径频繁回到高精度，低比特计算收益会被抵消。
+```
+
+### 核心 Idea
+
+Tender 用 tensor decomposition 把难量化矩阵拆成若干低比特子矩阵，并让不同子矩阵的 scale factor 之间保持 power-of-two 关系。
+
+这样做的关键好处是：
+
+```text
+partial sum 对齐可以用 shift 完成，
+不需要显式 dequantize -> accumulate -> requantize。
+```
+
+### 硬件意义
+
+Tender 不是另造一套全新阵列，而是在已有 tensor compute pipeline 上加少量 scale/shift 支持，让低比特矩阵乘可以更自然地落到硬件里。
+
+### 对我们场景的启发
+
+它说明 W4A8/W4A4 的难点往往不是 MAC 本身，而是：
+
+```text
+scale alignment
+outlier handling
+partial sum accumulation
+```
+
+如果后续设计 Graph-aware W4A8 NPU，应该把 graph routing 和数值路径分开：routing 决定谁走近似路径，数值路径必须保证 scale/outlier 的硬件开销足够低。
+
+---
+
+## 17. LLMCompass: LLM Inference Hardware Design Model
+
+**发表信息**：ISCA 2024；Princeton University 团队；定位是 LLM inference accelerator 的 cost / performance / area design-space model。
+
+来源：[ISCA 2024 / Princeton page](https://collaborate.princeton.edu/en/publications/llmcompass-enabling-efficient-hardware-design-for-large-language-)
+
+### 核心问题
+
+LLM 硬件设计空间巨大：array 规模、buffer 容量、memory bandwidth、parallelism、operator mapping 都会影响性能。没有可靠 cost model 时，很多架构探索只能凭经验。
+
+### 核心 Idea
+
+LLMCompass 是面向 LLM inference 的硬件设计建模框架，建模 latency、area、memory、operator mapping，并用真实硬件校准模型误差。
+
+### 核心价值
+
+它不是一个单点 accelerator，而是设计空间探索工具：
+
+```text
+给定模型和硬件参数，
+预测不同 operator / layer / mapping 的性能和面积代价。
+```
+
+### 对我们场景的启发
+
+如果要把 GraphHopSimhash 讲成体系结构论文，最终也需要一个类似的 cost model：
+
+```text
+P0 exact reuse      cost = cache read
+P1 residual reuse   cost = low-rank adapter
+P2 gated W4A8       cost = partial FFN/channel/token compute
+P3 full W4A8        cost = full encoder
+```
+
+这比只报 accuracy/drop 更像 HPCA/ISCA 的完整架构评估。
+
+---
+
+## 18. LUT Tensor Core: LUT-Based Low-Bit LLM Inference
+
+**发表信息**：ISCA 2025；Imperial College London、Microsoft Research 等团队；定位是 LUT-based low-bit LLM inference tensor core。
+
+来源：[ISCA 2025 project page](https://hamerlate.github.io/publications/old/LUT_Tensor_Core/)
+
+### 核心问题
+
+低比特 LLM 推理不一定要完全沿用传统乘法器路径。极低比特下，很多乘法可以转化为查表、编码、重排和简单累加。
+
+### 核心 Idea
+
+LUT Tensor Core 是 soft/hardware co-design：用 LUT-based 方法支持 low-bit LLM inference，把部分低比特乘法/组合计算转化为 lookup-friendly execution。
+
+### 硬件意义
+
+```text
+传统 Tensor Core:
+    低比特矩阵乘仍围绕 multiplier / MAC 展开。
+
+LUT Tensor Core:
+    更重视 lookup table、bit packing、低比特组合复用。
+```
+
+### 对我们场景的启发
+
+如果我们后面做 FFN channel gating 或 graph-guided low-bit path，LUT/bit-serial 方向可以作为替代阵列方案：不一定只设计 W4A8 MAC，也可以设计“低比特查表 + 小规模精确补偿”的混合路径。
+
+---
+
+## 19. FuseMax: Extended Einsums for Attention Accelerator Design
+
+**发表信息**：MICRO 2024；UIUC / MIT 等团队；定位是基于 extended einsum 的 attention accelerator dataflow。
+
+来源：[MICRO 2024 / arXiv](https://arxiv.org/abs/2406.10491)
+
+### 核心问题
+
+Attention 的高效实现不只是少算，还包括：
+
+```text
+1. 避免 materialize attention matrix；
+2. 避免 off-chip traffic bottleneck；
+3. 保持 PE utilization 接近满载；
+4. 降低 on-chip buffer 对 sequence length 的依赖。
+```
+
+### 核心 Idea
+
+FuseMax 使用 extended einsum 表达和重组 attention 计算，把传统分裂的 attention/softmax/value 计算重排成更适合 accelerator 的 fused dataflow。
+
+### 细粒度创新
+
+```text
+把 attention kernel 当成 einsum graph 优化问题：
+    哪些维度该 tile；
+    哪些中间结果不需要显式存；
+    哪些 reduction 可以和后续算子融合；
+    如何让 compute utilization 接近 100%。
+```
+
+### 对我们场景的启发
+
+FuseMax 是 exact dataflow 优化，适合做我们 full W4A8 encoder path 的 baseline。它不能替代 GraphHopSimhash 的 reuse，但可以作为：
+
+```text
+P3 full encoder 的底层精确执行引擎。
+```
+
+---
+
+## 20. DECA: Near-Core LLM Decompression Accelerator
+
+**发表信息**：MICRO 2025；Intel、UIUC 等团队；定位是 near-core dequantization / desparsification accelerator。
+
+来源：[MICRO 2025 / UIUC page](https://experts.illinois.edu/en/publications/deca-a-near-core-llm-decompression-accelerator-grounded-on-a-3d-r/)
+
+### 核心问题
+
+LLM 权重常以 quantized / sparsified 格式存储，但进入 GEMM engine 前要先：
+
+```text
+dequantize
+de-sparsify
+repack tile
+feed matrix engine
+```
+
+如果这些操作由软件 vector kernel 完成，compressed GEMM 的收益会被解压和格式转换吃掉。
+
+### 核心 Idea
+
+DECA 在 core 附近加入 ML-model decompression accelerator，把 tile 级 dequantization / de-sparsification 从 CPU vector 单元卸载出去，直接生成 GEMM engine 可消费的 tile。
+
+### 细粒度创新
+
+```text
+1. Roof-Surface 3D performance model：
+   同时建模 memory、vector unit、matrix engine。
+
+2. near-core decompression accelerator：
+   负责 compressed tile -> compute-ready tile。
+
+3. out-of-order invocation ISA：
+   允许 core compute 和 decompression overlap。
+```
+
+### 对我们场景的启发
+
+如果我们采用 W4A8 / W4A4 embedding pool 或在线 W4A8 encoder，DECA 提醒我们：硬件论文不能只写“量化省了多少 bit”，还要写清楚：
+
+```text
+scale / zero-point / sparsity metadata 如何取；
+dequant/repack 在哪里做；
+是否会阻塞 tensor array。
+```
+
+---
+
+## 21. LLM.265 / VcLLM: Video Codecs as Tensor Codecs
+
+**发表信息**：MICRO 2025；Duke University、Carnegie Mellon University 等团队；定位是把 video codec 思路迁移到 LLM tensor compression。
+
+来源：[MICRO 2025 project page](https://fact-lab.hkust.edu.hk/publications/conference-paper/2025/xu-2025-llm/)
+
+### 核心问题
+
+LLM 权重和中间张量越来越大，传统量化主要关注数值精度，但没有充分利用张量在空间/维度上的局部相关性。
+
+### 核心 Idea
+
+LLM.265 / VcLLM 把 video codec 的思想迁移到 tensor compression：把 tensor 看成具有局部结构的数据块，用成熟视频压缩中的预测、变换、编码思想压缩 LLM 张量。
+
+### 硬件意义
+
+这类工作代表一个新方向：
+
+```text
+不是只设计更快 MAC，
+而是把 tensor 当作可压缩信号，
+用 codec-style pipeline 降低内存和带宽。
+```
+
+### 对我们场景的启发
+
+Graph-text workloads 里的 embedding / cheap feature / neighbor context 也有局部相关性。未来可以考虑：
+
+```text
+hash bucket 内 embedding delta compression
+reuse anchor + residual 的压缩存储
+graph cluster 内 tensor codec
+```
+
+---
+
+## 22. MCBP: Bit-Slice Sparsity and Repetitiveness
+
+**发表信息**：MICRO 2025 / arXiv preprint；清华大学、上海交通大学等团队；定位是 bit-slice sparsity / repetitiveness LLM inference accelerator。
+
+来源：[arXiv / MICRO 2025 preprint](https://arxiv.org/abs/2509.10372)
+
+### 核心问题
+
+很多 LLM accelerator 在 value-level 做稀疏或量化，但忽略了 bit-slice 层面的重复和稀疏。低比特推理里，bit-plane / bit-slice 的分布本身就有结构。
+
+### 核心 Idea
+
+MCBP 从 bit-slice 级别同时挖掘：
+
+```text
+1. repetitiveness：重复 bit-slice 计算可以复用；
+2. sparsity：高位 bit-slice 中零/稀疏结构可以编码；
+3. progressive prediction：逐 bit 预测减少 KV cache access。
+```
+
+### 细粒度创新
+
+```text
+BRCR:
+    利用 bit-slice 重复性减少 GEMM 计算。
+
+BSTC:
+    利用高位 bit-slice 稀疏降低权重访问。
+
+BGPP:
+    bit-grained progressive prediction 减少 KV cache 访存。
+```
+
+### 对我们场景的启发
+
+这和我们讨论的 FFN/channel gating 是同一个大方向：从粗粒度节点路由进一步下沉到 bit/channel/tile 层级，让 NPU 本体也能受益。
+
+---
+
+## 23. Efficient Transformer Inference with Statically Structured Sparse Attention
+
+**发表信息**：DAC 2023；NVIDIA Research、UC Berkeley 等团队；定位是硬件友好的 static structured sparse attention。
+
+来源：[DAC 2023 / NVIDIA Research](https://research.nvidia.com/publication/2023-07_efficient-transformer-inference-statically-structured-sparse-attention)
+
+### 核心问题
+
+动态稀疏 attention 虽然灵活，但硬件不规则；完全 dense attention 又浪费。静态稀疏如果设计得好，能在硬件上获得更稳定收益。
+
+### 核心 Idea
+
+设计 static structured sparse attention masks，把 attention matrix 切成硬件友好的 dense regions，只计算有意义区域，跳过其他区域。
+
+### 细粒度创新
+
+```text
+1. 静态结构化 mask：
+   稀疏模式对硬件友好，减少不规则索引。
+
+2. entropy-aware finetuning：
+   训练时鼓励 attention 稀疏，同时保持任务精度。
+
+3. accelerator extension：
+   在 dense accelerator 上加少量结构稀疏支持。
+```
+
+### 对我们场景的启发
+
+它说明“稀疏模式硬件友好性”非常重要。Graph-aware routing 也不能只追求最高 sparsity/reuse；必须让路径规则足够简单：
+
+```text
+node route buckets
+fixed FFN channel groups
+structured residual adapter
+```
+
+---
+
+## 24. TF-MVP: Mixed-Length Vector Pruning Transformer Accelerator
+
+**发表信息**：DAC 2023；POSTECH、Naver Cloud 等团队；定位是 mixed-length vector pruning 与 reconfigurable PE transformer accelerator。
+
+来源：[DAC 2023 / KAIST page](https://pure.kaist.ac.kr/en/publications/tf-mvp-novel-sparsity-aware-transformer-accelerator-with-mixed-le)
+
+### 核心问题
+
+Transformer 剪枝后的稀疏模式常常不规则，导致硬件利用率下降。单一向量长度的 pruning 不能很好匹配不同层的稀疏方向和大小。
+
+### 核心 Idea
+
+TF-MVP 提出 mixed-length vector pruning，根据不同层的 pruning pattern 选择不同 vector granularity，并设计 reconfigurable PE 结构支持这些模式。
+
+### 细粒度创新
+
+```text
+direction strength:
+    分析每层 pruning pattern 的主要方向和大小。
+
+mixed-length vector pruning:
+    让 pruning pattern 更硬件友好。
+
+reconfigurable PE:
+    支持不同长度 vector sparse execution。
+```
+
+### 对我们场景的启发
+
+如果后续做 graph-guided FFN channel gating，不要做完全 unstructured channel mask。更适合硬件的是：
+
+```text
+group-level channel gating
+fixed group size
+少数可重配置 group shape
+```
+
+---
+
+## 25. APTQ: Attention-Aware Mixed-Precision PTQ
+
+**发表信息**：DAC 2024；Southern University of Science and Technology、University of Hong Kong 等团队；定位是 attention-aware post-training mixed-precision quantization。
+
+来源：[DAC 2024 / arXiv](https://arxiv.org/abs/2402.14866)
+
+### 核心问题
+
+传统 post-training quantization 多看 weight Hessian 或 layer sensitivity，但 LLM 中 attention output 的非线性影响会传到后续层，单看权重误差不够。
+
+### 核心 Idea
+
+APTQ 用 Hessian trace 建模敏感度，同时考虑 attention output 对整体模型的非线性影响，做 mixed-precision quantization。
+
+### 加速对象
+
+```text
+LLM post-training mixed precision
+layer/weight sensitivity estimation
+attention-aware precision assignment
+```
+
+### 对我们场景的启发
+
+APTQ 说明“精度分配”必须看 downstream sensitivity。我们在 graph-text encoder 中类似地发现：
+
+```text
+量化路由不能只看 embedding L2 error；
+还要看 degree / propagation risk / GNN 分类边界。
+```
+
+---
+
+## 26. OPAL: Outlier-Preserved Microscaling Quantization
+
+**发表信息**：arXiv 2024；KAIST 等团队；定位是 outlier-preserved microscaling quantization accelerator。
+
+来源：[arXiv](https://arxiv.org/abs/2409.05902)
+
+### 核心问题
+
+LLM 低比特量化的主要阻碍之一是 activation outlier。只量化 weight 不够，activation 也要低比特，才可能真正降低 compute 和 bandwidth。
+
+### 核心 Idea
+
+OPAL 做 outlier-preserved microscaling quantization：普通值走 microscaling low-bit path，outlier 用专门机制保留，避免 outlier 被低比特 scale 抹平。
+
+### 硬件意义
+
+```text
+main path:
+    low-bit microscaling compute
+
+outlier path:
+    preserve rare large values
+
+最终目标:
+    兼顾 activation quantization 和模型精度。
+```
+
+### 对我们场景的启发
+
+这和我们目前 W4A8/W4A4 的经验一致：W4A4 出问题通常不是平均误差，而是少量节点/维度/通道的异常误差。硬件上必须给 outlier 或 high-risk channel 留一条保护路径。
+
+---
+
+## 27. PIMoE: NPU-PIM for MoE Transformer
+
+**发表信息**：DAC 2025；作者团队围绕 NPU-PIM heterogeneous MoE Transformer deployment；定位是 throttle-aware NPU/PIM offloading。
+
+来源：[DAC 2025 / DOI record](https://colab.ws/articles/10.1109%2Fdac63849.2025.11132528)
+
+### 核心问题
+
+MoE Transformer 的 expert 激活稀疏，但带来两个硬件问题：
+
+```text
+1. expert workload 不均衡；
+2. NPU 和 PIM 之间 sparse data layout 不匹配；
+3. 数据搬运和调度开销可能抵消 MoE 稀疏收益。
+```
+
+### 核心 Idea
+
+PIMoE 用 NPU + PIM 异构系统执行 MoE Transformer，并提出 throttle-aware task offloading，把任务在 NPU/PIM 之间动态分配。
+
+### 细粒度创新
+
+```text
+throttle-aware offloading:
+    根据 NPU/PIM 当前瓶颈决定任务分配。
+
+near-memory-controller data condenser:
+    解决 sparse data layout mismatch，提高搬运效率。
+```
+
+### 对我们场景的启发
+
+它和我们的层级执行路线很接近：不是所有节点/算子都走同一个引擎，而是根据风险、稀疏、负载，把任务分配给不同硬件路径。
+
+---
+
+## 28. Anda: Variable-Length Grouped Activation Format
+
+**发表信息**：HPCA 2025；南京大学、KU Leuven 等团队；定位是 variable-length grouped activation data format for LLM inference。
+
+来源：[HPCA 2025 / arXiv](https://arxiv.org/abs/2411.15982)
+
+### 核心问题
+
+LLM activation 的数值范围和精度需求不是固定的。统一位宽会浪费：简单 activation 给太多 bit，困难 activation 又可能精度不够。
+
+### 核心 Idea
+
+Anda 提出 variable-length grouped activation data format，用 group-shared exponent 和动态 mantissa bit allocation 表示 activation。
+
+### 硬件意义
+
+```text
+固定 INT/FP 格式:
+    简单，但不能适应不同 activation 分布。
+
+variable-length grouped format:
+    让不同 group 使用不同有效精度，
+    在压缩和精度之间做更细粒度权衡。
+```
+
+### 对我们场景的启发
+
+Graph-aware FFN gating / mixed precision 不一定只靠“跳过通道”，也可以做：
+
+```text
+high-risk nodes/channels -> longer mantissa
+low-risk nodes/channels  -> shorter mantissa
+```
+
+这比 W4A8/W4A4 二选一更细。
+
+---
+
+## 29. llm.npu: Fast On-Device LLM Inference with NPUs
+
+**发表信息**：ASPLOS 2025；Peking University 等团队；定位是面向移动端 NPU 的 LLM inference offloading / hot-channel 管理。
+
+来源：[ASPLOS 2025 PDF](https://xumengwei.github.io/files/ASPLOS25-NPU.pdf)
+
+### 核心问题
+
+移动端 NPU 对 MatMul 友好，但 LLM 里还有 LayerNorm、Attention、outlier channel、数据同步等不适合 NPU 的部分。很多系统只把部分 MatMul offload 到 NPU，结果 CPU/GPU/NPU 之间同步和数据复制成为瓶颈。
+
+### 核心 Idea
+
+llm.npu 目标是让 on-device NPU 更完整地承担 LLM prefill。它关注：
+
+```text
+1. float operators 如何避免拖慢 NPU critical path；
+2. hot/outlier channels 如何单独处理；
+3. CPU/GPU/NPU 之间如何减少同步与重复权重存储。
+```
+
+### 对我们场景的启发
+
+这篇对我们最直接：如果要写 Graph-aware encoder NPU，不能只说 W4A8 MatMul。需要回答：
+
+```text
+LayerNorm / pooling / normalization 怎么做？
+residual adapter 放在哪里？
+outlier channel 是否保留高精度？
+hash/reuse engine 和 W4A8 array 如何同步？
+```
+
+---
+
+---
+
 ---
 
 # 分类总结
 
-## A. Serving / Scheduler / Cache 类
+## A. Encoder / 通用 Transformer 主线
 
-代表：
-
-```text
-Chameleon
-Oaken
-MATA
-```
-
-主要加速：
+当前主文件保留的论文大致分成六类：
 
 ```text
-adapter loading
-request scheduling
-KV cache storage
-online memory management
-tail latency
+1. Attention / FFN / QKV 联合优化
+   FAS-Trans, Ayaka, ESACT, FACT-like eager prediction, TF-MVP
+
+2. Sparse attention / early termination / exact attention dataflow
+   STAR, SOFA, SALO2, PADE, BETA, FuseMax, Balanced SA, DESA
+
+3. 低比特数值路径与量化硬件
+   FIGNA, Tender, LUT Tensor Core, APTQ, OPAL, Anda, DECA
+
+4. Tensor / weight / activation 压缩
+   LLM.265 / VcLLM, MCBP
+
+5. PIM / PNM / IMC / 3D / memory-side compute
+   IMCsim, H3D-Transformer, PIMoE, Energon
+
+6. 设计空间建模与 NPU 落地参考
+   LLMCompass, llm.npu
 ```
 
-核心创新：
+## B. 对 GraphHopSimhash Encoder NPU 最相关的点
 
 ```text
-把 LLM serving 中的动态资源显式建模：
-adapter、KV cache、请求长度、rank、显存容量。
+1. FFN/channel gating：
+   Graph/risk 信息可以指导哪些节点、哪些 FFN group 走轻量路径。
+
+2. W4A8/W4A4 数值路径：
+   需要关注 scale alignment、outlier、dequant/repack，而不只是 MAC 位宽。
+
+3. Exact attention dataflow：
+   Full encoder path 应该用 FlashAttention/FuseMax/DESA/Balanced-SA 这类精确数据流作为底层执行方式。
+
+4. Predictor / early termination：
+   FACT/FAS-Trans/PADE/BETA 的关键启发是：预测必须便宜，且最好能复用预测阶段的部分结果。
+
+5. Memory hierarchy：
+   hash reuse cache、residual adapter、W4A8 encoder、FFN-gated encoder 应该被建模成多路径层级执行。
 ```
 
-适合场景：
+## C. 已拆出的 Decoder / Serving 内容
+
+以下内容已经移动到 [LLM_DECODER_ACCELERATOR_SURVEY.md](./LLM_DECODER_ACCELERATOR_SURVEY.md)：
 
 ```text
-multi-tenant LLM serving
-LoRA-as-a-service
-long-context decode
+1. LoRA adapter serving / heterogeneous GPU serving / thermal-power scheduling
+2. KV cache quantization / KV cache pruning / sparsity-aware KV placement
+3. decode-stage MVM / in-flash GEMV / PIM-NDP LLM serving
+4. prefill-decode overlap attention kernel
+5. decoder-oriented FPGA mapping / long-context LLM serving
 ```
 
-不适合直接作为 encoder-only NPU 核心，因为它们很多依赖 KV cache 或 serving queue。
-
-## B. FPGA / Reconfigurable Mapping 类
-
-代表：
-
-```text
-FlightLLM
-AccLLM
-Hybrid Systolic Array Edge LLM
-```
-
-主要加速：
-
-```text
-prefill MMM
-decode MVM
-mixed precision
-sparsity mapping
-low-bit dequant
-variable length compilation
-```
-
-核心创新：
-
-```text
-用可重构阵列 / DSP packing / mode switching 适配 LLM 不同阶段。
-```
-
-适合场景：
-
-```text
-FPGA deployment
-edge LLM
-mixed prefill/decode workload
-```
-
-## C. Quantization / Numeric Compute 类
-
-代表：
-
-```text
-FIGNA
-MECLA
-Oaken
-```
-
-主要加速：
-
-```text
-weight-only GEMM
-MVM weight bandwidth
-KV quantization
-dequant overhead
-```
-
-核心创新：
-
-```text
-用新的数值表示、权重结构或离线阈值降低 bit-width 和访存。
-```
-
-可分两类：
-
-```text
-1. numerical-equivalent:
-   FIGNA 追求与 FP-INT GEMM 数值一致。
-
-2. model-compression/recovery:
-   MECLA/Oaken 通过压缩、阈值、微调或任务容忍保持精度。
-```
-
-## D. Dynamic Sparse Attention / Eager Prediction 类
-
-代表：
-
-```text
-FACT
-FAS-Trans
-Ayaka
-STAR
-SOFA
-SALO2
-ESACT
-PADE
-BETA
-```
-
-主要加速：
-
-```text
-QKV generation
-attention score
-softmax/top-k
-attention output
-sometimes FFN
-```
-
-核心创新：
-
-```text
-提前或边算边判断哪些 token / pair / row / column 重要，
-然后跳过无贡献或低贡献计算。
-```
-
-内部又可分为：
-
-```text
-1. predictor-based:
-   FACT, FAS-Trans, Ayaka, ESACT
-
-2. pattern/tile optimized:
-   STAR, SOFA, SALO2
-
-3. predictor-free / bit-serial early termination:
-   PADE, BETA
-```
-
-这类是当前最接近 HPCA/ISCA/MICRO 风格 Transformer NPU 创新的主流方向。
-
-## E. FFN / Token Mixed Precision 类
-
-代表：
-
-```text
-FACT
-FAS-Trans
-Low-Power ViT Accelerator
-```
-
-主要加速：
-
-```text
-FFN FC1 / FC2
-token-wise precision
-activation sparsity
-channel or token pruning
-```
-
-核心创新：
-
-```text
-不要只盯 attention；
-短序列或 encoder 场景中 FFN 往往是更大的瓶颈。
-```
-
-典型依据：
-
-```text
-token 被 attention top-k 选中的次数
-GELU 后接近 0 的 activation
-hidden/activation importance
-```
-
-## F. Exact Dataflow / Systolic / Softmax Fusion 类
-
-代表：
-
-```text
-Balanced Systolic Array Attention
-DESA
-部分 FuseMax / FlashAttention-style accelerator
-```
-
-主要加速：
-
-```text
-attention dataflow
-softmax intermediate storage
-LayerNorm/Softmax dependency
-systolic array utilization
-```
-
-核心创新：
-
-```text
-不依赖近似，不改变模型数学语义；
-通过 tiling、fusion、stationary dataflow、interleaving 减少 IO 和提高利用率。
-```
-
-优点：
-
-```text
-精度最稳。
-```
-
-缺点：
-
-```text
-如果只是迁移已有 exact attention dataflow，论文主创新可能不足。
-```
-
-## G. PIM / PNM / 3D / IMC 类
-
-代表：
-
-```text
-CENT
-Energon
-H3D-Transformer
-IMCsim
-```
-
-主要加速：
-
-```text
-weight bandwidth
-large model capacity
-near-memory matrix compute
-heterogeneous compute placement
-```
-
-核心创新：
-
-```text
-把计算靠近存储，或者把不同 Transformer 算子映射到不同存储/计算介质。
-```
-
-适合场景：
-
-```text
-memory-bound LLM inference
-edge model residency
-large model serving
-```
-
-## H. 总体趋势
-
-这些工作可以归纳成一个趋势：
-
-```text
-早期 Transformer accelerator:
-    重点优化 attention matrix / softmax dataflow。
-
-近期 LLM accelerator:
-    更关注端到端瓶颈：
-        QKV generation
-        FFN
-        weight bandwidth
-        KV cache
-        mixed precision
-        runtime scheduling
-```
-
-另一个趋势是：
-
-```text
-只做 static low-bit 已经不够；
-新的工作更强调 input-dependent / layer-dependent / runtime-adaptive execution。
-```
-
-也就是说，现代 LLM 加速器的核心不只是“算得更快”，而是：
-
-```text
-1. 哪些计算可以不做？
-2. 哪些计算可以低精度做？
-3. 哪些中间结果可以不存？
-4. 哪些数据可以留在片上？
-5. 哪些请求/adapter/token 应该被优先调度？
-```
-
-## I. 对 Encoder 场景最相关的方向
-
-如果只看 LLM encoder / BERT / ST / graph-text encoder，最相关的是：
-
-```text
-1. FFN / QKV / attention joint optimization
-   FACT, FAS-Trans, Ayaka, ESACT
-
-2. predictor-free bounded early termination
-   PADE, BETA
-
-3. exact dataflow and softmax fusion
-   DESA, Balanced SA, FuseMax-style
-
-4. FFN token/channel mixed precision
-   FACT, Low-Power ViT, FAS-Trans
-```
-
-相对不直接相关的是：
-
-```text
-1. KV-cache-only optimization
-2. adapter serving cache
-3. decode MVM-only accelerator
-```
-
-这些可以作为系统背景，但不应作为 encoder NPU 的核心路线。
-
+这样主文件可以专注回答：**如果 LLM 是 graph-text encoder，NPU 本体还能怎么加速？**
