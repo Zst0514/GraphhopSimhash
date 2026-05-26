@@ -363,6 +363,18 @@ def build_parser():
         default=1,
         help="Only train/apply residual correction to hits supported by at least this many base tables.",
     )
+    parser.add_argument(
+        "--residual_hard_min_support_hits",
+        type=int,
+        default=-1,
+        help="If >0, accepted hits with at least this many head/table hits stay as hard direct reuse.",
+    )
+    parser.add_argument(
+        "--residual_soft_min_support_hits",
+        type=int,
+        default=-1,
+        help="If >0, collect hits with at least this many head/table hits; hits below hard threshold use residual correction.",
+    )
     parser.add_argument("--residual_max_train_pairs", type=int, default=4096)
     parser.add_argument(
         "--residual_train_split",
@@ -868,6 +880,15 @@ def validate_args(parser, args):
         parser.error("--residual_direct_threshold must be >= -1")
     if args.residual_min_route_hits < 1 or args.residual_min_base_hits < 1:
         parser.error("--residual_min_route_hits/--residual_min_base_hits must be positive")
+    if args.residual_hard_min_support_hits != -1 and args.residual_hard_min_support_hits < 1:
+        parser.error("--residual_hard_min_support_hits must be -1 or positive")
+    if args.residual_soft_min_support_hits != -1 and args.residual_soft_min_support_hits < 1:
+        parser.error("--residual_soft_min_support_hits must be -1 or positive")
+    if args.residual_hard_min_support_hits > 0 or args.residual_soft_min_support_hits > 0:
+        if args.residual_hard_min_support_hits <= 0 or args.residual_soft_min_support_hits <= 0:
+            parser.error("residual support split requires both hard and soft support thresholds")
+        if args.residual_soft_min_support_hits >= args.residual_hard_min_support_hits:
+            parser.error("--residual_soft_min_support_hits must be smaller than --residual_hard_min_support_hits")
     if args.residual_max_train_pairs < 0:
         parser.error("--residual_max_train_pairs must be non-negative")
     if args.internal_calib_samples < 0:

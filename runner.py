@@ -955,6 +955,33 @@ def load_residual_target_features(ds_key, data, args, device, log_important):
     return target
 
 
+def build_support_split_masks(trace, soft_min_hits, hard_min_hits, device):
+    hit_mask = trace["hit_mask"].to(device=device, dtype=torch.bool)
+    source_ok = trace["source_ids"].to(device=device) >= 0
+    support_hits = trace["winning_base_table_hit_counts"].to(device=device, dtype=torch.long)
+    soft_min_hits = int(soft_min_hits)
+    hard_min_hits = int(hard_min_hits)
+    residual_hit_mask = hit_mask & source_ok & (support_hits >= soft_min_hits)
+    hard_mask = residual_hit_mask & (support_hits >= hard_min_hits)
+    soft_mask = residual_hit_mask & (support_hits < hard_min_hits)
+    support_hist = {
+        int(hits): int((residual_hit_mask & (support_hits == int(hits))).sum().item())
+        for hits in range(soft_min_hits, hard_min_hits)
+    }
+    return {
+        "enabled": True,
+        "soft_min_hits": soft_min_hits,
+        "hard_min_hits": hard_min_hits,
+        "hard_mask": hard_mask,
+        "soft_mask": soft_mask,
+        "residual_hit_mask": residual_hit_mask,
+        "support_hist": support_hist,
+        "hard_count": int(hard_mask.sum().item()),
+        "soft_count": int(soft_mask.sum().item()),
+        "residual_count": int(residual_hit_mask.sum().item()),
+    }
+
+
 def summarize_reuse_real_quant_execution(actions, hit_mask, errors, fp_embs, final_embs):
     total = max(1, int(actions.numel()))
     hit_mask = hit_mask.to(dtype=torch.bool, device=actions.device)
@@ -1013,9 +1040,20 @@ def run_residual_reuse_experiment(args):
             "direct_drop": [],
             "residual_acc": [],
             "residual_drop": [],
-            "reuse": [],
-            "reuse_num": [],
-            "reuse_den": [],
+            "direct_reuse": [],
+            "direct_reuse_num": [],
+            "direct_reuse_den": [],
+            "soft_direct_acc": [],
+            "soft_direct_drop": [],
+            "soft_direct_reuse": [],
+            "soft_direct_reuse_num": [],
+            "soft_direct_reuse_den": [],
+            "soft_direct_err": [],
+            "soft_direct_hit_err": [],
+            "residual_reuse": [],
+            "residual_reuse_num": [],
+            "residual_reuse_den": [],
+            "soft_reuse_num": [],
             "train_pairs": [],
             "direct_err": [],
             "direct_hit_err": [],
@@ -1045,11 +1083,25 @@ def run_residual_reuse_experiment(args):
                 f"| T_direct={'none' if float(args.residual_direct_threshold) < 0.0 else float(args.residual_direct_threshold)} "
                 f"| anchor={args.residual_anchor_mode}"
             )
+            support_split_enabled = (
+                int(getattr(args, "residual_hard_min_support_hits", -1)) > 0
+                and int(getattr(args, "residual_soft_min_support_hits", -1)) > 0
+            )
+            if support_split_enabled:
+                log_important(
+                    "[ResidualSupportSplit] "
+                    f"hard_direct>= {int(args.residual_hard_min_support_hits)} heads "
+                    f"| residual_soft= {int(args.residual_soft_min_support_hits)}.."
+                    f"{int(args.residual_hard_min_support_hits) - 1} heads "
+                    f"| compute< {int(args.residual_soft_min_support_hits)} heads"
+                )
 
             seeds = [int(args.seed) + run_idx for run_idx in range(args.runs)]
             for run_idx, seed in enumerate(seeds):
                 log_important(f"\n--- Run {run_idx + 1}/{args.runs} (Seed {seed}) ---")
                 run_args = make_run_args(args, seed)
+                if support_split_enabled:
+                    run_args.route_min_support_hits = [int(args.residual_soft_min_support_hits)]
                 _conf, data, verify_features, device = load_run_state(ds_key, run_args, seed)
                 log_important(
                     f"[Seed] run={int(seed)} | controller={int(run_args.controller_seed)} "
@@ -1107,10 +1159,42 @@ def run_residual_reuse_experiment(args):
                     min_route_hits=args.residual_min_route_hits,
                     min_base_hits=args.residual_min_base_hits,
                 )
+                if support_split_enabled:
+                    split_info = build_support_split_masks(
+                        trace,
+                        args.residual_soft_min_support_hits,
+                        args.residual_hard_min_support_hits,
+                        device,
+                    )
+                    direct_hit_mask = split_info["hard_mask"]
+                    residual_hit_mask = split_info["residual_hit_mask"]
+                    soft_mask = split_info["soft_mask"]
+                    direct_eval_features = target_features.clone()
+                    direct_eval_features[direct_hit_mask] = direct_features[direct_hit_mask]
+                    residual_base_features = target_features.clone()
+                    residual_base_features[residual_hit_mask] = direct_features[residual_hit_mask]
+                    soft_direct_features = residual_base_features
+                    correction_mask = correction_mask & soft_mask
+                    correction_info["residual_candidates"] = int(correction_mask.sum().item())
+                else:
+                    split_info = None
+                    direct_hit_mask = hit_mask
+                    residual_hit_mask = hit_mask
+                    direct_eval_features = direct_features
+                    residual_base_features = direct_features
+                    soft_direct_features = None
 
-                direct_acc = evaluate_raw_node_features(model, data, direct_features)
+                direct_acc = evaluate_raw_node_features(model, data, direct_eval_features)
                 direct_drop = base_acc - direct_acc
-                direct_err = embedding_error(target_features, direct_features)
+                direct_err = embedding_error(target_features, direct_eval_features)
+                if soft_direct_features is not None:
+                    soft_direct_acc = evaluate_raw_node_features(model, data, soft_direct_features)
+                    soft_direct_drop = base_acc - soft_direct_acc
+                    soft_direct_err = embedding_error(target_features, soft_direct_features)
+                else:
+                    soft_direct_acc = None
+                    soft_direct_drop = None
+                    soft_direct_err = None
 
                 adapter, train_info = train_residual_adapter(
                     target_embeddings=target_features,
@@ -1135,7 +1219,7 @@ def run_residual_reuse_experiment(args):
                     selected_val_acc = -1.0
                     for alpha in sorted(float(value) for value in args.residual_alpha_grid):
                         candidate_features, _candidate_info = apply_residual_adapter(
-                            direct_embeddings=direct_features,
+                            direct_embeddings=residual_base_features,
                             target_embeddings=target_features,
                             verify_features=verify_features,
                             edge_index=data.edge_index,
@@ -1157,7 +1241,7 @@ def run_residual_reuse_experiment(args):
                     alpha_note = "fixed"
 
                 residual_features, apply_info = apply_residual_adapter(
-                    direct_embeddings=direct_features,
+                    direct_embeddings=residual_base_features,
                     target_embeddings=target_features,
                     verify_features=verify_features,
                     edge_index=data.edge_index,
@@ -1172,18 +1256,44 @@ def run_residual_reuse_experiment(args):
                 residual_drop = base_acc - residual_acc
                 residual_err = embedding_error(target_features, residual_features)
 
-                hit_den = max(1, int(hit_mask.sum().item()))
-                direct_hit_err = float(direct_err[hit_mask].mean().item()) if hit_den > 0 else 0.0
-                residual_hit_err = float(residual_err[hit_mask].mean().item()) if hit_den > 0 else 0.0
-                reuse_rate = stats["reuse"] / max(1, stats["total_queries"])
+                direct_hit_count = int(direct_hit_mask.sum().item())
+                residual_hit_count = int(residual_hit_mask.sum().item())
+                direct_hit_err = float(direct_err[direct_hit_mask].mean().item()) if direct_hit_count > 0 else 0.0
+                residual_hit_err = float(residual_err[residual_hit_mask].mean().item()) if residual_hit_count > 0 else 0.0
+                direct_reuse_rate = direct_hit_count / max(1, stats["total_queries"])
+                residual_reuse_rate = residual_hit_count / max(1, stats["total_queries"])
+                if soft_direct_err is not None:
+                    soft_direct_hit_count = residual_hit_count
+                    soft_direct_hit_err = (
+                        float(soft_direct_err[residual_hit_mask].mean().item())
+                        if soft_direct_hit_count > 0
+                        else 0.0
+                    )
+                    soft_direct_reuse_rate = soft_direct_hit_count / max(1, stats["total_queries"])
+                else:
+                    soft_direct_hit_count = 0
+                    soft_direct_hit_err = 0.0
+                    soft_direct_reuse_rate = 0.0
 
                 results["direct_acc"].append(direct_acc)
                 results["direct_drop"].append(direct_drop)
                 results["residual_acc"].append(residual_acc)
                 results["residual_drop"].append(residual_drop)
-                results["reuse"].append(float(reuse_rate))
-                results["reuse_num"].append(int(stats["reuse"]))
-                results["reuse_den"].append(int(stats["reuse_denominator"]))
+                results["direct_reuse"].append(float(direct_reuse_rate))
+                results["direct_reuse_num"].append(int(direct_hit_count))
+                results["direct_reuse_den"].append(int(stats["reuse_denominator"]))
+                if soft_direct_acc is not None:
+                    results["soft_direct_acc"].append(float(soft_direct_acc))
+                    results["soft_direct_drop"].append(float(soft_direct_drop))
+                    results["soft_direct_reuse"].append(float(soft_direct_reuse_rate))
+                    results["soft_direct_reuse_num"].append(int(soft_direct_hit_count))
+                    results["soft_direct_reuse_den"].append(int(stats["reuse_denominator"]))
+                    results["soft_direct_err"].append(float(soft_direct_err.mean().item()))
+                    results["soft_direct_hit_err"].append(float(soft_direct_hit_err))
+                results["residual_reuse"].append(float(residual_reuse_rate))
+                results["residual_reuse_num"].append(int(residual_hit_count))
+                results["residual_reuse_den"].append(int(stats["reuse_denominator"]))
+                results["soft_reuse_num"].append(int(split_info["soft_count"] if split_info is not None else 0))
                 results["train_pairs"].append(int(train_info["train_pairs"]))
                 results["direct_err"].append(float(direct_err.mean().item()))
                 results["direct_hit_err"].append(direct_hit_err)
@@ -1192,15 +1302,23 @@ def run_residual_reuse_experiment(args):
                 results["residual_alpha"].append(float(apply_info["alpha"]))
 
                 log_important(
-                    f"[DirectReuse] Reuse={reuse_rate:.1%} "
+                    f"[DirectReuse] Reuse={direct_reuse_rate:.1%} "
                     f"| AnchorMode={args.residual_anchor_mode} "
                     f"| Randomized={anchor_info['randomized']} "
                     f"| Acc={direct_acc:.4f} | Drop={direct_drop:.2%} "
                     f"| AvgErr={float(direct_err.mean().item()):.5f} "
                     f"| HitErr={direct_hit_err:.5f}"
                 )
+                if soft_direct_acc is not None:
+                    log_important(
+                        f"[SoftDirectReuse] Reuse={soft_direct_reuse_rate:.1%} "
+                        f"| Acc={soft_direct_acc:.4f} | Drop={soft_direct_drop:.2%} "
+                        f"| AvgErr={float(soft_direct_err.mean().item()):.5f} "
+                        f"| HitErr={soft_direct_hit_err:.5f}"
+                    )
                 log_important(
-                    f"[ResidualReuse] Corrected={apply_info['corrected']} "
+                    f"[ResidualReuse] Reuse={residual_reuse_rate:.1%} "
+                    f"| Corrected={apply_info['corrected']} "
                     f"| DirectLowRisk={correction_info['direct_low_risk']} "
                     f"| SupportFiltered={correction_info['support_filtered']} "
                     f"| ResidualCand={correction_info['residual_candidates']} "
@@ -1211,6 +1329,17 @@ def run_residual_reuse_experiment(args):
                     f"| AvgErr={float(residual_err.mean().item()):.5f} "
                     f"| HitErr={residual_hit_err:.5f}"
                 )
+                if split_info is not None:
+                    hist_text = ", ".join(
+                        f"{hits}head={count}" for hits, count in split_info["support_hist"].items()
+                    )
+                    log_important(
+                        f"  SupportSplit: hard_direct={split_info['hard_count']} "
+                        f"| soft_residual={split_info['soft_count']} "
+                        f"| residual_total={split_info['residual_count']} "
+                        f"| compute={stats['total_queries'] - split_info['residual_count']} "
+                        f"| soft_hist: {hist_text}"
+                    )
                 log_important(
                     f"  ReuseDetail: numerator={stats['reuse']} "
                     f"(exact={stats['exact_reuse']}, fuzzy={stats['fuzzy_reuse']}) "
@@ -1233,25 +1362,54 @@ def run_residual_reuse_experiment(args):
                 f"{'Drop %':<10} | {'AvgErr':<10} | {'HitErr':<10} | {'Alpha':<7} | {'Reuse n/d':<15}"
             )
             log_important("-" * 112)
-            reuse_mean = float(np.mean(results["reuse"]))
-            reuse_num = float(np.mean(results["reuse_num"]))
-            reuse_den = float(np.mean(results["reuse_den"]))
-            reuse_frac = f"{reuse_num:.1f}/{reuse_den:.1f}" if args.runs > 1 else f"{int(reuse_num)}/{int(reuse_den)}"
+            direct_reuse_mean = float(np.mean(results["direct_reuse"]))
+            direct_reuse_num = float(np.mean(results["direct_reuse_num"]))
+            direct_reuse_den = float(np.mean(results["direct_reuse_den"]))
+            direct_reuse_frac = (
+                f"{direct_reuse_num:.1f}/{direct_reuse_den:.1f}"
+                if args.runs > 1
+                else f"{int(direct_reuse_num)}/{int(direct_reuse_den)}"
+            )
+            residual_reuse_mean = float(np.mean(results["residual_reuse"]))
+            residual_reuse_num = float(np.mean(results["residual_reuse_num"]))
+            residual_reuse_den = float(np.mean(results["residual_reuse_den"]))
+            residual_reuse_frac = (
+                f"{residual_reuse_num:.1f}/{residual_reuse_den:.1f}"
+                if args.runs > 1
+                else f"{int(residual_reuse_num)}/{int(residual_reuse_den)}"
+            )
             train_pairs = float(np.mean(results["train_pairs"]))
             log_important(
-                f"{'DirectReuse':<18} | {reuse_mean:<9.1%} | {'-':<10} | "
+                f"{'DirectReuse':<18} | {direct_reuse_mean:<9.1%} | {'-':<10} | "
                 f"{float(np.mean(results['direct_acc'])):<10.4f} | "
                 f"{float(np.mean(results['direct_drop'])):<10.2%} | "
                 f"{float(np.mean(results['direct_err'])):<10.5f} | "
-                f"{float(np.mean(results['direct_hit_err'])):<10.5f} | {'-':<7} | {reuse_frac:<15}"
+                f"{float(np.mean(results['direct_hit_err'])):<10.5f} | {'-':<7} | {direct_reuse_frac:<15}"
             )
+            if results["soft_direct_acc"]:
+                soft_direct_reuse_mean = float(np.mean(results["soft_direct_reuse"]))
+                soft_direct_reuse_num = float(np.mean(results["soft_direct_reuse_num"]))
+                soft_direct_reuse_den = float(np.mean(results["soft_direct_reuse_den"]))
+                soft_direct_reuse_frac = (
+                    f"{soft_direct_reuse_num:.1f}/{soft_direct_reuse_den:.1f}"
+                    if args.runs > 1
+                    else f"{int(soft_direct_reuse_num)}/{int(soft_direct_reuse_den)}"
+                )
+                log_important(
+                    f"{'SoftDirectReuse':<18} | {soft_direct_reuse_mean:<9.1%} | {'-':<10} | "
+                    f"{float(np.mean(results['soft_direct_acc'])):<10.4f} | "
+                    f"{float(np.mean(results['soft_direct_drop'])):<10.2%} | "
+                    f"{float(np.mean(results['soft_direct_err'])):<10.5f} | "
+                    f"{float(np.mean(results['soft_direct_hit_err'])):<10.5f} | {'-':<7} | "
+                    f"{soft_direct_reuse_frac:<15}"
+                )
             log_important(
-                f"{'ResidualReuse':<18} | {reuse_mean:<9.1%} | {train_pairs:<10.1f} | "
+                f"{'ResidualReuse':<18} | {residual_reuse_mean:<9.1%} | {train_pairs:<10.1f} | "
                 f"{float(np.mean(results['residual_acc'])):<10.4f} | "
                 f"{float(np.mean(results['residual_drop'])):<10.2%} | "
                 f"{float(np.mean(results['residual_err'])):<10.5f} | "
                 f"{float(np.mean(results['residual_hit_err'])):<10.5f} | "
-                f"{float(np.mean(results['residual_alpha'])):<7.3f} | {reuse_frac:<15}"
+                f"{float(np.mean(results['residual_alpha'])):<7.3f} | {residual_reuse_frac:<15}"
             )
             log_important(f"{'=' * 72}\n")
 

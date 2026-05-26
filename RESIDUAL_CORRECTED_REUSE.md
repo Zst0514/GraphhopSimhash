@@ -144,6 +144,8 @@ loss =
 | `--residual_min_dist` | `1.0` | 只修正 Hamming distance >= 1 的 fuzzy hit |
 | `--residual_direct_threshold` | `-1` | 可选：低风险节点 direct，高风险 fuzzy 节点 residual |
 | `--residual_anchor_mode` | `cam` | `cam` 使用 CAM 锚点；`random` 用于消融 |
+| `--residual_hard_min_support_hits` | `-1` | 可选：支持头数达到该阈值的命中走 hard direct reuse |
+| `--residual_soft_min_support_hits` | `-1` | 可选：支持头数在 soft/hard 阈值之间的命中走 residual correction |
 | `--residual_max_train_pairs` | `4096` | 最大 residual calibration pair 数 |
 | `--residual_train_split` | `train_val` | adapter 使用 train / train_val / all_hits |
 
@@ -418,6 +420,132 @@ output/residual_reuse/pubmed_st_bias_sweep/*.log
 ```
 
 <!-- PUBMED_ST_RESIDUAL_BIAS_SWEEP_END -->
+
+<!-- PUBMED_ST_SUPPORT_SPLIT_START -->
+## 7.7 PubMed/ST Support-Split Residual Tuning
+
+这组实验专门验证“三段式中间态复用”：
+
+```text
+support heads >= hard_min:
+    hard direct reuse
+
+soft_min <= support heads < hard_min:
+    residual-corrected reuse
+
+support heads < soft_min:
+    compute / full embedding
+```
+
+这里 `support heads` 对应日志里的 `winning_base_table_hit_count`，即同一个 base route 下有多少个 hash head 支持当前候选。实验固定 PubMed/ST、8 个 16-bit heads、`radius=2`、`--hamming_only_acceptor`、`residual_min_dist=1.0`，因此不依赖 `cosine_tau` 做额外向量过滤。
+
+新增的三行输出含义：
+
+```text
+DirectReuse:
+    只评估 hard direct 节点复用，其余节点 compute
+
+SoftDirectReuse:
+    hard + soft 节点都直接复用 anchor，不做 residual
+
+ResidualReuse:
+    hard 节点直接复用，soft 节点使用 anchor + residual correction
+```
+
+因此判断 residual 是否有用，主要看 `ResidualReuse` 是否优于 `SoftDirectReuse`。
+
+### 7.7.1 Seed-42 Quick Sweep
+
+下面表格是 seed=42 的快速调参结果，主要用于比较不同 support split 和 score threshold 的相对趋势。除特别说明外，使用：
+
+```text
+rank=64, epochs=200, max_train_pairs=2048,
+alpha_grid=0/0.0625/0.125/0.25
+```
+
+| Config | Score T | Hard / Soft | Direct Reuse | Direct Drop | SoftDirect Reuse | SoftDirect Drop | Residual Reuse | Residual Drop | Residual Gain vs Soft | Alpha | TrainPairs |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| Conservative support | 35 | `>=5 / ==4` | 16.0% | 0.59% | 28.1% | 1.26% | 28.1% | 1.18% | +0.08% | 0.250 | 57 |
+| Balanced support | 38 | `>=5 / ==4` | 23.3% | 0.72% | 42.2% | 1.92% | 42.2% | 1.72% | +0.20% | 0.250 | 102 |
+| Higher reuse | 40 | `>=5 / ==4` | 25.7% | 0.90% | 47.8% | 2.25% | 47.8% | 2.10% | +0.15% | 0.125 | 115 |
+| Too aggressive soft set | 40 | `>=5 / 3..4` | 22.5% | 0.86% | 62.3% | 3.65% | 62.3% | 3.54% | +0.11% | 0.062 | 199 |
+| Stricter hard support | 45 | `>=6 / ==5` | 11.5% | 0.35% | 32.5% | 1.09% | 32.5% | 1.08% | +0.01% | 0.125 | 134 |
+| Stricter hard, looser T | 60 | `>=6 / ==5` | 11.6% | 0.34% | 33.6% | 1.24% | 33.6% | 1.38% | -0.14% | 0.250 | 136 |
+
+结论：
+
+1. `>=5 / ==4` 是当前最合理的 support split。它保留了明确的中间态 residual 路径，同时不把 3-head 这种低置信候选放进 residual。
+2. `>=5 / 3..4` 复用率能到 62.3%，但 drop 到 3.54%，说明 3-head 候选仍然太脏。
+3. `>=6 / ==5` 很稳，但 hard direct 过少，整体 reuse 只有 32% 左右。
+4. `T=38, >=5 / ==4` 是 seed42 上最平衡的点：`Reuse=42.2%`，`Drop=1.72%`，并且 residual 相比 soft direct 救回约 `0.20%`。
+
+### 7.7.2 Selected 3-Seed Result
+
+对 seed42 上较平衡的 `T=38, >=5 / ==4` 做 3 runs：
+
+```bash
+python -m GraphhopSimhash \
+  --datasets pubmed \
+  --runs 3 \
+  --experiment_suite residual_reuse \
+  --learned_hash_epochs 10 \
+  --learned_hash_dim 128 \
+  --hamming_only_acceptor \
+  --enable_score_gate \
+  --score_reuse_threshold 38 \
+  --radius 2 \
+  --main_hash_head_bits 16 16 16 16 16 16 16 16 \
+  --residual_hard_min_support_hits 5 \
+  --residual_soft_min_support_hits 4 \
+  --residual_rank 64 \
+  --residual_epochs 200 \
+  --residual_max_train_pairs 2048 \
+  --residual_min_dist 1.0 \
+  --residual_alpha_grid 0 0.0625 0.125 0.25
+```
+
+结果：
+
+```text
+Baseline Acc: 0.7587
+
+Config             Reuse    Acc     Drop    AvgErr   HitErr   Alpha
+DirectReuse        25.8%    0.7486  1.02%   0.10655  0.41216  -
+SoftDirectReuse    44.6%    0.7354  2.34%   0.19136  0.42909  -
+ResidualReuse      44.6%    0.7357  2.30%   0.18575  0.41647  0.167
+```
+
+这个 3-seed 结果比 seed42 单点更保守：`ResidualReuse` 的 drop 从单 seed 的 `1.72%` 回到平均 `2.30%`。它说明 support split 的方向可行，但当前 low-rank residual adapter 仍然偏弱，分类精度收益小于 embedding error 收益。
+
+当前推荐结论：
+
+```text
+如果目标是稳健精度：
+    用 T=35, >=5 / ==4，reuse 约 28%，drop 约 1.2%（seed42）
+
+如果目标是中等复用率：
+    用 T=38, >=5 / ==4，3-run reuse 约 44.6%，drop 约 2.30%
+
+如果目标是更高 reuse：
+    T=40, >=5 / ==4 可到约 47.8% reuse，但 seed42 drop 已到 2.10%，需要更多 seed 验证
+
+不建议：
+    把 3-head 大量放入 residual，因为 3-head soft set 会把 drop 推到 3.5% 以上
+```
+
+日志位置：
+
+```text
+output/residual_reuse/pubmed_support_split_sweep/pubmed_h5_s4_t35.log
+output/residual_reuse/pubmed_support_split_sweep/pubmed_h5_s4_t38.log
+output/residual_reuse/pubmed_support_split_sweep/pubmed_h5_s4_t40.log
+output/residual_reuse/pubmed_support_split_sweep/pubmed_h5_s3_t40.log
+output/residual_reuse/pubmed_support_split_sweep/pubmed_h6_s5_t45.log
+output/residual_reuse/pubmed_support_split_sweep/pubmed_h6_s5_t60.log
+output/residual_reuse/pubmed_support_split_sweep/pubmed_h5_s4_t38_runs3.log
+```
+
+<!-- PUBMED_ST_SUPPORT_SPLIT_END -->
 
 ## 8. Current Limitations
 

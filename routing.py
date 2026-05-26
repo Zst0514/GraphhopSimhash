@@ -280,6 +280,11 @@ def build_log_path(dataset_log_dir, ds_key, args):
             f"_{embedding_tag}"
             f"_mx{int(getattr(args, 'residual_max_train_pairs', 4096))}"
         ).replace(".", "p").replace("-", "m")
+        if int(getattr(args, "residual_hard_min_support_hits", -1)) > 0:
+            config_tag += (
+                f"_hs{int(getattr(args, 'residual_hard_min_support_hits', -1))}"
+                f"_ss{int(getattr(args, 'residual_soft_min_support_hits', -1))}"
+            )
     if getattr(args, "experiment_suite", None) == "graph_eager_token":
         lengths_tag = "-".join(
             str(int(length)) for length in getattr(args, "graph_eager_token_lengths", [128, 256])
