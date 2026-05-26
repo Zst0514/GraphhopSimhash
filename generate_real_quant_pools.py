@@ -481,6 +481,211 @@ def replace_linear_with_activation_quant(module, a_bit, skip_names=("lm_head",),
             )
 
 
+class FFNChannelGateController:
+    def __init__(self, keep_ratio=0.5, group_size=64):
+        self.keep_ratio = float(keep_ratio)
+        self.group_size = max(1, int(group_size))
+        self.collect = False
+        self.enabled = False
+        self.energy = {}
+        self.counts = {}
+        self.masks = {}
+        self.stats = {}
+
+    def add_energy(self, layer_name, hidden):
+        hidden = hidden.detach().to(dtype=torch.float32)
+        reduce_dims = tuple(range(hidden.dim() - 1))
+        energy = hidden.abs().sum(dim=reduce_dims).cpu()
+        token_count = 1
+        for dim in hidden.shape[:-1]:
+            token_count *= int(dim)
+        if layer_name not in self.energy:
+            self.energy[layer_name] = energy
+            self.counts[layer_name] = int(token_count)
+        else:
+            self.energy[layer_name] += energy
+            self.counts[layer_name] += int(token_count)
+
+    def build_masks(self):
+        if not self.energy:
+            raise RuntimeError("FFN channel gating collected no activation energy.")
+
+        for layer_name, energy in self.energy.items():
+            channels = int(energy.numel())
+            group_count = (channels + self.group_size - 1) // self.group_size
+            padded = torch.zeros(group_count * self.group_size, dtype=torch.float32)
+            padded[:channels] = energy
+            group_energy = padded.view(group_count, self.group_size).sum(dim=1)
+            keep_groups = max(1, min(group_count, int(round(group_count * self.keep_ratio))))
+            top_groups = torch.topk(group_energy, k=keep_groups, largest=True).indices
+            group_mask = torch.zeros(group_count, dtype=torch.bool)
+            group_mask[top_groups] = True
+            channel_mask = group_mask.repeat_interleave(self.group_size)[:channels]
+            self.masks[layer_name] = channel_mask
+            self.stats[layer_name] = {
+                "channels": channels,
+                "group_size": self.group_size,
+                "groups": group_count,
+                "keep_groups": int(keep_groups),
+                "keep_channels": int(channel_mask.sum().item()),
+                "keep_ratio_actual": float(channel_mask.float().mean().item()),
+                "calib_tokens": int(self.counts.get(layer_name, 0)),
+            }
+
+    def apply(self, layer_name, hidden):
+        if self.collect:
+            self.add_energy(layer_name, hidden)
+        if not self.enabled:
+            return hidden
+        mask = self.masks.get(layer_name)
+        if mask is None:
+            return hidden
+        mask = mask.to(device=hidden.device, dtype=hidden.dtype)
+        view_shape = [1] * (hidden.dim() - 1) + [int(mask.numel())]
+        return hidden * mask.view(*view_shape)
+
+    def summary(self):
+        if not self.stats:
+            return {}
+        keep_ratios = [item["keep_ratio_actual"] for item in self.stats.values()]
+        return {
+            "keep_ratio_target": self.keep_ratio,
+            "group_size": self.group_size,
+            "layers": self.stats,
+            "mean_keep_ratio": float(sum(keep_ratios) / max(1, len(keep_ratios))),
+        }
+
+
+class GatedDistilBertFFN(nn.Module):
+    def __init__(self, original_ffn, layer_name, controller):
+        super().__init__()
+        self.original_ffn = original_ffn
+        self.layer_name = layer_name
+        self.controller = controller
+
+    def forward(self, input):
+        hidden = self.original_ffn.lin1(input)
+        hidden = self.original_ffn.activation(hidden)
+        hidden = self.controller.apply(self.layer_name, hidden)
+        hidden = self.original_ffn.lin2(hidden)
+        hidden = self.original_ffn.dropout(hidden)
+        return hidden
+
+
+class GatedLlamaMLP(nn.Module):
+    def __init__(self, original_mlp, layer_name, controller):
+        super().__init__()
+        self.original_mlp = original_mlp
+        self.layer_name = layer_name
+        self.controller = controller
+
+    def forward(self, x):
+        hidden = self.original_mlp.act_fn(self.original_mlp.gate_proj(x)) * self.original_mlp.up_proj(x)
+        hidden = self.controller.apply(self.layer_name, hidden)
+        return self.original_mlp.down_proj(hidden)
+
+
+def install_ffn_channel_gates(module, controller, prefix=""):
+    installed = []
+    for name, child in list(module.named_children()):
+        full_name = f"{prefix}.{name}" if prefix else name
+        if all(hasattr(child, attr) for attr in ("lin1", "lin2", "activation", "dropout")):
+            setattr(module, name, GatedDistilBertFFN(child, full_name, controller))
+            installed.append(full_name)
+        elif all(hasattr(child, attr) for attr in ("gate_proj", "up_proj", "down_proj", "act_fn")):
+            setattr(module, name, GatedLlamaMLP(child, full_name, controller))
+            installed.append(full_name)
+        else:
+            installed.extend(install_ffn_channel_gates(child, controller, prefix=full_name))
+    return installed
+
+
+def select_calibration_texts(texts, sample_count, seed, strategy="random"):
+    sample_count = min(len(texts), max(0, int(sample_count)))
+    if sample_count <= 0:
+        return []
+    strategy = str(strategy).lower()
+    if strategy == "first":
+        return list(texts[:sample_count])
+    if strategy == "random":
+        rng = random.Random(int(seed))
+        indices = list(range(len(texts)))
+        rng.shuffle(indices)
+        return [texts[idx] for idx in indices[:sample_count]]
+    raise ValueError(f"Unknown FFN gate calibration strategy: {strategy}")
+
+
+def maybe_install_ffn_channel_gating(model, tokenizer, texts, batch_size, max_length, device, args, dataset, llm_name, tag):
+    if not bool(getattr(args, "ffn_channel_gating", False)):
+        return None
+
+    keep_ratio = float(getattr(args, "ffn_gate_keep_ratio", 1.0))
+    if not (0.0 < keep_ratio <= 1.0):
+        raise ValueError("--ffn_gate_keep_ratio must be in (0, 1]")
+    if keep_ratio >= 1.0:
+        print("[FFNGate] keep_ratio=1.0, skipping FFN channel gating.")
+        return None
+
+    controller = FFNChannelGateController(
+        keep_ratio=keep_ratio,
+        group_size=int(getattr(args, "ffn_gate_group_size", 64)),
+    )
+    installed = install_ffn_channel_gates(model, controller)
+    if not installed:
+        raise NotImplementedError(
+            "FFN channel gating found no supported FFN/MLP modules. "
+            "Currently supports DistilBERT FFN and LLaMA-style MLP blocks."
+        )
+    print(
+        "[FFNGate] Installed FFN channel gates "
+        f"| modules={len(installed)} | keep_ratio={keep_ratio:.3f} "
+        f"| group_size={controller.group_size}"
+    )
+
+    calib_texts = select_calibration_texts(
+        texts,
+        int(getattr(args, "ffn_gate_calib_samples", 256)),
+        int(getattr(args, "ffn_gate_seed", 42)),
+        strategy=getattr(args, "ffn_gate_calibration_strategy", "random"),
+    )
+    if not calib_texts:
+        raise ValueError("--ffn_gate_calib_samples must select at least one text")
+    print(f"[FFNGate] Collecting FFN activation energy on {len(calib_texts)} calibration texts...")
+    controller.collect = True
+    controller.enabled = False
+    _ = encode_texts(model, tokenizer, calib_texts, batch_size, max_length, device)
+    controller.collect = False
+    controller.build_masks()
+    controller.enabled = True
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+
+    report = {
+        "dataset": str(dataset),
+        "llm_name": str(llm_name),
+        "tag": str(tag),
+        "calib_samples": len(calib_texts),
+        "calibration_strategy": str(getattr(args, "ffn_gate_calibration_strategy", "random")),
+        **controller.summary(),
+    }
+    report_path = getattr(args, "ffn_gate_report_path", None)
+    if not report_path:
+        report_path = os.path.join(
+            "output",
+            "ffn_channel_gating",
+            str(dataset).lower(),
+            f"{str(dataset).lower()}_{llm_name}_{tag}_ffn_gate.json",
+        )
+    os.makedirs(os.path.dirname(report_path) or ".", exist_ok=True)
+    with open(report_path, "w", encoding="utf-8") as f:
+        json.dump(report, f, indent=2)
+    print(
+        "[FFNGate] Enabled channel gating "
+        f"| mean_keep={report['mean_keep_ratio']:.3f} | report={report_path}"
+    )
+    return controller
+
+
 def load_model_and_tokenizer(llm_name, config_name, cache_dir, force_cpu=False):
     from transformers import AutoModel, AutoTokenizer, LlamaForCausalLM, LlamaTokenizer
 
@@ -539,6 +744,9 @@ def _forward_last_hidden_state(model, tokens):
     )
     hidden = outputs.last_hidden_state.to(torch.float32)
     return torch.nan_to_num(hidden, nan=0.0, posinf=0.0, neginf=0.0)
+
+
+_forward_hidden_states = _forward_last_hidden_state
 
 
 def encode_texts(model, tokenizer, texts, batch_size, max_length, device):
@@ -872,7 +1080,9 @@ def load_activation_outlier_clip_config(dataset, llm_name, a_bit, args):
 
 def generate_pool(dataset, llm_name, config_name, args):
     _canonical, config_spec = resolve_config(config_name)
-    tag = config_spec["tag"]
+    base_tag = config_spec["tag"]
+    tag_suffix = str(getattr(args, "tag_suffix", "") or "").strip().strip("_")
+    tag = f"{base_tag}_{tag_suffix}" if tag_suffix else base_tag
 
     out_path = args.output_path
     if out_path is None:
@@ -948,6 +1158,18 @@ def generate_pool(dataset, llm_name, config_name, args):
             )
 
     encode_texts_input = compact_texts_for_encoder(texts, dataset, tokenizer, args)
+    maybe_install_ffn_channel_gating(
+        model,
+        tokenizer,
+        encode_texts_input,
+        batch_size,
+        args.max_length,
+        device,
+        args,
+        dataset,
+        llm_name,
+        tag,
+    )
     embs = encode_texts(model, tokenizer, encode_texts_input, batch_size, args.max_length, device)
     embs = maybe_align_output_embeddings(embs, dataset, llm_name, tag, config_spec, out_path, args)
 
@@ -993,6 +1215,12 @@ def main():
     parser.add_argument("--text_compaction_seed", type=int, default=42)
     parser.add_argument("--cache_dir", type=str, default="cache_data/model")
     parser.add_argument("--output_path", type=str, default=None, help="Only valid with one dataset and one config.")
+    parser.add_argument(
+        "--tag_suffix",
+        type=str,
+        default="",
+        help="Append a suffix to the generated cache tag, e.g. W4A8_FFN50.",
+    )
     parser.add_argument("--w4a_calib_samples", type=int, default=64)
     parser.add_argument("--w4a_awq_grid", type=int, default=21)
     parser.add_argument(
@@ -1058,6 +1286,37 @@ def main():
     )
     parser.add_argument("--activation_outlier_min_clip", type=float, default=1e-4)
     parser.add_argument("--activation_outlier_max_top_channels", type=int, default=64)
+    parser.add_argument(
+        "--ffn_channel_gating",
+        action="store_true",
+        help="Enable calibration-driven FFN intermediate channel-group gating after W4 quantization.",
+    )
+    parser.add_argument(
+        "--ffn_gate_keep_ratio",
+        type=float,
+        default=0.5,
+        help="Fraction of FFN channel groups kept per layer when --ffn_channel_gating is enabled.",
+    )
+    parser.add_argument(
+        "--ffn_gate_group_size",
+        type=int,
+        default=64,
+        help="Contiguous FFN intermediate channels per hardware gating group.",
+    )
+    parser.add_argument(
+        "--ffn_gate_calib_samples",
+        type=int,
+        default=256,
+        help="Calibration texts used to rank FFN channel groups by activation energy.",
+    )
+    parser.add_argument("--ffn_gate_seed", type=int, default=42)
+    parser.add_argument(
+        "--ffn_gate_calibration_strategy",
+        type=str,
+        default="random",
+        choices=["first", "random"],
+    )
+    parser.add_argument("--ffn_gate_report_path", type=str, default=None)
     parser.add_argument("--overwrite", action="store_true")
     args = parser.parse_args()
 
@@ -1101,6 +1360,14 @@ def main():
         parser.error("--activation_outlier_min_clip must be positive")
     if args.activation_outlier_max_top_channels < 0:
         parser.error("--activation_outlier_max_top_channels must be >= 0")
+    if not (0.0 < args.ffn_gate_keep_ratio <= 1.0):
+        parser.error("--ffn_gate_keep_ratio must be in (0, 1]")
+    if args.ffn_gate_group_size <= 0:
+        parser.error("--ffn_gate_group_size must be positive")
+    if args.ffn_gate_calib_samples <= 0:
+        parser.error("--ffn_gate_calib_samples must be positive")
+    if args.ffn_gate_seed < 0:
+        parser.error("--ffn_gate_seed must be >= 0")
 
     for dataset in args.datasets:
         for config_name in args.configs:

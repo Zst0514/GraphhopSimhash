@@ -305,6 +305,30 @@ def build_log_path(dataset_log_dir, ds_key, args):
             f"_L{int(getattr(args, 'token_compaction_length', 128))}"
             f"_{tags}"
         ).replace(".", "p").replace("/", "_")
+    if getattr(args, "experiment_suite", None) == "ffn_channel_gating":
+        tags = "-".join(str(tag) for tag in getattr(args, "ffn_gating_tags", ["W4A8_FFN50"]))
+        if len(tags) > 64:
+            tags = tags[:64]
+        ratios = "-".join(f"{float(ratio):.2f}" for ratio in getattr(args, "ffn_gating_keep_ratios", [0.5]))
+        route_ratios = "-".join(f"{float(ratio):.2f}" for ratio in getattr(args, "ffn_gating_route_ratios", [0.5]))
+        config_tag += (
+            f"_ffng{getattr(args, 'real_quant_model_name', 'model')}"
+            f"_{getattr(args, 'ffn_gating_reference_tag', 'ref')}"
+            f"_{getattr(args, 'ffn_gating_full_tag', 'full')}"
+            f"_kr{ratios}"
+            f"_rr{route_ratios}"
+            f"_{tags}"
+        ).replace(".", "p").replace("/", "_")
+    if getattr(args, "experiment_suite", None) == "hierarchical_encoder":
+        config_tag += (
+            f"_hier{getattr(args, 'real_quant_model_name', 'model')}"
+            f"_{getattr(args, 'hierarchical_reference_tag', 'ref')}"
+            f"_{getattr(args, 'hierarchical_full_tag', 'full')}"
+            f"_{getattr(args, 'hierarchical_gated_tag', 'gated')}"
+            f"_gr{float(getattr(args, 'hierarchical_gated_route_ratio', 0.4)):.2f}"
+            f"_gk{float(getattr(args, 'hierarchical_gated_keep_ratio', 0.75)):.2f}"
+            f"_{getattr(args, 'hierarchical_gated_route_policy', 'tser')}"
+        ).replace(".", "p").replace("/", "_")
     if not bool(getattr(args, "disable_score_gate", True)):
         config_tag += (
             f"_sg{int(getattr(args, 'score_reuse_threshold', 45))}"

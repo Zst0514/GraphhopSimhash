@@ -24,10 +24,13 @@ def build_parser():
             "residual_reuse",
             "graph_eager_token",
             "token_compaction",
+            "ffn_channel_gating",
+            "hierarchical_encoder",
         ],
         help=(
             "Run one config, score/quant ablations, real quantization, joint reuse+real-quantization, "
-            "residual reuse validation, graph-eager token routing, or token compaction validation."
+            "residual reuse validation, graph-eager token routing, token compaction validation, "
+            "FFN channel-gating validation, or full hierarchical encoder validation."
         ),
     )
     parser.add_argument(
@@ -536,6 +539,84 @@ def build_parser():
         default=128,
         help="Token budget length used for cost reporting in token_compaction.",
     )
+    parser.add_argument("--ffn_gating_reference_tag", type=str, default="FP16")
+    parser.add_argument("--ffn_gating_full_tag", type=str, default="W4A8")
+    parser.add_argument(
+        "--ffn_gating_tags",
+        type=str,
+        nargs="+",
+        default=["W4A8_FFN50"],
+        help="Generated embedding tags for FFN channel-gated pools.",
+    )
+    parser.add_argument(
+        "--ffn_gating_names",
+        type=str,
+        nargs="+",
+        default=None,
+        help="Optional display names matching --ffn_gating_tags.",
+    )
+    parser.add_argument(
+        "--ffn_gating_keep_ratios",
+        type=float,
+        nargs="+",
+        default=[0.5],
+        help="FFN channel keep ratios matching --ffn_gating_tags.",
+    )
+    parser.add_argument(
+        "--ffn_gating_route_ratios",
+        type=float,
+        nargs="+",
+        default=[0.5],
+        help="Fractions of nodes routed to the gated FFN path in graph-aware routing policies.",
+    )
+    parser.add_argument(
+        "--ffn_gating_cost_scale",
+        type=float,
+        default=0.50,
+        help="Cost of full W4A8 encoder relative to full FP encoder cost.",
+    )
+    parser.add_argument(
+        "--ffn_gating_attn_weight",
+        type=float,
+        default=0.35,
+        help="Non-FFN fraction that remains unchanged under FFN channel gating.",
+    )
+    parser.add_argument(
+        "--ffn_gating_ffn_weight",
+        type=float,
+        default=0.65,
+        help="FFN fraction scaled by the channel keep ratio.",
+    )
+    parser.add_argument("--hierarchical_reference_tag", type=str, default="FP16")
+    parser.add_argument("--hierarchical_full_tag", type=str, default="W4A8")
+    parser.add_argument("--hierarchical_gated_tag", type=str, default="W4A8_FFN75")
+    parser.add_argument(
+        "--hierarchical_router_reference",
+        type=str,
+        default="data_x",
+        choices=["data_x", "execution_reference"],
+        help=(
+            "Supervision source for learned hash routing in hierarchical_encoder. "
+            "data_x matches the original clean OFA/ST graph-feature route supervision; "
+            "execution_reference uses --hierarchical_reference_tag."
+        ),
+    )
+    parser.add_argument("--hierarchical_gated_name", type=str, default="FFN75")
+    parser.add_argument("--hierarchical_gated_keep_ratio", type=float, default=0.75)
+    parser.add_argument("--hierarchical_gated_route_ratio", type=float, default=0.40)
+    parser.add_argument(
+        "--hierarchical_gated_route_policy",
+        type=str,
+        default="tser",
+        choices=["degree", "tser", "random"],
+        help="Policy for selecting hash-miss nodes that use the FFN-gated encoder path.",
+    )
+    parser.add_argument(
+        "--hierarchical_residual_cost",
+        type=float,
+        default=0.005,
+        help="Tiny relative cost charged for fuzzy reuse residual correction per corrected node.",
+    )
     parser.add_argument(
         "--disable_real_quant_autogen",
         action="store_true",
@@ -849,6 +930,30 @@ def validate_args(parser, args):
         parser.error("--token_compaction_names must match --token_compaction_tags length")
     if args.token_compaction_length <= 0:
         parser.error("--token_compaction_length must be positive")
+    if not args.ffn_gating_tags:
+        parser.error("--ffn_gating_tags must contain at least one tag")
+    if args.ffn_gating_names is not None and len(args.ffn_gating_names) != len(args.ffn_gating_tags):
+        parser.error("--ffn_gating_names must match --ffn_gating_tags length")
+    if len(args.ffn_gating_keep_ratios) != len(args.ffn_gating_tags):
+        parser.error("--ffn_gating_keep_ratios must match --ffn_gating_tags length")
+    if any(ratio <= 0.0 or ratio > 1.0 for ratio in args.ffn_gating_keep_ratios):
+        parser.error("--ffn_gating_keep_ratios values must be in (0, 1]")
+    if not args.ffn_gating_route_ratios:
+        parser.error("--ffn_gating_route_ratios must contain at least one value")
+    if any(ratio < 0.0 or ratio > 1.0 for ratio in args.ffn_gating_route_ratios):
+        parser.error("--ffn_gating_route_ratios values must be in [0, 1]")
+    if args.ffn_gating_cost_scale <= 0:
+        parser.error("--ffn_gating_cost_scale must be positive")
+    if args.ffn_gating_attn_weight < 0 or args.ffn_gating_ffn_weight < 0:
+        parser.error("--ffn_gating_attn_weight and --ffn_gating_ffn_weight must be non-negative")
+    if args.ffn_gating_attn_weight + args.ffn_gating_ffn_weight <= 0:
+        parser.error("--ffn_gating_attn_weight + --ffn_gating_ffn_weight must be positive")
+    if not (0.0 < args.hierarchical_gated_keep_ratio <= 1.0):
+        parser.error("--hierarchical_gated_keep_ratio must be in (0, 1]")
+    if not (0.0 <= args.hierarchical_gated_route_ratio <= 1.0):
+        parser.error("--hierarchical_gated_route_ratio must be in [0, 1]")
+    if args.hierarchical_residual_cost < 0:
+        parser.error("--hierarchical_residual_cost must be non-negative")
     if args.controller_seed is not None and args.controller_seed < 0:
         parser.error("--controller_seed must be >= 0")
     if args.hash_head_seed is not None and args.hash_head_seed < 0:

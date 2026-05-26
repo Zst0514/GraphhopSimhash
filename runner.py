@@ -1744,6 +1744,602 @@ def run_token_compaction_experiment(args):
             log_important(f"{'=' * 72}\n")
 
 
+def ffn_channel_gating_cost(keep_ratio, args):
+    attn_weight = float(args.ffn_gating_attn_weight)
+    ffn_weight = float(args.ffn_gating_ffn_weight)
+    denom = max(1e-12, attn_weight + ffn_weight)
+    return float(args.ffn_gating_cost_scale) * (attn_weight + ffn_weight * float(keep_ratio)) / denom
+
+
+def select_ffn_gating_route_mask(policy_name, route_ratio, scores, num_nodes, seed, device):
+    route_ratio = float(route_ratio)
+    route_count = int(round(max(0.0, min(1.0, route_ratio)) * int(num_nodes)))
+    mask = torch.zeros(int(num_nodes), dtype=torch.bool, device=device)
+    if route_count <= 0:
+        return mask
+    if route_count >= int(num_nodes):
+        mask[:] = True
+        return mask
+
+    policy_name = str(policy_name).lower()
+    if policy_name == "random":
+        generator = torch.Generator(device="cpu")
+        generator.manual_seed(int(seed) + 6151)
+        idx = torch.randperm(int(num_nodes), generator=generator, device="cpu")[:route_count].to(device=device)
+    elif policy_name == "degree":
+        idx = torch.argsort(scores["propagation_q"].to(device=device, dtype=torch.float32), descending=False)[:route_count]
+    elif policy_name == "tser":
+        idx = torch.argsort(scores["sensitivity_q"].to(device=device, dtype=torch.float32), descending=False)[:route_count]
+    else:
+        raise ValueError(f"Unknown FFN gating route policy: {policy_name}")
+    mask[idx] = True
+    return mask
+
+
+def run_ffn_channel_gating_experiment(args):
+    target_datasets = args.datasets if args.datasets else ["cora"]
+    log_dir = os.path.join("output", "ffn_channel_gating")
+    os.makedirs(log_dir, exist_ok=True)
+
+    for ds_key in target_datasets:
+        if ds_key not in DATASET_CONFIGS:
+            continue
+
+        dataset_log_dir = os.path.join(log_dir, ds_key)
+        os.makedirs(dataset_log_dir, exist_ok=True)
+        log_path = build_log_path(dataset_log_dir, ds_key, args)
+        tags = [str(tag) for tag in args.ffn_gating_tags]
+        keep_ratios = [float(ratio) for ratio in args.ffn_gating_keep_ratios]
+        if args.ffn_gating_names is None:
+            names = [tag.replace("W4A8_", "") for tag in tags]
+        else:
+            names = [str(name) for name in args.ffn_gating_names]
+
+        configs = [("FullW4A8", {"tag": str(args.ffn_gating_full_tag), "keep_ratio": 1.0, "kind": "full"})]
+        configs.extend(
+            (name, {"tag": tag, "keep_ratio": keep_ratio, "kind": "uniform"})
+            for name, tag, keep_ratio in zip(names, tags, keep_ratios)
+        )
+        for name, tag, keep_ratio in zip(names, tags, keep_ratios):
+            for route_ratio in [float(value) for value in args.ffn_gating_route_ratios]:
+                pct = int(round(route_ratio * 100))
+                configs.extend(
+                    [
+                        (
+                            f"Degree{pct}_{name}",
+                            {
+                                "tag": tag,
+                                "keep_ratio": keep_ratio,
+                                "kind": "routed",
+                                "route_policy": "degree",
+                                "route_ratio": route_ratio,
+                            },
+                        ),
+                        (
+                            f"TSER{pct}_{name}",
+                            {
+                                "tag": tag,
+                                "keep_ratio": keep_ratio,
+                                "kind": "routed",
+                                "route_policy": "tser",
+                                "route_ratio": route_ratio,
+                            },
+                        ),
+                        (
+                            f"Random{pct}_{name}",
+                            {
+                                "tag": tag,
+                                "keep_ratio": keep_ratio,
+                                "kind": "routed",
+                                "route_policy": "random",
+                                "route_ratio": route_ratio,
+                            },
+                        ),
+                    ]
+                )
+
+        results = {
+            name: {"acc": [], "drop": [], "avg_err": [], "cost": [], "keep_ratio": [], "gated_rate": []}
+            for name, _policy in configs
+        }
+        results["baseline"] = []
+
+        with open(log_path, "w", encoding="utf-8") as summary_file:
+            def log_important(msg):
+                print(msg)
+                summary_file.write(msg + "\n")
+                summary_file.flush()
+
+            log_important(f"\n{'=' * 72}")
+            log_important(f"Running FFN Channel-Gating Validation on {ds_key.upper()}")
+            log_important(f"{'=' * 72}")
+            log_important(
+                "[FFNGating] "
+                f"model={args.real_quant_model_name} | reference={args.ffn_gating_reference_tag} "
+                f"| full={args.ffn_gating_full_tag} | tags={', '.join(tags)} "
+                f"| keep_ratios={', '.join(f'{ratio:.2f}' for ratio in keep_ratios)} "
+                f"| cost_scale={args.ffn_gating_cost_scale:.2f} "
+                f"| attn_weight={args.ffn_gating_attn_weight:.2f} "
+                f"| ffn_weight={args.ffn_gating_ffn_weight:.2f}"
+            )
+
+            seeds = [int(args.seed) + run_idx for run_idx in range(args.runs)]
+            for run_idx, seed in enumerate(seeds):
+                log_important(f"\n--- Run {run_idx + 1}/{args.runs} (Seed {seed}) ---")
+                run_args = make_run_args(args, seed)
+                _conf, data, verify_features, device = load_run_state(ds_key, run_args, seed)
+
+                use_data_x_reference = str(run_args.ffn_gating_reference_tag).upper() in {"DATA_X", "DATAX", "CLEAN"}
+                ref_path = (
+                    "<data.x>"
+                    if use_data_x_reference
+                    else default_pool_path(ds_key, run_args.real_quant_model_name, run_args.ffn_gating_reference_tag)
+                )
+                paths = {
+                    name: default_pool_path(ds_key, run_args.real_quant_model_name, policy["tag"])
+                    for name, policy in configs
+                }
+                missing = [path for path in ([] if use_data_x_reference else [ref_path]) + list(paths.values()) if not os.path.exists(path)]
+                if missing:
+                    msg = "\n".join(f"  - {path}" for path in missing)
+                    raise FileNotFoundError(
+                        "FFN channel-gating pools are missing:\n"
+                        f"{msg}\n"
+                        "Generate them with generate_real_quant_pools --ffn_channel_gating --tag_suffix ..."
+                    )
+
+                reference = (
+                    data.x.detach().to(device=device, dtype=torch.float32)
+                    if use_data_x_reference
+                    else load_tensor_pool(ref_path, device)
+                )
+                pool_by_name = {name: load_tensor_pool(path, device) for name, path in paths.items()}
+                for name, pool in pool_by_name.items():
+                    if pool.shape[1:] != reference.shape[1:]:
+                        raise ValueError(
+                            f"FFN gating reference shape {tuple(reference.shape)} does not match "
+                            f"{name} pool shape {tuple(pool.shape)}. Use a matching reference tag, "
+                            "for example FP16 for LLaMA pools or DATA_X for ST/data.x pools."
+                        )
+                data.x = reference
+                model, base_acc, ref_embs, _ref_logits = train_baseline_model(data, run_args, device)
+                results["baseline"].append(base_acc)
+                log_important(f"[Baseline:{run_args.ffn_gating_reference_tag}] Acc: {base_acc:.4f}")
+                log_important("[FFNGatingPools] reference=" + ref_path)
+                for name, path in paths.items():
+                    log_important(f"  {name}: {path}")
+
+                model.eval()
+                with torch.no_grad():
+                    encoded_by_name = {
+                        name: model.encoder(pool)
+                        for name, pool in pool_by_name.items()
+                    }
+                scores = build_real_quant_scores(verify_features, data, run_args, device)
+                for name, policy in configs:
+                    full_embs = encoded_by_name["FullW4A8"]
+                    if policy["kind"] == "routed":
+                        gated_embs = encoded_by_name[name]
+                        route_mask = select_ffn_gating_route_mask(
+                            policy["route_policy"],
+                            policy["route_ratio"],
+                            scores,
+                            int(data.num_nodes),
+                            seed,
+                            device,
+                        )
+                        embs = full_embs.clone()
+                        embs[route_mask] = gated_embs[route_mask]
+                        gated_rate = float(route_mask.float().mean().item())
+                        full_cost = ffn_channel_gating_cost(1.0, run_args)
+                        gated_cost = ffn_channel_gating_cost(float(policy["keep_ratio"]), run_args)
+                        cost = (1.0 - gated_rate) * full_cost + gated_rate * gated_cost
+                    else:
+                        embs = encoded_by_name[name]
+                        gated_rate = 0.0 if policy["kind"] == "full" else 1.0
+                        cost = ffn_channel_gating_cost(float(policy["keep_ratio"]), run_args)
+                    acc = evaluate_gnn_embeddings(model, data, embs)
+                    drop = base_acc - acc
+                    err = embedding_error(ref_embs, embs)
+                    keep_ratio = float(policy["keep_ratio"])
+
+                    results[name]["acc"].append(acc)
+                    results[name]["drop"].append(drop)
+                    results[name]["avg_err"].append(float(err.mean().item()))
+                    results[name]["cost"].append(cost)
+                    results[name]["keep_ratio"].append(keep_ratio)
+                    results[name]["gated_rate"].append(gated_rate)
+                    log_important(
+                        f"[{name}] Gate={gated_rate:.1%} | Keep={keep_ratio:.1%} | Cost={cost:.3f} | "
+                        f"Acc={acc:.4f} | Drop={drop:.2%} | AvgErr={err.mean().item():.5f}"
+                    )
+
+            log_important(f"\n{'=' * 72}")
+            log_important(f"FINAL FFN CHANNEL-GATING SUMMARY ({args.runs} Runs) | {ds_key.upper()}")
+            log_important(f"{'=' * 72}")
+            log_important(f"Baseline Acc: {float(np.mean(results['baseline'])):.4f}")
+            log_important("-" * 96)
+            log_important(
+                f"{'Config':<22} | {'Gate %':<8} | {'FFN Keep':<8} | {'Cost':<8} | "
+                f"{'Acc':<10} | {'Drop %':<10} | {'AvgErr':<10}"
+            )
+            log_important("-" * 96)
+            for name, _policy in configs:
+                gated_rate = float(np.mean(results[name]["gated_rate"]))
+                keep_ratio = float(np.mean(results[name]["keep_ratio"]))
+                cost = float(np.mean(results[name]["cost"]))
+                acc = float(np.mean(results[name]["acc"]))
+                drop = float(np.mean(results[name]["drop"]))
+                avg_err = float(np.mean(results[name]["avg_err"]))
+                log_important(
+                    f"{name:<22} | {gated_rate:<8.1%} | {keep_ratio:<8.1%} | {cost:<8.3f} | "
+                    f"{acc:<10.4f} | {drop:<10.2%} | {avg_err:<10.5f}"
+                )
+            log_important(f"{'=' * 72}\n")
+
+
+def summarize_hierarchical_features(final_raw, reference_raw, model, data, base_acc, ref_embs):
+    acc = evaluate_raw_node_features(model, data, final_raw)
+    with torch.no_grad():
+        final_embs = model.encoder(final_raw)
+    err = embedding_error(ref_embs, final_embs)
+    return {
+        "acc": float(acc),
+        "drop": float(base_acc - acc),
+        "avg_err": float(err.mean().item()),
+    }
+
+
+def run_hierarchical_encoder_experiment(args):
+    target_datasets = args.datasets if args.datasets else ["cora"]
+    log_dir = os.path.join("output", "hierarchical_encoder")
+    os.makedirs(log_dir, exist_ok=True)
+
+    for ds_key in target_datasets:
+        if ds_key not in DATASET_CONFIGS:
+            continue
+
+        dataset_log_dir = os.path.join(log_dir, ds_key)
+        os.makedirs(dataset_log_dir, exist_ok=True)
+        log_path = build_log_path(dataset_log_dir, ds_key, args)
+
+        config_names = [
+            "FullW4A8",
+            "DirectReuse",
+            "ResidualReuse",
+            f"{args.hierarchical_gated_route_policy.title()}FFNGatingOnly",
+            "FullHierarchy",
+        ]
+        results = {
+            name: {
+                "reuse": [],
+                "direct": [],
+                "residual": [],
+                "gated": [],
+                "full": [],
+                "cost": [],
+                "acc": [],
+                "drop": [],
+                "avg_err": [],
+                "train_pairs": [],
+                "alpha": [],
+            }
+            for name in config_names
+        }
+        results["baseline"] = []
+
+        with open(log_path, "w", encoding="utf-8") as summary_file:
+            def log_important(msg):
+                print(msg)
+                summary_file.write(msg + "\n")
+                summary_file.flush()
+
+            log_important(f"\n{'=' * 72}")
+            log_important(f"Running Hierarchical Encoder Validation on {ds_key.upper()}")
+            log_important(f"{'=' * 72}")
+            log_important(
+                "[Hierarchy] "
+                f"model={args.real_quant_model_name} | reference={args.hierarchical_reference_tag} "
+                f"| full={args.hierarchical_full_tag} | gated={args.hierarchical_gated_tag} "
+                f"| router_ref={args.hierarchical_router_reference} "
+                f"| gated_keep={args.hierarchical_gated_keep_ratio:.2f} "
+                f"| gated_route={args.hierarchical_gated_route_policy}:{args.hierarchical_gated_route_ratio:.1%} "
+                f"| residual_cost={args.hierarchical_residual_cost:.4f}"
+            )
+
+            seeds = [int(args.seed) + run_idx for run_idx in range(args.runs)]
+            for run_idx, seed in enumerate(seeds):
+                log_important(f"\n--- Run {run_idx + 1}/{args.runs} (Seed {seed}) ---")
+                run_args = make_run_args(args, seed)
+                _conf, data, verify_features, device = load_run_state(ds_key, run_args, seed)
+                clean_data_x = data.x.detach().to(device=device, dtype=torch.float32)
+
+                use_data_x_reference = str(run_args.hierarchical_reference_tag).upper() in {"DATA_X", "DATAX", "CLEAN"}
+                ref_path = (
+                    "<data.x>"
+                    if use_data_x_reference
+                    else default_pool_path(ds_key, run_args.real_quant_model_name, run_args.hierarchical_reference_tag)
+                )
+                full_path = default_pool_path(ds_key, run_args.real_quant_model_name, run_args.hierarchical_full_tag)
+                gated_path = default_pool_path(ds_key, run_args.real_quant_model_name, run_args.hierarchical_gated_tag)
+                missing = [path for path in ((full_path, gated_path) if use_data_x_reference else (ref_path, full_path, gated_path)) if not os.path.exists(path)]
+                if missing:
+                    msg = "\n".join(f"  - {path}" for path in missing)
+                    raise FileNotFoundError(
+                        "Hierarchical encoder pools are missing:\n"
+                        f"{msg}\n"
+                        "Generate full/gated pools first with generate_real_quant_pools."
+                    )
+
+                reference_raw = (
+                    data.x.detach().to(device=device, dtype=torch.float32)
+                    if use_data_x_reference
+                    else load_tensor_pool(ref_path, device)
+                )
+                full_raw = load_tensor_pool(full_path, device)
+                gated_raw = load_tensor_pool(gated_path, device)
+                for name, pool in (("full", full_raw), ("gated", gated_raw)):
+                    if pool.shape[1:] != reference_raw.shape[1:]:
+                        raise ValueError(
+                            f"Hierarchical reference shape {tuple(reference_raw.shape)} does not match "
+                            f"{name} pool shape {tuple(pool.shape)}. Use a matching reference tag, "
+                            "for example FP16 for LLaMA pools or DATA_X for ST/data.x pools."
+                        )
+
+                data.x = reference_raw
+                model, base_acc, ref_embs, oracle_logits = train_baseline_model(data, run_args, device)
+                results["baseline"].append(base_acc)
+                log_important(f"[Baseline:{run_args.hierarchical_reference_tag}] Acc: {base_acc:.4f}")
+                log_important(
+                    "[HierarchyPools] "
+                    f"reference={ref_path} | full={full_path} | gated={gated_path}"
+                )
+
+                model.eval()
+                with torch.no_grad():
+                    full_embs = model.encoder(full_raw)
+                full_stats = {
+                    "acc": evaluate_gnn_embeddings(model, data, full_embs),
+                    "drop": base_acc - evaluate_gnn_embeddings(model, data, full_embs),
+                    "avg_err": float(embedding_error(ref_embs, full_embs).mean().item()),
+                }
+
+                if str(run_args.hierarchical_router_reference) == "data_x":
+                    data.x = clean_data_x
+                    _router_model, router_acc, router_embs, router_logits = train_baseline_model(data, run_args, device)
+                    data.x = reference_raw
+                    log_important(
+                        "[HierarchyRouter] reference=data_x "
+                        f"| shape={tuple(clean_data_x.shape)} | route_acc={router_acc:.4f}"
+                    )
+                else:
+                    router_embs = ref_embs
+                    router_logits = oracle_logits
+                    log_important(
+                        "[HierarchyRouter] reference=execution_reference "
+                        f"| shape={tuple(reference_raw.shape)}"
+                    )
+
+                route_bundle = build_route_bundle(
+                    verify_features,
+                    data,
+                    router_embs,
+                    router_logits,
+                    run_args,
+                    log_important,
+                    device,
+                )
+                controller = build_controller(
+                    data,
+                    verify_features,
+                    route_bundle,
+                    {"name": "Hierarchy", "overrides": {}},
+                    run_args,
+                    device,
+                )
+                direct_raw, _hits = controller.query_full_batch(
+                    route_bundle["hash_route_features"],
+                    verify_features,
+                    full_raw,
+                )
+                trace = controller.last_query_trace
+                stats = controller.stats
+                hit_mask = trace["hit_mask"].to(device=device, dtype=torch.bool)
+                exact_mask = hit_mask & (torch.tensor([kind == "exact" for kind in trace["hit_kinds"]], device=device))
+                fuzzy_mask = hit_mask & (torch.tensor([kind == "fuzzy" for kind in trace["hit_kinds"]], device=device))
+                miss_mask = ~hit_mask
+
+                correction_mask, correction_info = build_residual_correction_mask(
+                    trace,
+                    controller.risk_gate,
+                    run_args.residual_direct_threshold,
+                    device,
+                    min_route_hits=run_args.residual_min_route_hits,
+                    min_base_hits=run_args.residual_min_base_hits,
+                )
+                adapter, train_info = train_residual_adapter(
+                    target_embeddings=full_raw,
+                    verify_features=verify_features,
+                    edge_index=data.edge_index,
+                    trace=trace,
+                    data=data,
+                    risk_scores=controller.node_risk_scores,
+                    rank=run_args.residual_rank,
+                    epochs=run_args.residual_epochs,
+                    lr=run_args.residual_lr,
+                    weight_decay=run_args.residual_weight_decay,
+                    residual_l2=run_args.residual_l2,
+                    train_split=run_args.residual_train_split,
+                    max_pairs=run_args.residual_max_train_pairs,
+                    correction_mask=correction_mask,
+                    min_dist=run_args.residual_min_dist,
+                )
+
+                if adapter is not None and float(run_args.residual_alpha) < 0.0:
+                    selected_alpha = float(run_args.residual_alpha_grid[0])
+                    selected_val_acc = -1.0
+                    for alpha in sorted(float(value) for value in run_args.residual_alpha_grid):
+                        candidate_raw, _candidate_info = apply_residual_adapter(
+                            direct_embeddings=direct_raw,
+                            target_embeddings=full_raw,
+                            verify_features=verify_features,
+                            edge_index=data.edge_index,
+                            trace=trace,
+                            adapter=adapter,
+                            risk_scores=controller.node_risk_scores,
+                            alpha=alpha,
+                            min_dist=run_args.residual_min_dist,
+                            correction_mask=correction_mask,
+                        )
+                        val_acc = evaluate_raw_node_features(model, data, candidate_raw, mask=data.val_mask)
+                        if val_acc > selected_val_acc + 1e-12:
+                            selected_val_acc = val_acc
+                            selected_alpha = alpha
+                    alpha_for_apply = selected_alpha
+                else:
+                    alpha_for_apply = max(0.0, float(run_args.residual_alpha))
+
+                residual_raw, apply_info = apply_residual_adapter(
+                    direct_embeddings=direct_raw,
+                    target_embeddings=full_raw,
+                    verify_features=verify_features,
+                    edge_index=data.edge_index,
+                    trace=trace,
+                    adapter=adapter,
+                    risk_scores=controller.node_risk_scores,
+                    alpha=alpha_for_apply,
+                    min_dist=run_args.residual_min_dist,
+                    correction_mask=correction_mask,
+                )
+
+                scores = build_real_quant_scores(verify_features, data, run_args, device)
+                miss_indices = miss_mask.nonzero(as_tuple=False).view(-1)
+                gated_miss_mask = torch.zeros(int(data.num_nodes), dtype=torch.bool, device=device)
+                if miss_indices.numel() > 0 and float(run_args.hierarchical_gated_route_ratio) > 0:
+                    route_ratio = float(run_args.hierarchical_gated_route_ratio)
+                    select_count = int(round(route_ratio * int(miss_indices.numel())))
+                    select_count = max(0, min(int(miss_indices.numel()), select_count))
+                    if select_count > 0:
+                        policy = str(run_args.hierarchical_gated_route_policy).lower()
+                        if policy == "random":
+                            generator = torch.Generator(device="cpu")
+                            generator.manual_seed(int(seed) + 9323)
+                            local = torch.randperm(int(miss_indices.numel()), generator=generator, device="cpu")[:select_count].to(device=device)
+                            chosen = miss_indices[local]
+                        elif policy == "degree":
+                            local_score = scores["propagation_q"][miss_indices].to(dtype=torch.float32)
+                            chosen = miss_indices[torch.argsort(local_score, descending=False)[:select_count]]
+                        elif policy == "tser":
+                            local_score = scores["sensitivity_q"][miss_indices].to(dtype=torch.float32)
+                            chosen = miss_indices[torch.argsort(local_score, descending=False)[:select_count]]
+                        else:
+                            raise ValueError(f"Unknown hierarchical route policy: {policy}")
+                        gated_miss_mask[chosen] = True
+
+                full_cost = ffn_channel_gating_cost(1.0, run_args)
+                gated_cost = ffn_channel_gating_cost(run_args.hierarchical_gated_keep_ratio, run_args)
+                residual_cost = float(run_args.hierarchical_residual_cost)
+                total_nodes = max(1, int(data.num_nodes))
+
+                def record(name, raw, direct_rate=0.0, residual_rate=0.0, gated_rate=0.0, full_rate=0.0, train_pairs=0, alpha=0.0):
+                    item = summarize_hierarchical_features(raw, reference_raw, model, data, base_acc, ref_embs)
+                    cost = residual_rate * residual_cost + gated_rate * gated_cost + full_rate * full_cost
+                    results[name]["reuse"].append(float(direct_rate + residual_rate))
+                    results[name]["direct"].append(float(direct_rate))
+                    results[name]["residual"].append(float(residual_rate))
+                    results[name]["gated"].append(float(gated_rate))
+                    results[name]["full"].append(float(full_rate))
+                    results[name]["cost"].append(float(cost))
+                    results[name]["acc"].append(item["acc"])
+                    results[name]["drop"].append(item["drop"])
+                    results[name]["avg_err"].append(item["avg_err"])
+                    results[name]["train_pairs"].append(int(train_pairs))
+                    results[name]["alpha"].append(float(alpha))
+                    log_important(
+                        f"[{name}] Reuse={direct_rate + residual_rate:.1%} "
+                        f"(direct={direct_rate:.1%}, residual={residual_rate:.1%}) "
+                        f"| FFNGated={gated_rate:.1%} | Full={full_rate:.1%} "
+                        f"| Cost={cost:.3f} | Acc={item['acc']:.4f} "
+                        f"| Drop={item['drop']:.2%} | AvgErr={item['avg_err']:.5f}"
+                    )
+
+                record(
+                    "FullW4A8",
+                    full_raw,
+                    full_rate=1.0,
+                )
+                record(
+                    "DirectReuse",
+                    direct_raw,
+                    direct_rate=float(hit_mask.float().mean().item()),
+                    full_rate=float(miss_mask.float().mean().item()),
+                )
+                record(
+                    "ResidualReuse",
+                    residual_raw,
+                    direct_rate=float(exact_mask.float().mean().item()),
+                    residual_rate=float(fuzzy_mask.float().mean().item()),
+                    full_rate=float(miss_mask.float().mean().item()),
+                    train_pairs=int(train_info["train_pairs"]),
+                    alpha=float(apply_info["alpha"]),
+                )
+                ffn_only_raw = full_raw.clone()
+                ffn_only_raw[gated_miss_mask] = gated_raw[gated_miss_mask]
+                record(
+                    f"{run_args.hierarchical_gated_route_policy.title()}FFNGatingOnly",
+                    ffn_only_raw,
+                    gated_rate=float(gated_miss_mask.float().mean().item()),
+                    full_rate=float((~gated_miss_mask).float().mean().item()),
+                )
+                hierarchy_raw = residual_raw.clone()
+                hierarchy_raw[gated_miss_mask] = gated_raw[gated_miss_mask]
+                hierarchy_full_mask = miss_mask & ~gated_miss_mask
+                record(
+                    "FullHierarchy",
+                    hierarchy_raw,
+                    direct_rate=float(exact_mask.float().mean().item()),
+                    residual_rate=float(fuzzy_mask.float().mean().item()),
+                    gated_rate=float(gated_miss_mask.float().mean().item()),
+                    full_rate=float(hierarchy_full_mask.float().mean().item()),
+                    train_pairs=int(train_info["train_pairs"]),
+                    alpha=float(apply_info["alpha"]),
+                )
+                log_important(
+                    "  ReuseDetail: "
+                    f"reuse={stats['reuse']}/{stats['reuse_denominator']} "
+                    f"(exact={stats['exact_reuse']}, fuzzy={stats['fuzzy_reuse']}) "
+                    f"| computed={stats['computed']} "
+                    f"| gated_miss={int(gated_miss_mask.sum().item())}/{int(miss_mask.sum().item())} "
+                    f"| residual_candidates={correction_info['residual_candidates']} "
+                    f"| corrected={apply_info['corrected']} | alpha={apply_info['alpha']:.3f}"
+                )
+
+            log_important(f"\n{'=' * 72}")
+            log_important(f"FINAL HIERARCHICAL ENCODER SUMMARY ({args.runs} Runs) | {ds_key.upper()}")
+            log_important(f"{'=' * 72}")
+            log_important(f"Baseline Acc: {float(np.mean(results['baseline'])):.4f}")
+            log_important("-" * 132)
+            log_important(
+                f"{'Config':<24} | {'Reuse %':<8} | {'Direct %':<8} | {'Residual %':<10} | "
+                f"{'FFN %':<8} | {'Full %':<8} | {'Cost':<8} | {'Acc':<10} | {'Drop %':<10} | {'AvgErr':<10}"
+            )
+            log_important("-" * 132)
+            for name in config_names:
+                log_important(
+                    f"{name:<24} | "
+                    f"{float(np.mean(results[name]['reuse'])):<8.1%} | "
+                    f"{float(np.mean(results[name]['direct'])):<8.1%} | "
+                    f"{float(np.mean(results[name]['residual'])):<10.1%} | "
+                    f"{float(np.mean(results[name]['gated'])):<8.1%} | "
+                    f"{float(np.mean(results[name]['full'])):<8.1%} | "
+                    f"{float(np.mean(results[name]['cost'])):<8.3f} | "
+                    f"{float(np.mean(results[name]['acc'])):<10.4f} | "
+                    f"{float(np.mean(results[name]['drop'])):<10.2%} | "
+                    f"{float(np.mean(results[name]['avg_err'])):<10.5f}"
+                )
+            log_important(f"{'=' * 72}\n")
+
+
 def run_real_quant_ablation(args):
     target_datasets = args.datasets if args.datasets else ["cora"]
     log_dir = os.path.join("output", "graph_simhash")
@@ -2176,6 +2772,10 @@ def run_adaptive_simulation(args):
         return run_graph_eager_token_experiment(args)
     if args.experiment_suite == "token_compaction":
         return run_token_compaction_experiment(args)
+    if args.experiment_suite == "ffn_channel_gating":
+        return run_ffn_channel_gating_experiment(args)
+    if args.experiment_suite == "hierarchical_encoder":
+        return run_hierarchical_encoder_experiment(args)
 
     target_datasets = args.datasets if args.datasets else ["cora"]
     log_dir = os.path.join("output", "graph_simhash")

@@ -4,7 +4,7 @@
 
 1. **GraphHop SimHash reuse**：用图上下文 hash 找可复用节点，减少 embedding 计算。
 2. **TSER score gate**：用图风险分数过滤危险复用，降低复用带来的精度掉点。
-3. **AWQ W4A8/W4A4 embedding pool**：生成真实低精度 embedding，并评估固定预算下的 W4A8/W4A4 路由。
+3. **Hierarchical encoder execution**：把节点路由到 exact reuse、residual reuse、FFN-gated W4A8 或 full W4A8 encoder。
 
 ## 文档结构
 
@@ -19,6 +19,15 @@ SCORE_DEFINITIONS.md
 
 AWQ_W4A8_W4A4_GENERATION.md
     当前 AWQ-based W4A16/W4A8/W4A4 embedding pool 生成方式。
+
+RESIDUAL_CORRECTED_REUSE.md
+    fuzzy hash hit 上的 low-rank residual correction 机制与实验结果。
+
+FFN_CHANNEL_GATING.md
+    面向 W4A8 encoder NPU 的 FFN channel gating 原型。
+
+HIERARCHICAL_ENCODER_NPU_DESIGN.md
+    当前完整系统思路：P0/P1/P2/P3 分层 encoder 执行路径、硬件落点和端到端结果。
 
 量化+哈希命令.md
     reuse_real_quant 联合实验命令与结果解释。
@@ -44,6 +53,9 @@ scoring.py
 generate_real_quant_pools.py
     FP16 / W4A16 / W4A8 / W4A4 embedding pool 生成。
 
+generate_real_quant_pools_ptq_legacy.py
+    保留旧 PTQ_TEST 生成路径，用于复现已验证过的低误差 W4A8 pool。
+
 real_quant.py
     真实 embedding pool 的固定预算评估和联合实验装配。
 
@@ -52,6 +64,32 @@ activation_outlier_calibration.py
 
 features.py / projections.py
     cheap feature、hash feature、多头 learned hash projection。
+```
+
+## 0. 当前系统总览
+
+当前更推荐把系统讲成 graph-aware hierarchical encoder execution：
+
+```text
+P0: exact hash reuse
+    cost ~= 0
+
+P1: fuzzy hash reuse + residual correction
+    cost ~= tiny adapter
+
+P2: W4A8 encoder + FFN channel gating
+    cost < full W4A8
+
+P3: full W4A8 encoder
+    精度兜底路径
+```
+
+对应完整说明见：
+
+```text
+HIERARCHICAL_ENCODER_NPU_DESIGN.md
+RESIDUAL_CORRECTED_REUSE.md
+FFN_CHANNEL_GATING.md
 ```
 
 ## 1. 生成 AWQ Embedding Pool
