@@ -64,6 +64,19 @@ FIGNA 试图在不损失传统 FP-INT GEMM 数值结果的前提下，把主要 
 
 为避免 weight 为 0 时导致截断精度崩塌，提出 0-less signed integer 表示，使极端截断仍保持精度。
 
+**FIGNA-C PE 与 chunk-based mantissa allocation**
+
+FIGNA 的硬件不是简单把 FP activation 粗暴截断成 BFP，而是先在一个 chunk 内做动态预对齐，再根据理论误差界选择足够的 mantissa 位宽。这样可以在 PE 内用整数乘加完成 FP activation × INT weight，同时把误差限制在传统 FP-INT MAC 的舍入误差范围内。
+
+整体架构仍然接近 2D systolic array：
+
+```text
+FP activation -> exponent/mantissa split -> chunk prealign
+INT weight    -> 0-less / quantized integer path
+aligned mantissa × INT weight -> integer MAC
+actsum / reformatter -> recover FP-format accumulation
+```
+
 ### 加速对象
 
 ```text
@@ -582,6 +595,24 @@ Bit-level out-of-order execution 在等待某个 token 低位数据时处理其�
 **ISTA**
 
 把 bit-level early termination 与 FlashAttention-like tiling 结合，避免全行物化。
+
+**Scoreboard reusable PE lane**
+
+PADE 的 PE lane 用 scoreboard 缓存尚未被 prune 的 partial score。下一轮 bit-plane 到来时，不需要重新加载并重算旧 bit-plane，而是在已有 partial score 上增量更新。
+
+**GSAT 与 RARS**
+
+为了解决 bit-serial 稀疏执行里的硬件利用率问题，PADE 还加入两块硬件机制：
+
+```text
+GSAT:
+    grouped lightweight sparsity ANDer tree
+    用小 mux group 替代巨大的 full-width selector。
+
+RARS:
+    reuse-aware reorder scheduler
+    对保留下来的 sparse attention score 重排序，减少 V 向量重复读取。
+```
 
 ### 加速对象
 
@@ -1191,6 +1222,44 @@ LLM activation 的数值范围和精度需求不是固定的。统一位宽会�
 
 Anda 提出 variable-length grouped activation data format，用 group-shared exponent 和动态 mantissa bit allocation 表示 activation。
 
+### 细粒度创新
+
+**One-shot adaptive precision search**
+
+Anda 不固定所有 activation 都用同一 mantissa 位宽，而是在 post-training calibration 阶段搜索不同模块的 mantissa 组合：
+
+```text
+[Mqkv, Mo, Mu, Md]
+```
+
+这里分别对应 QKV projection、attention output、FFN up projection、FFN down projection 等模块。搜索目标是在给定 accuracy loss tolerance 下最小化 bit operations。
+
+**Variable-length grouped activation**
+
+Anda 使用 group-shared exponent，mantissa 位宽按模块/精度组合变化：
+
+```text
+activation group:
+    shared exponent
+    variable-length mantissa
+```
+
+这比固定 BFP 更灵活：容易的模块少给 bit，敏感模块多给 bit。
+
+**Bit-plane data layout**
+
+variable-length mantissa 如果按元素顺序存，会造成不规则访存。Anda 改成 bit-plane layout：
+
+```text
+same-significance bits across a group are packed together
+```
+
+这样不同 mantissa 长度只影响 address depth，不破坏 memory word 对齐。
+
+**Anda-enhanced bit-serial PE + runtime compressor**
+
+Anda PE 以 bit-serial 方式处理 variable-length mantissa，并用 FP accumulator 做跨 group 累加；runtime bit-plane compressor 则把 FP16 activation 在线压成 Anda 格式。
+
 ### 硬件意义
 
 ```text
@@ -1248,7 +1317,349 @@ hash/reuse engine 和 W4A8 array 如何同步？
 
 ---
 
+## 30. BitMod: Bit-Serial Mixture-of-Datatype LLM Acceleration
+
+**发表信息**：HPCA 2025；Cornell University、Microsoft Research、Imperial College London 团队；定位是 bit-serial mixture-of-datatype low-bit LLM acceleration。
+
+### 核心问题
+
+LLM weight-only quantization 的主要收益来自减少 weight memory traffic，但低到 4-bit / 3-bit 时，单一 INT 或 FP 格式不一定适合所有 weight group：
+
+```text
+1. INT 格式硬件简单，但 3-bit 时精度容易崩；
+2. FP 格式表达更贴近非均匀分布，但硬件支持复杂；
+3. per-group quantization 又需要动态 scale / datatype 信息；
+4. edge LLM batch 小，weight traffic 往往主导能耗。
+```
+
+### 核心 Idea
+
+BitMod 把“量化位宽”和“数据类型”都变成 per-group 可适配对象。每个 weight group 可以选择不同 low-bit datatype，硬件端用统一 bit-serial 表示来处理这些 datatype。
+
+### 细粒度创新
+
+**Extended FP3 / FP4 datatype**
+
+传统 sign-magnitude floating point 有 `+0` 和 `-0` 两个零，BitMod 把冗余的 `-0` 替换成特殊值：
+
+```text
+FP3-ER: extra resolution，例如 ±3
+FP3-EA: extra asymmetry，例如 ±6
+FP4-ER: extra resolution，例如 ±5
+FP4-EA: extra asymmetry，例如 ±8
+```
+
+这样每个 group 可以选择更贴合自身分布的特殊值，在不明显增加编码开销的情况下改善 3-bit / 4-bit 量化误差。
+
+**Fine-grained datatype adaptation**
+
+对每个 weight group 枚举候选 special value / datatype，选择 MSE 最小的量化格式：
+
+```text
+for each group:
+    try candidate datatype / special value
+    quantize group
+    choose minimum quantization error
+```
+
+这是一种 PTQ，不需要重新训练。
+
+**Unified bit-serial representation**
+
+BitMod 把 INT8、INT6、extended FP4、extended FP3 都表示为若干 bit-serial term：
+
+```text
+term = sign + exponent + mantissa + bit-significance
+value = (-1)^sign * 2^exponent * mantissa * 2^bit-significance
+```
+
+因此同一个 PE 可以处理多种 bit-width / datatype，不需要为每种格式做独立阵列。
+
+**Bit-serial group dequantization**
+
+per-group scale 不再用昂贵 FP pipeline 处理，而是通过低精度整数 scale 和 bit-serial dequant unit 对 group partial sum 进行 rescale。
+
+### 对我们场景的启发
+
+BitMod 的关键启发是：W4A8/W4A4 不一定要固定成单一数据格式。Graph-aware routing 可以进一步下沉为：
+
+```text
+high-risk node/channel/group -> safer datatype
+low-risk node/channel/group  -> cheaper datatype
+```
+
+比单纯 W4A8 vs W4A4 更细粒度。
+
 ---
+
+## 31. FIGLUT: LUT-Based FP-INT GEMM
+
+**发表信息**：HPCA 2025；POSTECH 团队；定位是用 LUT / RAC 替代 FP-INT arithmetic 的 energy-efficient GEMM accelerator。
+
+### 核心问题
+
+FIGNA 用整数单元做 FP-INT GEMM，但对固定 INT4 更友好。对 sub-4-bit、BCQ、mixed precision quantization 来说，传统 bit-serial 或固定 FP-INT PE 仍然不够灵活。
+
+### 核心 Idea
+
+FIGLUT 不直接做乘法，而是把一组 activation 的所有可能加减组合预先生成到 LUT 中。weight pattern 作为 key，PE 只需要读取 LUT value 并累加。
+
+```text
+activation group -> generate LUT of possible partial sums
+weight pattern   -> LUT key
+RAC              -> read + accumulate
+```
+
+### 细粒度创新
+
+**Read-Accumulate Unit (RAC)**
+
+RAC 取代传统 MAC：
+
+```text
+MAC: multiply weight and activation, then accumulate
+RAC: use weight pattern to read precomputed partial sum, then accumulate
+```
+
+这对 BCQ / binary-coded quantization 这类权重格式尤其自然。
+
+**FFLUT / hFFLUT**
+
+普通 register-file LUT 会有 bank conflict 和读端口问题。FIGLUT 设计 flip-flop based LUT：
+
+```text
+FFLUT:
+    多 RAC 并行访问，避免 bank conflict。
+
+hFFLUT:
+    利用 LUT value 的符号对称性，只存一半表项，
+    另一半通过 sign flip 恢复。
+```
+
+**LUT sharing and fanout search**
+
+FIGLUT 搜索 LUT group size `mu` 和每个 LUT 共享的 RAC 数 `k`，在 LUT power、fanout、RAC power 之间找最优点。
+
+### 对我们场景的启发
+
+如果 Graph-aware encoder NPU 采用极低比特 weight / activation group，低比特乘法不一定必须走 multiplier。对结构化 group，LUT/RAC 可能比 MAC 更省能耗，尤其适合作为 W4A4 / sub-W4 的候选执行单元。
+
+---
+
+## 32. Panacea: Asymmetric Quantization + Bit-Slice Sparsity
+
+**发表信息**：HPCA 2025；POSTECH、University of Michigan 团队；定位是支持 asymmetric activation quantization 的 bit-slice sparse GEMM accelerator。
+
+### 核心问题
+
+Bit-slice accelerator 通常依赖高位 slice 中大量 zero 来跳过计算。但 asymmetric activation quantization 虽然精度更好，却会产生很多非零高位 slice，导致传统 bit-slice sparsity 失效。
+
+```text
+symmetric activation quantization:
+    zero-centered -> high-order zero slices 多 -> 易跳过
+
+asymmetric activation quantization:
+    zero point 偏移 -> frequent nonzero slices 多 -> 传统 skip 失效
+```
+
+### 核心 Idea
+
+Panacea 提出 AQS-GEMM：不只压缩 zero slices，也压缩 asymmetric quantization 中频繁出现的 nonzero high-order slices，并用 compensation term 保证结果精确。
+
+### 细粒度创新
+
+**AQS-GEMM**
+
+对 high-order slices 做 grouping + RLE compression：
+
+```text
+weight HO slice vector
+activation HO slice vector
+    zero 或 frequent nonzero r-value -> compress and skip
+```
+
+被跳过的 frequent nonzero slice 会带来偏差，因此 Panacea 推导 compensation term，并复用已经加载的 weight slices 计算补偿，避免额外 EMA。
+
+**ZPM: Zero-Point Manipulation**
+
+在 PTQ calibration 阶段调整 activation zero point，使 frequent HO slice 更容易集中到可压缩值。
+
+**DBS: Distribution-Based Bit-Slicing**
+
+根据 activation 分布宽窄调整 HO/LO slicing，让高位 slice 稀疏性更高。硬件上主要体现为输出 shift / accumulation 的轻量调整。
+
+**AQS-GEMM hardware**
+
+Panacea 的 PE array 同时配置：
+
+```text
+DWO: dynamic workload operator
+    处理 sparse / compressed HO-related workload
+
+SWO: static workload operator
+    处理 dense LO workload
+
+CS: compensator
+    复用 weight slice 计算 skipped nonzero slice 的补偿项
+```
+
+此外用 double-tile processing 提高高稀疏情况下的 operator utilization。
+
+### 对我们场景的启发
+
+Graph-aware W4A8/W4A4 不一定只考虑“节点是否低精度”，还可以考虑 activation 的 quantization style。Panacea 说明 asymmetric activation quantization 精度好，但需要专门硬件把 nonzero slice 也变成可跳过结构。
+
+---
+
+## 33. AxCore: Quantization-Aware Approximate GEMM Unit
+
+**发表信息**：MICRO 2025；香港科技大学（广州）团队；定位是结合 weight-only quantization 与 floating-point multiplication approximation 的 multiplier-free mpGEMM unit。
+
+### 核心问题
+
+Weight-only quantization 常见配置是：
+
+```text
+activation = FP16 / BF16
+weight     = FP4 / INT4
+```
+
+这要求 mixed-precision GEMM。FIGNA/FIGLUT 等工作追求精确或 LUT-based FP-INT，而 AxCore 选择另一条路线：用近似 FP multiplication approximation (FPMA) 替代乘法器。
+
+### 核心 Idea
+
+AxCore 用 FPMA 把乘法近似成整数加法：
+
+```text
+FP multiplication -> exponent / mantissa transformed addition
+```
+
+然后把它扩展到 mixed precision：
+
+```text
+FP16 activation × FP4/INT4 weight
+```
+
+从而构造 multiplier-free systolic array。
+
+### 细粒度创新
+
+**mpFPMA PE**
+
+AxCore 将低比特 weight mantissa 对齐到 activation fixed-point domain，再用 integer add 完成近似乘法。PE 内不放传统 multiplier。
+
+**Subnormal Number Conversion (SNC)**
+
+FP4 中 subnormal 不再是极少数；如果直接套 FPMA，会因为缺少 hidden leading one 导致大误差。AxCore 用轻量 SNC 把 subnormal 映射到数值接近的 normal encoding 或 0。
+
+**Constant compensation**
+
+FPMA 的 `log2(1 + M) ~= M` 会产生系统性误差。AxCore 引入 format-specific compensation constant，并把 bias/correction 前移到 PreAdd module：
+
+```text
+T = activation - bias_correction + compensation
+PE only computes:
+    R = T + aligned_weight
+```
+
+这样减少每个 PE 内重复 correction logic。
+
+**Format-aware offline quantization**
+
+每个 weight group 可在 FP4 格式中选择：
+
+```text
+E3M0 / E2M1 / E1M2
+```
+
+选择依据是 calibration activation 下的 output error，而不是只看 weight MSE。
+
+### 对我们场景的启发
+
+AxCore 代表“可控近似计算”的路线。它不保证逐乘法精确，但通过 subnormal handling、compensation、format-aware quantization 把误差压到 LLM 可接受范围。对 Graph-aware encoder NPU 来说，这提示我们：
+
+```text
+低风险节点/通道可以走 approximate GEMM；
+高风险节点/通道保留 exact W4A8 / FP-INT path。
+```
+
+---
+
+## 34. Harmonia: All-Layer BFP-Based LLM Inference
+
+**发表信息**：arXiv 2026；Xinyu Wang、Jieyu Li、Yanan Sun、Weifeng He 等作者团队；定位是 all-layer BFP activation + configurable hardware 的 LLM inference co-design。
+
+### 核心问题
+
+FIGNA / Anda 等工作主要把 BFP activation 用在线性层，attention activation 和 KV cache 仍然常保留 FP16。这导致：
+
+```text
+1. attention 层仍需 FP-heavy datapath；
+2. KV cache memory traffic 很大；
+3. linear / attention 使用不同 arithmetic unit，PE 利用率割裂。
+```
+
+### 核心 Idea
+
+Harmonia 把 BFP activation 扩展到 linear layer 和 attention layer，并用可重构 PE 同时支持：
+
+```text
+BFP-INT: linear layer activation × INT4 weight
+BFP-BFP: attention layer activation × activation
+```
+
+### 细粒度创新
+
+**统一 BFP activation 配置**
+
+系统探索 BFP group size / mantissa bit trade-off，采用典型配置：
+
+```text
+group size = 32
+activation mantissa = 8-bit
+KV cache mantissa = more aggressive, often 4-bit for most tokens
+```
+
+**Initial-local asymmetric bit allocation**
+
+注意力通常更关注 initial tokens 和 recent/local tokens。Harmonia 给这些 token 更高 mantissa precision，其他 KV cache token 用更低 mantissa：
+
+```text
+initial tokens / local tokens -> 8-bit mantissa
+other KV tokens              -> 4-bit mantissa
+```
+
+**Offline-online hybrid outlier smoothing**
+
+K cache 有明显 channel-wise outliers。Harmonia 先 offline 学 per-channel scaling，并吸收到 Q/K projection weight 中；再 online 生成少量 channel offset，利用 softmax shift-invariance 稳定 K 分布。
+
+**Reconfigurable PE + real-time BFP converter**
+
+PE 支持三种模式：
+
+```text
+M8W4: 8-bit mantissa activation × INT4 weight
+M8M4: 8-bit mantissa activation × 4-bit mantissa activation
+M8M8: 8-bit mantissa activation × 8-bit mantissa activation
+```
+
+实时 BFP converter 将 FP16 output 在线压成 BFP，并根据 activation 类型选择不同 conversion path。
+
+**Tiling-aware dataflow**
+
+Harmonia 支持 column-first / row-first 两种 output dataflow，由 FDGF controller 根据矩阵形状和 token length 选择更少 EMA 的访存路径。
+
+### 对我们场景的启发
+
+Harmonia 虽然包含 KV cache，但它更重要的启发是：BFP activation 不必局限在线性层。对 encoder NPU 来说，可以考虑：
+
+```text
+linear FFN/QKV: BFP-INT path
+attention:      BFP-BFP path
+pooling/output: real-time BFP/FP conversion
+```
+
+这能把 W4A8 encoder 的 full path 做得更硬件友好。
 
 ---
 
@@ -1266,10 +1677,11 @@ hash/reuse engine 和 W4A8 array 如何同步？
    STAR, SOFA, SALO2, PADE, BETA, FuseMax, Balanced SA, DESA
 
 3. 低比特数值路径与量化硬件
-   FIGNA, Tender, LUT Tensor Core, APTQ, OPAL, Anda, DECA
+   FIGNA, Tender, LUT Tensor Core, APTQ, OPAL, Anda, DECA,
+   BitMod, FIGLUT, Panacea, AxCore, Harmonia
 
 4. Tensor / weight / activation 压缩
-   LLM.265 / VcLLM, MCBP
+   LLM.265 / VcLLM, MCBP, Harmonia
 
 5. PIM / PNM / IMC / 3D / memory-side compute
    IMCsim, H3D-Transformer, PIMoE, Energon
@@ -1285,7 +1697,8 @@ hash/reuse engine 和 W4A8 array 如何同步？
    Graph/risk 信息可以指导哪些节点、哪些 FFN group 走轻量路径。
 
 2. W4A8/W4A4 数值路径：
-   需要关注 scale alignment、outlier、dequant/repack，而不只是 MAC 位宽。
+   需要关注 scale alignment、outlier、dequant/repack、BFP activation、subnormal handling 和 datatype selection，
+   而不只是 MAC 位宽。
 
 3. Exact attention dataflow：
    Full encoder path 应该用 FlashAttention/FuseMax/DESA/Balanced-SA 这类精确数据流作为底层执行方式。
@@ -1295,6 +1708,10 @@ hash/reuse engine 和 W4A8 array 如何同步？
 
 5. Memory hierarchy：
    hash reuse cache、residual adapter、W4A8 encoder、FFN-gated encoder 应该被建模成多路径层级执行。
+
+6. 低风险近似执行：
+   AxCore / Panacea / BitMod 说明低风险路径可以进一步采用 approximate GEMM、bit-slice sparsity、
+   per-group datatype adaptation；高风险路径则保留 exact W4A8 或更安全格式。
 ```
 
 ## C. 已拆出的 Decoder / Serving 内容
