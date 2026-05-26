@@ -7,7 +7,7 @@ import torch.nn.functional as F
 
 from .config import DATASET_CONFIGS
 from .controller import PaperHashReuseController
-from .data import load_run_state, maybe_limit_test_mask
+from .data import load_raw_texts, load_run_state, maybe_limit_test_mask
 from .features import build_hash_feature_routes, build_topology_hash_features, format_hash_route_specs
 from .internal_split_calibration import (
     build_internal_split_calibration,
@@ -694,6 +694,290 @@ def summarize_partial_encoder_policy(actions, errors_by_action, layers, total_la
         "rates": rates,
         "cost": float(cost),
         "avg_err": float(selected_err.mean().item()),
+    }
+
+
+def load_graph_eager_token_pools(ds_key, args, data, device, log_important):
+    model_name = args.real_quant_model_name
+    reference_tag = str(args.graph_eager_reference_tag)
+    full_tag = str(args.graph_eager_full_tag)
+    token_prefix = str(args.graph_eager_token_tag_prefix)
+    lengths = sorted(int(length) for length in args.graph_eager_token_lengths)
+
+    reference_path = default_pool_path(ds_key, model_name, reference_tag)
+    full_path = default_pool_path(ds_key, model_name, full_tag)
+    token_paths = {
+        length: default_pool_path(ds_key, model_name, f"{token_prefix}{length}")
+        for length in lengths
+    }
+    missing = [
+        path
+        for path in [reference_path, full_path, *token_paths.values()]
+        if not os.path.exists(path)
+    ]
+    if missing:
+        msg = "\n".join(f"  - {path}" for path in missing)
+        raise FileNotFoundError(
+            "Graph-eager token pools are missing:\n"
+            f"{msg}\n"
+            "Generate shortened pools with generate_real_quant_pools using --max_length "
+            "and --output_path, e.g. W4A8_S128/W4A8_S256."
+        )
+
+    reference = load_tensor_pool(reference_path, device)
+    full = load_tensor_pool(full_path, device)
+    token = {length: load_tensor_pool(path, device) for length, path in token_paths.items()}
+
+    expected_nodes = int(data.num_nodes)
+    expected_shape = tuple(reference.shape)
+    for label, tensor in [("full", full), *[(f"S{length}", tensor) for length, tensor in token.items()]]:
+        if int(tensor.size(0)) != expected_nodes:
+            raise ValueError(f"{label} pool has wrong node count: {tuple(tensor.shape)} vs {expected_nodes}")
+        if tuple(tensor.shape) != expected_shape:
+            raise ValueError(f"{label} pool shape {tuple(tensor.shape)} must match reference {expected_shape}")
+
+    log_important(
+        "[GraphEagerPools] "
+        f"reference={reference_path} | full={full_path} | "
+        f"tokens={', '.join(f'S{k}:{v}' for k, v in token_paths.items())}"
+    )
+    log_important(f"[GraphEagerPools] shape={expected_shape} | lengths={lengths}")
+    return {
+        "reference": reference,
+        "full": full,
+        "token": token,
+        "lengths": lengths,
+        "reference_path": reference_path,
+        "full_path": full_path,
+        "token_paths": token_paths,
+    }
+
+
+def graph_eager_token_cost(action, args):
+    if int(action) == -1:
+        ratio = 1.0
+    else:
+        ratio = float(action) / float(args.graph_eager_full_length)
+    denom = float(args.graph_eager_attn_weight) + float(args.graph_eager_ffn_weight)
+    attn_w = float(args.graph_eager_attn_weight) / denom
+    ffn_w = float(args.graph_eager_ffn_weight) / denom
+    return float(args.graph_eager_cost_scale) * (attn_w * ratio * ratio + ffn_w * ratio)
+
+
+def build_graph_eager_token_policy_configs(args, lengths):
+    lengths = sorted(int(length) for length in lengths)
+    configs = [("FullW4A8", {"kind": "all_full"})]
+    for length in lengths:
+        configs.append((f"AllS{length}", {"kind": "all_token", "length": length}))
+    configs.extend(
+        [
+            ("RandomTokenBudget", {"kind": "budget", "priority": "random"}),
+            ("DegreeTokenBudget", {"kind": "budget", "priority": "degree"}),
+            ("TSERTokenBudget", {"kind": "budget", "priority": "tser"}),
+            ("ContextTokenBudget", {"kind": "budget", "priority": "context"}),
+            ("PredictorTokenBudget", {"kind": "budget", "priority": "predictor"}),
+            ("OracleDamageBudget", {"kind": "budget", "priority": "oracle_damage"}),
+        ]
+    )
+    return configs
+
+
+def select_graph_eager_token_actions(
+    policy,
+    scores,
+    args,
+    num_nodes,
+    lengths,
+    seed,
+    device,
+    oracle_priority=None,
+    predictor_priority=None,
+):
+    lengths = sorted(int(length) for length in lengths)
+    full_action = -1
+    if policy["kind"] == "all_full":
+        return torch.full((num_nodes,), full_action, dtype=torch.int64, device=device)
+    if policy["kind"] == "all_token":
+        return torch.full((num_nodes,), int(policy["length"]), dtype=torch.int64, device=device)
+    if policy["kind"] != "budget":
+        raise ValueError(f"Unknown graph-eager token policy: {policy}")
+
+    priority_name = policy["priority"]
+    if priority_name == "degree":
+        priority = scores["propagation_q"].to(dtype=torch.float32)
+    elif priority_name == "tser":
+        priority = scores["sensitivity_q"].to(dtype=torch.float32)
+    elif priority_name == "context":
+        priority = scores["graph_context_q"].to(dtype=torch.float32)
+    elif priority_name == "oracle_damage":
+        if oracle_priority is None:
+            raise ValueError("oracle_damage policy requires oracle_priority")
+        priority = oracle_priority.to(dtype=torch.float32)
+    elif priority_name == "predictor":
+        if predictor_priority is None:
+            raise ValueError("predictor policy requires predictor_priority")
+        priority = predictor_priority.to(dtype=torch.float32)
+    elif priority_name == "random":
+        generator = torch.Generator(device="cpu")
+        generator.manual_seed(int(seed) + 49999)
+        priority = torch.rand(num_nodes, generator=generator, device="cpu").to(device=device)
+    else:
+        raise ValueError(f"Unknown graph-eager priority: {priority_name}")
+
+    actions = torch.full((num_nodes,), lengths[0], dtype=torch.int64, device=device)
+    order = torch.argsort(priority, descending=True)
+    full_count = int(round(float(args.graph_eager_full_ratio) * num_nodes))
+    mid_count = int(round(float(args.graph_eager_mid_ratio) * num_nodes))
+    full_count = max(0, min(full_count, num_nodes))
+    mid_count = max(0, min(mid_count, num_nodes - full_count))
+    actions[order[:full_count]] = full_action
+    if len(lengths) >= 2:
+        actions[order[full_count : full_count + mid_count]] = lengths[-1]
+    return actions
+
+
+def assemble_graph_eager_token_embeddings(actions, full_embs, token_embs):
+    mixed = full_embs.clone()
+    for length, embs in token_embs.items():
+        mask = actions == int(length)
+        if bool(mask.any()):
+            mixed[mask] = embs[mask]
+    return mixed
+
+
+def summarize_graph_eager_token_policy(actions, errors_by_action, lengths, args):
+    total = max(1, int(actions.numel()))
+    rates = {"full": float((actions == -1).float().mean().item())}
+    cost = rates["full"] * graph_eager_token_cost(-1, args)
+    selected_err = torch.zeros(total, dtype=torch.float32, device=actions.device)
+    selected_err[actions == -1] = errors_by_action[-1][actions == -1]
+    for length in lengths:
+        mask = actions == int(length)
+        rate = float(mask.float().mean().item())
+        rates[int(length)] = rate
+        cost += rate * graph_eager_token_cost(int(length), args)
+        selected_err[mask] = errors_by_action[int(length)][mask]
+    return {
+        "rates": rates,
+        "cost": float(cost),
+        "avg_err": float(selected_err.mean().item()),
+    }
+
+
+def pearson_corr(x, y):
+    x = x.to(dtype=torch.float32).view(-1)
+    y = y.to(dtype=torch.float32).view(-1)
+    if x.numel() <= 1:
+        return float("nan")
+    x = x - x.mean()
+    y = y - y.mean()
+    denom = torch.sqrt((x * x).sum() * (y * y).sum()).clamp(min=1e-12)
+    return float(((x * y).sum() / denom).item())
+
+
+def spearman_corr(x, y):
+    return pearson_corr(rank01(x, descending=False), rank01(y, descending=False))
+
+
+def binary_auc(score, label):
+    score = score.to(dtype=torch.float32).view(-1)
+    label = label.to(dtype=torch.bool).view(-1)
+    pos = int(label.sum().item())
+    neg = int(label.numel() - pos)
+    if pos == 0 or neg == 0:
+        return float("nan")
+    order = torch.argsort(score, descending=False)
+    ranks = torch.empty_like(score, dtype=torch.float32)
+    ranks[order] = torch.arange(1, int(score.numel()) + 1, device=score.device, dtype=torch.float32)
+    pos_rank_sum = ranks[label].sum()
+    auc = (pos_rank_sum - pos * (pos + 1) / 2.0) / float(pos * neg)
+    return float(auc.item())
+
+
+def build_graph_eager_text_features(ds_key, num_nodes, device):
+    try:
+        texts = load_raw_texts(ds_key)
+    except Exception:
+        texts = [""] * int(num_nodes)
+    if len(texts) != int(num_nodes):
+        texts = list(texts[: int(num_nodes)]) + [""] * max(0, int(num_nodes) - len(texts))
+    word_counts = torch.tensor(
+        [len(str(text).split()) for text in texts],
+        dtype=torch.float32,
+        device=device,
+    )
+    char_counts = torch.tensor(
+        [len(str(text)) for text in texts],
+        dtype=torch.float32,
+        device=device,
+    )
+    return word_counts, char_counts
+
+
+def build_graph_eager_predictor_features(ds_key, scores, num_nodes, device):
+    word_counts, char_counts = build_graph_eager_text_features(ds_key, num_nodes, device)
+    prop = scores["propagation_q"].to(dtype=torch.float32)
+    context = scores["graph_context_q"].to(dtype=torch.float32)
+    low_unique = scores["low_degree_unique_q"].to(dtype=torch.float32)
+    rarity = scores["rarity_q"].to(dtype=torch.float32)
+    similar = torch.log1p(scores["similar_count"].to(dtype=torch.float32))
+    tser = scores["sensitivity_q"].to(dtype=torch.float32)
+    word_rank = rank01(word_counts, descending=False)
+    char_rank = rank01(char_counts, descending=False)
+    features = torch.stack(
+        [
+            prop / 15.0,
+            context / 15.0,
+            low_unique / 15.0,
+            rarity / 15.0,
+            similar / similar.max().clamp(min=1.0),
+            tser / tser.max().clamp(min=1.0),
+            word_rank,
+            char_rank,
+            (context / 15.0) * word_rank,
+            (prop / 15.0) * word_rank,
+        ],
+        dim=1,
+    )
+    return features
+
+
+def fit_graph_eager_damage_predictor(ds_key, scores, data, target, args, seed, device):
+    num_nodes = int(data.num_nodes)
+    features = build_graph_eager_predictor_features(ds_key, scores, num_nodes, device)
+    eligible = (data.train_mask | data.val_mask).to(device=device, dtype=torch.bool)
+    if int(eligible.sum().item()) == 0:
+        eligible = torch.ones(num_nodes, dtype=torch.bool, device=device)
+    candidate_idx = eligible.nonzero(as_tuple=False).view(-1)
+    sample_count = min(int(args.graph_eager_predictor_calib_samples), int(candidate_idx.numel()))
+    generator = torch.Generator(device="cpu")
+    generator.manual_seed(int(seed) + 811)
+    perm = torch.randperm(int(candidate_idx.numel()), generator=generator, device="cpu")[:sample_count].to(device=device)
+    calib_idx = candidate_idx[perm]
+
+    x_cal = features[calib_idx]
+    y_cal = target[calib_idx].to(dtype=torch.float32)
+    mean = x_cal.mean(dim=0, keepdim=True)
+    std = x_cal.std(dim=0, keepdim=True).clamp(min=1e-6)
+    x_all = (features - mean) / std
+    x_cal = x_all[calib_idx]
+    ones_cal = torch.ones(x_cal.size(0), 1, dtype=x_cal.dtype, device=device)
+    x_design = torch.cat([ones_cal, x_cal], dim=1)
+    ridge = float(args.graph_eager_predictor_ridge)
+    eye = torch.eye(x_design.size(1), dtype=x_design.dtype, device=device)
+    eye[0, 0] = 0.0
+    xtx = x_design.t().matmul(x_design) + ridge * eye
+    xty = x_design.t().matmul(y_cal.view(-1, 1))
+    try:
+        coef = torch.linalg.solve(xtx, xty).view(-1)
+    except RuntimeError:
+        coef = torch.linalg.lstsq(xtx, xty).solution.view(-1)
+    ones_all = torch.ones(x_all.size(0), 1, dtype=x_all.dtype, device=device)
+    pred = torch.cat([ones_all, x_all], dim=1).matmul(coef).to(dtype=torch.float32)
+    return pred, {
+        "calib_samples": int(sample_count),
+        "train_rho": spearman_corr(pred[calib_idx], y_cal),
+        "all_rho": spearman_corr(pred, target),
     }
 
 
@@ -1561,6 +1845,330 @@ def run_partial_encoder_experiment(args):
             log_important(f"{'=' * 72}\n")
 
 
+def run_graph_eager_token_experiment(args):
+    target_datasets = args.datasets if args.datasets else ["cora"]
+    log_dir = os.path.join("output", "graph_eager_token")
+    os.makedirs(log_dir, exist_ok=True)
+
+    for ds_key in target_datasets:
+        if ds_key not in DATASET_CONFIGS:
+            continue
+
+        dataset_log_dir = os.path.join(log_dir, ds_key)
+        os.makedirs(dataset_log_dir, exist_ok=True)
+        log_path = build_log_path(dataset_log_dir, ds_key, args)
+        lengths = sorted(int(length) for length in args.graph_eager_token_lengths)
+        configs = build_graph_eager_token_policy_configs(args, lengths)
+
+        results = {
+            name: {
+                "acc": [],
+                "drop": [],
+                "avg_err": [],
+                "cost": [],
+                "full": [],
+                **{f"S{length}": [] for length in lengths},
+            }
+            for name, _policy in configs
+        }
+        results["baseline"] = []
+
+        with open(log_path, "w", encoding="utf-8") as summary_file:
+            def log_important(msg):
+                print(msg)
+                summary_file.write(msg + "\n")
+                summary_file.flush()
+
+            log_important(f"\n{'=' * 72}")
+            log_important(f"Running Graph-Eager Token Routing on {ds_key.upper()}")
+            log_important(f"{'=' * 72}")
+            log_important(
+                "[GraphEagerCost] "
+                f"model={args.real_quant_model_name} | reference={args.graph_eager_reference_tag} "
+                f"| full={args.graph_eager_full_tag} | token_prefix={args.graph_eager_token_tag_prefix} "
+                f"| lengths={lengths} | full_length={args.graph_eager_full_length} "
+                f"| full_ratio={args.graph_eager_full_ratio:.2f} "
+                f"| mid_ratio={args.graph_eager_mid_ratio:.2f} "
+                f"| cost_scale={args.graph_eager_cost_scale:.2f} "
+                f"| attn_weight={args.graph_eager_attn_weight:.2f} "
+                f"| ffn_weight={args.graph_eager_ffn_weight:.2f}"
+            )
+
+            seeds = [int(args.seed) + run_idx for run_idx in range(args.runs)]
+            for run_idx, seed in enumerate(seeds):
+                log_important(f"\n--- Run {run_idx + 1}/{args.runs} (Seed {seed}) ---")
+                run_args = make_run_args(args, seed)
+                _conf, data, verify_features, device = load_run_state(ds_key, run_args, seed)
+                pools = load_graph_eager_token_pools(ds_key, run_args, data, device, log_important)
+
+                data.x = pools["reference"]
+                model, base_acc, ref_embs, ref_logits = train_baseline_model(data, run_args, device)
+                results["baseline"].append(base_acc)
+                log_important(f"[Baseline:{run_args.graph_eager_reference_tag}] Acc: {base_acc:.4f}")
+
+                model.eval()
+                with torch.no_grad():
+                    full_embs = model.encoder(pools["full"])
+                    token_embs = {
+                        length: model.encoder(token_pool)
+                        for length, token_pool in pools["token"].items()
+                    }
+
+                scores = build_real_quant_scores(verify_features, data, run_args, device)
+                errors_by_action = {-1: embedding_error(ref_embs, full_embs)}
+                for length, embs in token_embs.items():
+                    errors_by_action[int(length)] = embedding_error(ref_embs, embs)
+
+                ref_pred = ref_logits.argmax(dim=1)
+                ref_margin = node_logit_margin(ref_logits)
+                proxy_items = [
+                    ("Degree", scores["propagation_q"]),
+                    ("Context", scores["graph_context_q"]),
+                    ("LowUnique", scores["low_degree_unique_q"]),
+                    ("TSER", scores["sensitivity_q"]),
+                ]
+                corr_lines = []
+                margin_drop_by_length = {}
+                for length in lengths:
+                    with torch.no_grad():
+                        token_logits = forward_gnn_logits(model, data, token_embs[int(length)])
+                    token_pred = token_logits.argmax(dim=1)
+                    token_margin = node_logit_margin(token_logits)
+                    margin_drop = (ref_margin - token_margin).clamp(min=0.0)
+                    margin_drop_by_length[int(length)] = margin_drop
+                    flip = token_pred != ref_pred
+                    err = errors_by_action[int(length)]
+                    proxy_text = []
+                    for proxy_name, proxy_score in proxy_items:
+                        proxy_text.append(
+                            f"{proxy_name}:rho_err={spearman_corr(proxy_score, err):.3f},"
+                            f"rho_margin={spearman_corr(proxy_score, margin_drop):.3f},"
+                            f"auc_flip={binary_auc(proxy_score, flip):.3f}"
+                        )
+                    corr_lines.append(f"S{length} " + " | ".join(proxy_text))
+
+                log_important(
+                    "[GraphEagerScore] "
+                    f"prop_mean={scores['propagation_q'].float().mean().item():.1f} | "
+                    f"context_mean={scores['graph_context_q'].float().mean().item():.1f} | "
+                    f"low_unique_mean={scores['low_degree_unique_q'].float().mean().item():.1f} | "
+                    f"tser_mean={scores['sensitivity_q'].float().mean().item():.1f}"
+                )
+                err_parts = [
+                    f"Full={errors_by_action[-1].mean().item():.5f}",
+                    *[
+                        f"S{length}={errors_by_action[int(length)].mean().item():.5f}"
+                        for length in lengths
+                    ],
+                ]
+                log_important("[GraphEagerError] " + " | ".join(err_parts))
+                for corr_line in corr_lines:
+                    log_important("[GraphEagerCorr] " + corr_line)
+
+                shortest_length = int(lengths[0])
+                oracle_priority = errors_by_action[shortest_length] if lengths else errors_by_action[-1]
+                if run_args.graph_eager_predictor_target == "margin":
+                    predictor_target = margin_drop_by_length[shortest_length]
+                else:
+                    predictor_target = oracle_priority
+                predictor_priority, predictor_info = fit_graph_eager_damage_predictor(
+                    ds_key,
+                    scores,
+                    data,
+                    predictor_target,
+                    run_args,
+                    seed,
+                    device,
+                )
+                log_important(
+                    "[GraphEagerPredictor] "
+                    f"target={run_args.graph_eager_predictor_target} | "
+                    f"calib={predictor_info['calib_samples']} | "
+                    f"rho_train={predictor_info['train_rho']:.3f} | "
+                    f"rho_all={predictor_info['all_rho']:.3f}"
+                )
+
+                for name, policy in configs:
+                    actions = select_graph_eager_token_actions(
+                        policy,
+                        scores,
+                        run_args,
+                        int(data.num_nodes),
+                        lengths,
+                        seed,
+                        device,
+                        oracle_priority=oracle_priority,
+                        predictor_priority=predictor_priority,
+                    )
+                    mixed_embs = assemble_graph_eager_token_embeddings(actions, full_embs, token_embs)
+                    acc = evaluate_gnn_embeddings(model, data, mixed_embs)
+                    drop = base_acc - acc
+                    stats = summarize_graph_eager_token_policy(
+                        actions,
+                        errors_by_action,
+                        lengths,
+                        run_args,
+                    )
+
+                    results[name]["acc"].append(acc)
+                    results[name]["drop"].append(drop)
+                    results[name]["avg_err"].append(stats["avg_err"])
+                    results[name]["cost"].append(stats["cost"])
+                    results[name]["full"].append(stats["rates"]["full"])
+                    for length in lengths:
+                        results[name][f"S{length}"].append(stats["rates"][int(length)])
+
+                    token_rate_text = " | ".join(
+                        f"S{length}={stats['rates'][int(length)]:.1%}"
+                        for length in lengths
+                    )
+                    log_important(
+                        f"[{name}] Full={stats['rates']['full']:.1%} | {token_rate_text} "
+                        f"| Cost={stats['cost']:.3f} | Acc={acc:.4f} "
+                        f"| Drop={drop:.2%} | AvgErr={stats['avg_err']:.5f}"
+                    )
+
+            log_important(f"\n{'=' * 72}")
+            log_important(f"FINAL GRAPH-EAGER TOKEN SUMMARY ({args.runs} Runs) | {ds_key.upper()}")
+            log_important(f"{'=' * 72}")
+            base_mean = float(np.mean(results["baseline"]))
+            log_important(f"Baseline Acc: {base_mean:.4f}")
+            token_headers = [f"S{length} %" for length in lengths]
+            log_important("-" * 132)
+            log_important(
+                f"{'Config':<24} | {'Full %':<8} | "
+                + " | ".join(f"{header:<8}" for header in token_headers)
+                + f" | {'Cost':<8} | {'Acc':<10} | {'Drop %':<10} | {'AvgErr':<10}"
+            )
+            log_important("-" * 132)
+            for name, _policy in configs:
+                full_rate = float(np.mean(results[name]["full"]))
+                token_rate_values = [float(np.mean(results[name][f"S{length}"])) for length in lengths]
+                cost = float(np.mean(results[name]["cost"]))
+                acc = float(np.mean(results[name]["acc"]))
+                drop = float(np.mean(results[name]["drop"]))
+                avg_err = float(np.mean(results[name]["avg_err"]))
+                log_important(
+                    f"{name:<24} | {full_rate:<8.1%} | "
+                    + " | ".join(f"{rate:<8.1%}" for rate in token_rate_values)
+                    + f" | {cost:<8.3f} | {acc:<10.4f} | {drop:<10.2%} | {avg_err:<10.5f}"
+                )
+            log_important(f"{'=' * 72}\n")
+
+
+def run_token_compaction_experiment(args):
+    target_datasets = args.datasets if args.datasets else ["cora"]
+    log_dir = os.path.join("output", "token_compaction")
+    os.makedirs(log_dir, exist_ok=True)
+
+    for ds_key in target_datasets:
+        if ds_key not in DATASET_CONFIGS:
+            continue
+
+        dataset_log_dir = os.path.join(log_dir, ds_key)
+        os.makedirs(dataset_log_dir, exist_ok=True)
+        log_path = build_log_path(dataset_log_dir, ds_key, args)
+        tags = [str(tag) for tag in args.token_compaction_tags]
+        if args.token_compaction_names is None:
+            names = [tag.replace("W4A8_", "") for tag in tags]
+        else:
+            names = [str(name) for name in args.token_compaction_names]
+
+        configs = [("FullW4A8", {"tag": str(args.token_compaction_full_tag), "kind": "full"})]
+        configs.extend((name, {"tag": tag, "kind": "compact"}) for name, tag in zip(names, tags))
+
+        results = {
+            name: {"acc": [], "drop": [], "avg_err": [], "cost": []}
+            for name, _policy in configs
+        }
+        results["baseline"] = []
+
+        with open(log_path, "w", encoding="utf-8") as summary_file:
+            def log_important(msg):
+                print(msg)
+                summary_file.write(msg + "\n")
+                summary_file.flush()
+
+            log_important(f"\n{'=' * 72}")
+            log_important(f"Running Token/Chunk Compaction Validation on {ds_key.upper()}")
+            log_important(f"{'=' * 72}")
+            log_important(
+                "[TokenCompaction] "
+                f"model={args.real_quant_model_name} | reference={args.token_compaction_reference_tag} "
+                f"| full={args.token_compaction_full_tag} | length={args.token_compaction_length} "
+                f"| tags={', '.join(tags)}"
+            )
+
+            seeds = [int(args.seed) + run_idx for run_idx in range(args.runs)]
+            for run_idx, seed in enumerate(seeds):
+                log_important(f"\n--- Run {run_idx + 1}/{args.runs} (Seed {seed}) ---")
+                run_args = make_run_args(args, seed)
+                _conf, data, _verify_features, device = load_run_state(ds_key, run_args, seed)
+
+                ref_path = default_pool_path(ds_key, run_args.real_quant_model_name, run_args.token_compaction_reference_tag)
+                paths = {
+                    name: default_pool_path(ds_key, run_args.real_quant_model_name, policy["tag"])
+                    for name, policy in configs
+                }
+                missing = [path for path in [ref_path, *paths.values()] if not os.path.exists(path)]
+                if missing:
+                    msg = "\n".join(f"  - {path}" for path in missing)
+                    raise FileNotFoundError(
+                        "Token compaction pools are missing:\n"
+                        f"{msg}\n"
+                        "Generate them with generate_real_quant_pools --text_compaction_strategy ..."
+                    )
+
+                reference = load_tensor_pool(ref_path, device)
+                pool_by_name = {name: load_tensor_pool(path, device) for name, path in paths.items()}
+                data.x = reference
+                model, base_acc, ref_embs, _ref_logits = train_baseline_model(data, run_args, device)
+                results["baseline"].append(base_acc)
+                log_important(f"[Baseline:{run_args.token_compaction_reference_tag}] Acc: {base_acc:.4f}")
+                log_important("[TokenCompactionPools] reference=" + ref_path)
+                for name, path in paths.items():
+                    log_important(f"  {name}: {path}")
+
+                model.eval()
+                for name, policy in configs:
+                    with torch.no_grad():
+                        embs = model.encoder(pool_by_name[name])
+                    acc = evaluate_gnn_embeddings(model, data, embs)
+                    drop = base_acc - acc
+                    err = embedding_error(ref_embs, embs)
+                    if policy["kind"] == "full":
+                        cost = graph_eager_token_cost(-1, run_args)
+                    else:
+                        cost = graph_eager_token_cost(int(run_args.token_compaction_length), run_args)
+
+                    results[name]["acc"].append(acc)
+                    results[name]["drop"].append(drop)
+                    results[name]["avg_err"].append(float(err.mean().item()))
+                    results[name]["cost"].append(cost)
+                    log_important(
+                        f"[{name}] Cost={cost:.3f} | Acc={acc:.4f} | "
+                        f"Drop={drop:.2%} | AvgErr={err.mean().item():.5f}"
+                    )
+
+            log_important(f"\n{'=' * 72}")
+            log_important(f"FINAL TOKEN COMPACTION SUMMARY ({args.runs} Runs) | {ds_key.upper()}")
+            log_important(f"{'=' * 72}")
+            log_important(f"Baseline Acc: {float(np.mean(results['baseline'])):.4f}")
+            log_important("-" * 82)
+            log_important(f"{'Config':<22} | {'Cost':<8} | {'Acc':<10} | {'Drop %':<10} | {'AvgErr':<10}")
+            log_important("-" * 82)
+            for name, _policy in configs:
+                cost = float(np.mean(results[name]["cost"]))
+                acc = float(np.mean(results[name]["acc"]))
+                drop = float(np.mean(results[name]["drop"]))
+                avg_err = float(np.mean(results[name]["avg_err"]))
+                log_important(
+                    f"{name:<22} | {cost:<8.3f} | {acc:<10.4f} | "
+                    f"{drop:<10.2%} | {avg_err:<10.5f}"
+                )
+            log_important(f"{'=' * 72}\n")
+
+
 def run_real_quant_ablation(args):
     target_datasets = args.datasets if args.datasets else ["cora"]
     log_dir = os.path.join("output", "graph_simhash")
@@ -1991,6 +2599,10 @@ def run_adaptive_simulation(args):
         return run_residual_reuse_experiment(args)
     if args.experiment_suite == "partial_encoder":
         return run_partial_encoder_experiment(args)
+    if args.experiment_suite == "graph_eager_token":
+        return run_graph_eager_token_experiment(args)
+    if args.experiment_suite == "token_compaction":
+        return run_token_compaction_experiment(args)
 
     target_datasets = args.datasets if args.datasets else ["cora"]
     log_dir = os.path.join("output", "graph_simhash")

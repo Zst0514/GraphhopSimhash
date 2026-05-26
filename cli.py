@@ -23,10 +23,13 @@ def build_parser():
             "reuse_real_quant",
             "residual_reuse",
             "partial_encoder",
+            "graph_eager_token",
+            "token_compaction",
         ],
         help=(
             "Run one config, score/quant ablations, real quantization, joint reuse+real-quantization, "
-            "residual reuse validation, or partial encoder routing."
+            "residual reuse validation, partial encoder routing, graph-eager token routing, "
+            "or token compaction validation."
         ),
     )
     parser.add_argument(
@@ -489,6 +492,108 @@ def build_parser():
         help="Cascade policy ratio routed to the second-deepest partial layer. The remaining nodes use the shallowest layer.",
     )
     parser.add_argument(
+        "--graph_eager_reference_tag",
+        type=str,
+        default="W4A16",
+        help="Reference full-sequence embedding tag for graph-eager token routing.",
+    )
+    parser.add_argument(
+        "--graph_eager_full_tag",
+        type=str,
+        default="W4A8",
+        help="Full-sequence W4A8 embedding tag for graph-eager token routing.",
+    )
+    parser.add_argument(
+        "--graph_eager_token_tag_prefix",
+        type=str,
+        default="W4A8_S",
+        help="Prefix for shortened-token pools, e.g. W4A8_S128/W4A8_S256.",
+    )
+    parser.add_argument(
+        "--graph_eager_token_lengths",
+        type=int,
+        nargs="+",
+        default=[128, 256],
+        help="Shortened token budgets to load for graph-eager routing.",
+    )
+    parser.add_argument(
+        "--graph_eager_full_length",
+        type=int,
+        default=512,
+        help="Full token length used by the graph-eager token cost model.",
+    )
+    parser.add_argument(
+        "--graph_eager_cost_scale",
+        type=float,
+        default=0.50,
+        help="Cost of full-sequence W4A8 relative to full FP encoder cost.",
+    )
+    parser.add_argument(
+        "--graph_eager_attn_weight",
+        type=float,
+        default=0.35,
+        help="Attention fraction in the token-length cost model.",
+    )
+    parser.add_argument(
+        "--graph_eager_ffn_weight",
+        type=float,
+        default=0.65,
+        help="FFN/projection fraction in the token-length cost model.",
+    )
+    parser.add_argument(
+        "--graph_eager_full_ratio",
+        type=float,
+        default=0.20,
+        help="Ratio routed to full-sequence W4A8 in graph-eager budget policies.",
+    )
+    parser.add_argument(
+        "--graph_eager_mid_ratio",
+        type=float,
+        default=0.30,
+        help="Ratio routed to the largest shortened-token pool. The rest use the shortest pool.",
+    )
+    parser.add_argument(
+        "--graph_eager_predictor_calib_samples",
+        type=int,
+        default=512,
+        help="Calibration nodes used to fit the graph-eager damage predictor.",
+    )
+    parser.add_argument(
+        "--graph_eager_predictor_ridge",
+        type=float,
+        default=1e-2,
+        help="Ridge regularization for the graph-eager linear predictor.",
+    )
+    parser.add_argument(
+        "--graph_eager_predictor_target",
+        type=str,
+        default="embedding",
+        choices=["embedding", "margin"],
+        help="Predict shortened-token embedding damage or downstream logit margin damage.",
+    )
+    parser.add_argument("--token_compaction_reference_tag", type=str, default="W4A16")
+    parser.add_argument("--token_compaction_full_tag", type=str, default="W4A8")
+    parser.add_argument(
+        "--token_compaction_tags",
+        type=str,
+        nargs="+",
+        default=["W4A8_S128", "W4A8_S128_RANDOM", "W4A8_S128_TFIDF", "W4A8_S128_GRAPHCTX"],
+        help="Embedding tags to compare for fixed-budget token/chunk compaction.",
+    )
+    parser.add_argument(
+        "--token_compaction_names",
+        type=str,
+        nargs="+",
+        default=None,
+        help="Optional display names matching --token_compaction_tags.",
+    )
+    parser.add_argument(
+        "--token_compaction_length",
+        type=int,
+        default=128,
+        help="Token budget length used for cost reporting in token_compaction.",
+    )
+    parser.add_argument(
         "--disable_real_quant_autogen",
         action="store_true",
         help="For reuse_real_quant, use existing real-quant pools instead of regenerating and overwriting them.",
@@ -795,6 +900,36 @@ def validate_args(parser, args):
             "--partial_encoder_full_ratio + --partial_encoder_deep_ratio + "
             "--partial_encoder_mid_ratio must be <= 1"
         )
+    if not args.graph_eager_token_lengths:
+        parser.error("--graph_eager_token_lengths must contain at least one length")
+    if any(length <= 0 for length in args.graph_eager_token_lengths):
+        parser.error("--graph_eager_token_lengths must be positive")
+    if args.graph_eager_full_length <= 0:
+        parser.error("--graph_eager_full_length must be positive")
+    if max(args.graph_eager_token_lengths) >= args.graph_eager_full_length:
+        parser.error("--graph_eager_token_lengths must be smaller than --graph_eager_full_length")
+    if args.graph_eager_cost_scale <= 0:
+        parser.error("--graph_eager_cost_scale must be positive")
+    if args.graph_eager_attn_weight < 0 or args.graph_eager_ffn_weight < 0:
+        parser.error("--graph_eager_attn_weight and --graph_eager_ffn_weight must be non-negative")
+    if args.graph_eager_attn_weight + args.graph_eager_ffn_weight <= 0:
+        parser.error("--graph_eager_attn_weight + --graph_eager_ffn_weight must be positive")
+    if not (0.0 <= args.graph_eager_full_ratio <= 1.0):
+        parser.error("--graph_eager_full_ratio must be in [0, 1]")
+    if not (0.0 <= args.graph_eager_mid_ratio <= 1.0):
+        parser.error("--graph_eager_mid_ratio must be in [0, 1]")
+    if args.graph_eager_full_ratio + args.graph_eager_mid_ratio > 1.0:
+        parser.error("--graph_eager_full_ratio + --graph_eager_mid_ratio must be <= 1")
+    if args.graph_eager_predictor_calib_samples <= 0:
+        parser.error("--graph_eager_predictor_calib_samples must be positive")
+    if args.graph_eager_predictor_ridge < 0:
+        parser.error("--graph_eager_predictor_ridge must be non-negative")
+    if not args.token_compaction_tags:
+        parser.error("--token_compaction_tags must contain at least one tag")
+    if args.token_compaction_names is not None and len(args.token_compaction_names) != len(args.token_compaction_tags):
+        parser.error("--token_compaction_names must match --token_compaction_tags length")
+    if args.token_compaction_length <= 0:
+        parser.error("--token_compaction_length must be positive")
     if args.controller_seed is not None and args.controller_seed < 0:
         parser.error("--controller_seed must be >= 0")
     if args.hash_head_seed is not None and args.hash_head_seed < 0:

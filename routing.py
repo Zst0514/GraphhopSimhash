@@ -292,6 +292,31 @@ def build_log_path(dataset_log_dir, ds_key, args):
             f"_dr{float(getattr(args, 'partial_encoder_deep_ratio', 0.3)):.2f}"
             f"_mr{float(getattr(args, 'partial_encoder_mid_ratio', 0.3)):.2f}"
         ).replace(".", "p")
+    if getattr(args, "experiment_suite", None) == "graph_eager_token":
+        lengths_tag = "-".join(
+            str(int(length)) for length in getattr(args, "graph_eager_token_lengths", [128, 256])
+        )
+        config_tag += (
+            f"_get{getattr(args, 'real_quant_model_name', 'model')}"
+            f"_{getattr(args, 'graph_eager_reference_tag', 'ref')}"
+            f"_{getattr(args, 'graph_eager_full_tag', 'full')}"
+            f"_{getattr(args, 'graph_eager_token_tag_prefix', 'tok')}"
+            f"_S{lengths_tag}"
+            f"_fl{int(getattr(args, 'graph_eager_full_length', 512))}"
+            f"_fr{float(getattr(args, 'graph_eager_full_ratio', 0.2)):.2f}"
+            f"_mr{float(getattr(args, 'graph_eager_mid_ratio', 0.3)):.2f}"
+        ).replace(".", "p")
+    if getattr(args, "experiment_suite", None) == "token_compaction":
+        tags = "-".join(str(tag) for tag in getattr(args, "token_compaction_tags", ["W4A8_S128"]))
+        if len(tags) > 64:
+            tags = tags[:64]
+        config_tag += (
+            f"_tc{getattr(args, 'real_quant_model_name', 'model')}"
+            f"_{getattr(args, 'token_compaction_reference_tag', 'ref')}"
+            f"_{getattr(args, 'token_compaction_full_tag', 'full')}"
+            f"_L{int(getattr(args, 'token_compaction_length', 128))}"
+            f"_{tags}"
+        ).replace(".", "p").replace("/", "_")
     if not bool(getattr(args, "disable_score_gate", True)):
         config_tag += (
             f"_sg{int(getattr(args, 'score_reuse_threshold', 45))}"

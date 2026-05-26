@@ -418,6 +418,8 @@ Oracle
 显示每个策略下节点进入各路径的比例：
 
 ```text
+S128 / S256 / Full
+或
 L4 / L8 / L16 / Full
 ```
 
@@ -432,37 +434,204 @@ Activation traffic
 
 ---
 
-## 9. 推荐执行顺序
+## 9. 当前最小验证结果
+
+### 9.0 Token/chunk compaction 的第一轮结论
+
+当前已经实现 `token_compaction` 实验，用来回答：
+
+```text
+如果每个节点都只给 128-token budget，应该选哪些 token/chunks?
+```
+
+运行 Cora/LLaMA-7B：
+
+```bash
+bash GraphhopSimhash/run_cora_llama_token_compaction.sh
+```
+
+运行 PubMed/ST：
+
+```bash
+bash GraphhopSimhash/run_pubmed_st_token_compaction.sh
+```
+
+Cora/LLaMA-7B 结果：
+
+```text
+Baseline Acc: 0.7308
+
+Config            Cost   Acc     Drop    AvgErr
+FullW4A8          0.500  0.7340 -0.32%  0.00265
+Prefix128         0.092  0.7260  0.48%  0.01451
+Random128         0.092  0.7102  2.06%  0.04323
+TFIDF128          0.092  0.7063  2.45%  0.04924
+GraphContext128   0.092  0.7237  0.71%  0.04064
+```
+
+PubMed/ST 结果：
+
+```text
+Baseline Acc: 0.7710
+
+Config                  Cost   Acc     Drop    AvgErr
+FullW4A8                0.500  0.7711 -0.02%  0.00034
+Prefix128               0.092  0.7729 -0.19%  0.02407
+Random128               0.092  0.7129  5.81%  0.07392
+TFIDF128                0.092  0.6757  9.53%  0.09203
+GraphContext128         0.092  0.7182  5.28%  0.06113
+HeadTail128             0.092  0.7639  0.71%  0.02793
+PrefixTFIDF128          0.092  0.7513  1.97%  0.02655
+PrefixGraphContext128   0.092  0.7588  1.22%  0.02583
+```
+
+结论：
+
+```text
+1. 当前数据格式下，title / abstract 前部信息非常强，Prefix128 是强 baseline。
+2. 朴素 TF-IDF 或 graph-context chunk 重排会破坏 title/front-loaded 信息，效果明显变差。
+3. 即使强制保留 prefix，再用 TF-IDF/GraphContext 补充尾部 chunk，也没有超过 Prefix128。
+4. 因此 Step 1 暂时不支持“手写 graph-guided chunk selection 优于 prefix”。
+```
+
+这不否定 token-budget lite encoder。它说明更有希望的方向是：
+
+```text
+node-level budget routing:
+    哪些节点用 S128/S256/Full
+
+learned damage predictor:
+    用少量 calibration 学短序列损伤，而不是手写 chunk scorer
+```
+
+### 9.1 Naive partial-depth 不够
+
+Cora/LLaMA-7B 上直接取中间层 hidden state 做 mean-pooling，效果很差：
+
+```text
+FullW4A8        Cost=0.500 | Drop=-0.32%
+AllL4           Cost=0.062 | Drop=58.06%
+AllL8           Cost=0.125 | Drop=56.61%
+AllL16          Cost=0.250 | Drop=38.88%
+DegreeCascade   Cost=0.225 | Drop=27.56%
+TSERCascade     Cost=0.225 | Drop=30.53%
+EarlyExitBudget Cost=0.225 | Drop=24.11%
+```
+
+结论：early-depth path 不能直接把第 K 层当 final embedding，需要 projection/alignment 或重新训练 early-exit head。
+
+### 9.2 Graph-Eager token budget 更有希望
+
+当前已实现 `graph_eager_token` 实验：预生成不同 token 长度的 W4A8 embedding pool，然后用图风险 proxy 决定哪些节点走短序列、哪些节点走完整序列。
+
+生成 Cora/LLaMA-7B token pool：
+
+```bash
+bash GraphhopSimhash/run_cora_llama_graph_eager_token.sh
+```
+
+该脚本会生成：
+
+```text
+cache_data/cora_llama2_7b_oracle_W4A8_S128.pt
+cache_data/cora_llama2_7b_oracle_W4A8_S256.pt
+```
+
+然后运行：
+
+```bash
+python -m GraphhopSimhash \
+  --datasets cora \
+  --runs 3 \
+  --experiment_suite graph_eager_token \
+  --real_quant_model_name llama2_7b \
+  --graph_eager_reference_tag W4A16 \
+  --graph_eager_full_tag W4A8 \
+  --graph_eager_token_tag_prefix W4A8_S \
+  --graph_eager_token_lengths 128 256 \
+  --graph_eager_full_length 512 \
+  --graph_eager_full_ratio 0.20 \
+  --graph_eager_mid_ratio 0.30
+```
+
+Cora/LLaMA-7B 初步结果：
+
+```text
+Baseline Acc: 0.7310
+
+Config              Full   S128   S256   Cost   Acc     Drop    AvgErr
+FullW4A8            100%   0%     0%     0.500  0.7339 -0.29%  0.00265
+AllS128             0%     100%   0%     0.092  0.7258  0.52%  0.01451
+AllS256             0%     0%     100%   0.206  0.7315 -0.05%  0.00420
+RandomTokenBudget   20%    50%    30%    0.208  0.7278  0.32%  0.00907
+DegreeTokenBudget   20%    50%    30%    0.208  0.7290  0.19%  0.00874
+TSERTokenBudget     20%    50%    30%    0.208  0.7292  0.18%  0.00893
+ContextTokenBudget  20%    50%    30%    0.208  0.7282  0.27%  0.00909
+PredictorTokenBudget 20%    50%    30%    0.208  0.7308  0.02%  0.00455
+OracleDamageBudget  20%    50%    30%    0.208  0.7328 -0.18%  0.00349
+```
+
+这说明两个点：
+
+```text
+1. Token-budget lite encoder 比 naive partial-depth 更可行。
+2. 单个 hand-crafted proxy 只小幅优于 random，但少量校准的 PredictorTokenBudget 明显更接近 oracle。
+```
+
+当前实现的 PredictorTokenBudget 用少量 calibration nodes 拟合一个线性 damage predictor：
+
+```text
+input:
+    degree / graph_context / low_unique / rarity / similar_count / text length
+
+target:
+    S128 相对 reference 的 embedding damage
+
+output:
+    node -> S128 / S256 / Full
+```
+
+当前 Cora/LLaMA-7B 上，512 个校准点即可得到：
+
+```text
+rho_all ~= 0.42 - 0.52
+PredictorTokenBudget Drop=0.02% at Cost=0.208
+```
+
+这就是把 FACT-style eager prediction 迁移到 graph-text encoder 场景的核心验证路径。
+
+---
+
+## 10. 推荐执行顺序
 
 ```text
 Step 1:
-    Cora/LLaMA partial-depth L4/L8/L16
+    Cora/LLaMA token budget S128/S256/Full
 
 Step 2:
-    partial damage analysis:
+    graph-eager damage analysis:
     proxy correlation + flip AUC
 
 Step 3:
-    DegreeCascade vs TSERCascade vs EarlyExitBudget vs Oracle
+    Random/Degree/TSER/Context/Oracle token routing
 
 Step 4:
-    PubMed/ST partial-depth 快速复现
+    训练小型 Graph-Eager predictor，替换固定 proxy
 
 Step 5:
     PubMed/LLaMA 或 Arxiv/LLaMA 扩展验证
 
 Step 6:
-    token pruning S128/S256
+    partial-depth 加 projection/alignment 后再复测
 
 Step 7:
     FFN gating r25/r50/r75
 ```
 
-优先保证 Step 1-3 成立。它们已经足够支撑：
+优先保证 Step 1-4 成立。它们更适合支撑：
 
 ```text
-graph-aware adaptive depth execution on W4A8 encoder array
+graph-aware eager execution on W4A8 encoder array
 ```
 
-如果 token pruning / FFN gating 后续结果一般，也可以作为扩展或 future work。
-
+如果 partial-depth / FFN gating 后续结果一般，也可以作为扩展或 future work。

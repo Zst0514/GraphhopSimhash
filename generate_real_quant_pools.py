@@ -2,7 +2,10 @@ import argparse
 import gc
 import json
 import os
+import random
+import re
 import sys
+from collections import Counter
 from contextlib import contextmanager
 
 import torch
@@ -58,6 +61,160 @@ AWQ_SUPPORTED_CLASS_NAMES = {
     "BloomForCausalLM",
     "DistilBertModel",
 }
+
+WORD_RE = re.compile(r"[A-Za-z][A-Za-z0-9_+-]*|\d+")
+
+
+def simple_words(text):
+    return [match.group(0).lower() for match in WORD_RE.finditer(str(text))]
+
+
+def split_word_chunks(text, chunk_words):
+    words = str(text).split()
+    chunk_words = max(1, int(chunk_words))
+    if not words:
+        return [""]
+    return [" ".join(words[start : start + chunk_words]) for start in range(0, len(words), chunk_words)]
+
+
+def load_text_selection_edge_index(dataset):
+    ds_key = str(dataset).lower()
+    candidates = []
+    if ds_key == "cora":
+        candidates.append(os.path.join("data", "single_graph", "Cora", "cora.pt"))
+    elif ds_key == "pubmed":
+        candidates.append(os.path.join("data", "single_graph", "Pubmed", "pubmed.pt"))
+    for path in candidates:
+        if os.path.exists(path):
+            data = torch.load(path, map_location="cpu")
+            edge_index = getattr(data, "edge_index", None)
+            if edge_index is not None:
+                return edge_index.cpu()
+    return None
+
+
+def build_idf(texts):
+    df = Counter()
+    for text in texts:
+        df.update(set(simple_words(text)))
+    total = max(1, len(texts))
+    return {
+        word: float(torch.log(torch.tensor((1.0 + total) / (1.0 + count))).item() + 1.0)
+        for word, count in df.items()
+    }
+
+
+def chunk_token_len(tokenizer, chunk):
+    ids = tokenizer(str(chunk), add_special_tokens=False).get("input_ids", [])
+    return max(1, len(ids))
+
+
+def select_chunks_by_score(chunks, scores, tokenizer, token_budget, mandatory_indices=None):
+    token_budget = max(1, int(token_budget))
+    mandatory_indices = sorted(set(int(idx) for idx in (mandatory_indices or []) if 0 <= int(idx) < len(chunks)))
+    selected = []
+    used_tokens = 0
+    for idx in mandatory_indices:
+        chunk = chunks[idx]
+        length = chunk_token_len(tokenizer, chunk)
+        if selected and used_tokens + length > token_budget:
+            continue
+        selected.append((idx, chunk))
+        used_tokens += length
+        if used_tokens >= token_budget:
+            break
+
+    order = sorted(range(len(chunks)), key=lambda idx: (float(scores[idx]), -idx), reverse=True)
+    for idx in order:
+        if idx in mandatory_indices:
+            continue
+        chunk = chunks[idx]
+        length = chunk_token_len(tokenizer, chunk)
+        if selected and used_tokens + length > token_budget:
+            continue
+        selected.append((idx, chunk))
+        used_tokens += length
+        if used_tokens >= token_budget:
+            break
+    if not selected and chunks:
+        selected.append((order[0], chunks[order[0]]))
+    selected.sort(key=lambda pair: pair[0])
+    return " ".join(chunk for _idx, chunk in selected)
+
+
+def compact_texts_for_encoder(texts, dataset, tokenizer, args):
+    strategy = str(getattr(args, "text_compaction_strategy", "prefix")).lower()
+    if strategy == "prefix":
+        return texts
+
+    token_budget = int(getattr(args, "text_compaction_budget", 0) or args.max_length)
+    chunk_words = int(getattr(args, "text_compaction_chunk_words", 32))
+    seed = int(getattr(args, "text_compaction_seed", 42))
+    chunks_by_node = [split_word_chunks(text, chunk_words) for text in texts]
+    idf = build_idf(texts) if strategy in ("tfidf", "graph_context", "prefix_tfidf", "prefix_graph_context") else {}
+
+    neighbor_vocab = None
+    if strategy in ("graph_context", "prefix_graph_context"):
+        edge_index = load_text_selection_edge_index(dataset)
+        if edge_index is not None:
+            node_words = [set(simple_words(text)) for text in texts]
+            neighbor_vocab = [set() for _ in range(len(texts))]
+            row, col = edge_index
+            for src, dst in zip(row.tolist(), col.tolist()):
+                if 0 <= src < len(texts) and 0 <= dst < len(texts):
+                    neighbor_vocab[src].update(node_words[dst])
+                    neighbor_vocab[dst].update(node_words[src])
+
+    compacted = []
+    iterator = tqdm(range(len(texts)), desc=f"TextCompaction:{strategy}")
+    for node_idx in iterator:
+        chunks = chunks_by_node[node_idx]
+        mandatory = []
+        if strategy == "random":
+            rng = random.Random(seed + node_idx)
+            scores = [rng.random() for _chunk in chunks]
+        elif strategy == "head_tail":
+            scores = [-min(idx, len(chunks) - 1 - idx) for idx in range(len(chunks))]
+        elif strategy in ("tfidf", "prefix_tfidf"):
+            if strategy == "prefix_tfidf":
+                mandatory = [0]
+            scores = [
+                sum(idf.get(word, 1.0) for word in simple_words(chunk)) / max(1, len(simple_words(chunk)))
+                for chunk in chunks
+            ]
+        elif strategy in ("graph_context", "prefix_graph_context") and neighbor_vocab is not None:
+            if strategy == "prefix_graph_context":
+                mandatory = [0]
+            vocab = neighbor_vocab[node_idx]
+            scores = []
+            for chunk in chunks:
+                words = simple_words(chunk)
+                if not words:
+                    scores.append(0.0)
+                    continue
+                overlap = sum(idf.get(word, 1.0) for word in words if word in vocab)
+                saliency = 0.25 * sum(idf.get(word, 1.0) for word in words) / max(1, len(words))
+                scores.append(overlap / max(1, len(words)) + saliency)
+        elif strategy in ("graph_context", "prefix_graph_context"):
+            if strategy == "prefix_graph_context":
+                mandatory = [0]
+            # Fallback to TF-IDF if graph context is unavailable.
+            scores = [
+                sum(idf.get(word, 1.0) for word in simple_words(chunk)) / max(1, len(simple_words(chunk)))
+                for chunk in chunks
+            ]
+        else:
+            raise ValueError(
+                f"Unknown text_compaction_strategy={strategy}. "
+                "Use prefix/random/tfidf/graph_context."
+            )
+        compacted.append(select_chunks_by_score(chunks, scores, tokenizer, token_budget, mandatory_indices=mandatory))
+
+    print(
+        f"[TextCompaction] strategy={strategy} | token_budget={token_budget} "
+        f"| chunk_words={chunk_words} | seed={seed}"
+    )
+    return compacted
 
 
 def mean_pool(last_hidden_state, attention_mask):
@@ -844,14 +1001,15 @@ def generate_pool(dataset, llm_name, config_name, args):
                 clip_config_by_name=act_clip_config,
             )
 
+    encode_texts_input = compact_texts_for_encoder(texts, dataset, tokenizer, args)
     layer_indices = [layer_idx for layer_idx, _layer_tag, _out_path in pending_targets]
     if layer_indices == [-1]:
-        embs_by_layer = {-1: encode_texts(model, tokenizer, texts, batch_size, args.max_length, device)}
+        embs_by_layer = {-1: encode_texts(model, tokenizer, encode_texts_input, batch_size, args.max_length, device)}
     else:
         embs_by_layer = encode_texts(
             model,
             tokenizer,
-            texts,
+            encode_texts_input,
             batch_size,
             args.max_length,
             device,
@@ -880,6 +1038,29 @@ def main():
     parser.add_argument("--configs", nargs="+", default=["fp16", "int8", "int4"], choices=sorted(CONFIG_SPECS.keys()))
     parser.add_argument("--batch_size", type=int, default=64)
     parser.add_argument("--max_length", type=int, default=500)
+    parser.add_argument(
+        "--text_compaction_strategy",
+        type=str,
+        default="prefix",
+        choices=[
+            "prefix",
+            "random",
+            "tfidf",
+            "graph_context",
+            "head_tail",
+            "prefix_tfidf",
+            "prefix_graph_context",
+        ],
+        help="Select/compact text before encoding. prefix keeps the original max_length truncation.",
+    )
+    parser.add_argument(
+        "--text_compaction_budget",
+        type=int,
+        default=0,
+        help="Token budget for text compaction. Defaults to --max_length when <= 0.",
+    )
+    parser.add_argument("--text_compaction_chunk_words", type=int, default=32)
+    parser.add_argument("--text_compaction_seed", type=int, default=42)
     parser.add_argument("--cache_dir", type=str, default="cache_data/model")
     parser.add_argument("--output_path", type=str, default=None, help="Only valid with one dataset and one config.")
     parser.add_argument(
@@ -971,6 +1152,12 @@ def main():
         parser.error("--batch_size must be positive")
     if args.max_length <= 0:
         parser.error("--max_length must be positive")
+    if args.text_compaction_budget < 0:
+        parser.error("--text_compaction_budget must be >= 0")
+    if args.text_compaction_chunk_words <= 0:
+        parser.error("--text_compaction_chunk_words must be positive")
+    if args.text_compaction_seed < 0:
+        parser.error("--text_compaction_seed must be >= 0")
     if args.w4a_calib_samples < 0:
         parser.error("--w4a_calib_samples must be >= 0")
     if args.w4a_awq_grid <= 0:
