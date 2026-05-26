@@ -8,28 +8,37 @@
 
 ## 文档结构
 
-当前 root 目录只保留主线文档：
+当前 root 目录只保留 `README.md`，其他项目文档统一放在 `docs/`：
 
 ```text
 README.md
     项目入口、常用命令、文档索引。
 
-SCORE_DEFINITIONS.md
+docs/SCORE_DEFINITIONS.md
     TSER reuse gate 的分数定义，以及量化路由中 Degree/TSER 的边界说明。
 
-AWQ_W4A8_W4A4_GENERATION.md
+docs/AWQ_W4A8_W4A4_GENERATION.md
     当前 AWQ-based W4A16/W4A8/W4A4 embedding pool 生成方式。
 
-RESIDUAL_CORRECTED_REUSE.md
+docs/RESIDUAL_CORRECTED_REUSE.md
     fuzzy hash hit 上的 low-rank residual correction 机制与实验结果。
 
-FFN_CHANNEL_GATING.md
+docs/FFN_CHANNEL_GATING.md
     面向 W4A8 encoder NPU 的 FFN channel gating 原型。
 
-HIERARCHICAL_ENCODER_NPU_DESIGN.md
+docs/HIERARCHICAL_ENCODER_NPU_DESIGN.md
     当前完整系统思路：P0/P1/P2/P3 分层 encoder 执行路径、硬件落点和端到端结果。
 
-量化+哈希命令.md
+docs/NPU_ADAPTIVE_ENCODER_EXPERIMENTS.md
+    面向 graph-aware encoder NPU 的实验设计与验证路线。
+
+docs/LLM_ACCELERATOR_SURVEY.md
+    Encoder / 通用 Transformer / NPU 加速器综述。
+
+docs/LLM_DECODER_ACCELERATOR_SURVEY.md
+    Decoder / serving / KV-cache 相关加速器综述。
+
+docs/量化+哈希命令.md
     reuse_real_quant 联合实验命令与结果解释。
 ```
 
@@ -87,9 +96,9 @@ P3: full W4A8 encoder
 对应完整说明见：
 
 ```text
-HIERARCHICAL_ENCODER_NPU_DESIGN.md
-RESIDUAL_CORRECTED_REUSE.md
-FFN_CHANNEL_GATING.md
+docs/HIERARCHICAL_ENCODER_NPU_DESIGN.md
+docs/RESIDUAL_CORRECTED_REUSE.md
+docs/FFN_CHANNEL_GATING.md
 ```
 
 ## 1. 生成 AWQ Embedding Pool
