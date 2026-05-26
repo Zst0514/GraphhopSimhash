@@ -29,6 +29,9 @@ docs/FFN_CHANNEL_GATING.md
 docs/HIERARCHICAL_ENCODER_NPU_DESIGN.md
     当前完整系统思路：P0/P1/P2/P3 分层 encoder 执行路径、硬件落点和端到端结果。
 
+docs/GRAPH_AWARE_ENCODER_NPU_PROPOSAL.md
+    基于当前实验和加速器综述提炼的 Graph-aware encoder NPU 方案建议。
+
 docs/NPU_ADAPTIVE_ENCODER_EXPERIMENTS.md
     面向 graph-aware encoder NPU 的实验设计与验证路线。
 
