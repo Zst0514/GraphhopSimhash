@@ -15,13 +15,11 @@ RUNS="${RUNS:-3}"
 THRESHOLDS=(${THRESHOLDS:-20 30 45 60})
 BIASES=(${BIASES:-0 1 2})
 
-echo "[PubMedResidualBias] $(date '+%F %T') waiting for existing LLaMA pool generation / partial-pool jobs..."
+echo "[PubMedResidualBias] $(date '+%F %T') waiting for existing LLaMA pool generation jobs..."
 while true; do
   existing_jobs="$(
-    {
-      pgrep -af "python -m GraphhopSimhash.generate_real_quant_pools" || true
-      pgrep -af "run_cora_llama_partial_pools" || true
-    } | rg -v "run_pubmed_st_residual_bias_sweep|pgrep -af" || true
+    pgrep -af "python -m GraphhopSimhash.generate_real_quant_pools" \
+      | rg -v "run_pubmed_st_residual_bias_sweep|pgrep -af" || true
   )"
   if [[ -z "${existing_jobs}" ]]; then
     break

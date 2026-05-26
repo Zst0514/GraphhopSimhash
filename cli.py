@@ -22,14 +22,12 @@ def build_parser():
             "real_quant_ablation",
             "reuse_real_quant",
             "residual_reuse",
-            "partial_encoder",
             "graph_eager_token",
             "token_compaction",
         ],
         help=(
             "Run one config, score/quant ablations, real quantization, joint reuse+real-quantization, "
-            "residual reuse validation, partial encoder routing, graph-eager token routing, "
-            "or token compaction validation."
+            "residual reuse validation, graph-eager token routing, or token compaction validation."
         ),
     )
     parser.add_argument(
@@ -437,61 +435,6 @@ def build_parser():
     parser.add_argument("--real_quant_int8_path", type=str, default=None)
     parser.add_argument("--real_quant_int4_path", type=str, default=None)
     parser.add_argument(
-        "--partial_encoder_reference_tag",
-        type=str,
-        default="W4A16",
-        help="Reference full-depth embedding tag used to train/evaluate the partial encoder experiment.",
-    )
-    parser.add_argument(
-        "--partial_encoder_full_tag",
-        type=str,
-        default="W4A8",
-        help="Full-depth W4A8 embedding tag used as the high-cost path in partial encoder routing.",
-    )
-    parser.add_argument(
-        "--partial_encoder_partial_tag",
-        type=str,
-        default="W4A8",
-        help="Base tag for partial-depth pools, e.g. W4A8 loads W4A8_L4/W4A8_L8/...",
-    )
-    parser.add_argument(
-        "--partial_encoder_layers",
-        type=int,
-        nargs="+",
-        default=[4, 8, 16],
-        help="Partial-depth layer counts to load, e.g. 4 8 16 for LLaMA or 1 2 3 for ST.",
-    )
-    parser.add_argument(
-        "--partial_encoder_total_layers",
-        type=int,
-        default=-1,
-        help="Total encoder layers for the cost model. If negative, inferred from --real_quant_model_name.",
-    )
-    parser.add_argument(
-        "--partial_encoder_cost_scale",
-        type=float,
-        default=0.50,
-        help="Cost of a full-depth W4A8 encoder relative to FP full-depth cost.",
-    )
-    parser.add_argument(
-        "--partial_encoder_full_ratio",
-        type=float,
-        default=0.20,
-        help="Cascade policy ratio routed to full-depth W4A8.",
-    )
-    parser.add_argument(
-        "--partial_encoder_deep_ratio",
-        type=float,
-        default=0.30,
-        help="Cascade policy ratio routed to the deepest partial layer.",
-    )
-    parser.add_argument(
-        "--partial_encoder_mid_ratio",
-        type=float,
-        default=0.30,
-        help="Cascade policy ratio routed to the second-deepest partial layer. The remaining nodes use the shallowest layer.",
-    )
-    parser.add_argument(
         "--graph_eager_reference_tag",
         type=str,
         default="W4A16",
@@ -876,30 +819,6 @@ def validate_args(parser, args):
         parser.error("--real_quant_int8_ratio must be in [0, 1]")
     if args.real_quant_fp_ratio + args.real_quant_int8_ratio > 1.0:
         parser.error("--real_quant_fp_ratio + --real_quant_int8_ratio must be <= 1")
-    if not args.partial_encoder_layers:
-        parser.error("--partial_encoder_layers must contain at least one layer")
-    if any(layer <= 0 for layer in args.partial_encoder_layers):
-        parser.error("--partial_encoder_layers must be positive")
-    if args.partial_encoder_total_layers == 0 or args.partial_encoder_total_layers < -1:
-        parser.error("--partial_encoder_total_layers must be -1 or a positive integer")
-    if args.partial_encoder_cost_scale <= 0:
-        parser.error("--partial_encoder_cost_scale must be positive")
-    if not (0.0 <= args.partial_encoder_full_ratio <= 1.0):
-        parser.error("--partial_encoder_full_ratio must be in [0, 1]")
-    if not (0.0 <= args.partial_encoder_deep_ratio <= 1.0):
-        parser.error("--partial_encoder_deep_ratio must be in [0, 1]")
-    if not (0.0 <= args.partial_encoder_mid_ratio <= 1.0):
-        parser.error("--partial_encoder_mid_ratio must be in [0, 1]")
-    if (
-        args.partial_encoder_full_ratio
-        + args.partial_encoder_deep_ratio
-        + args.partial_encoder_mid_ratio
-        > 1.0
-    ):
-        parser.error(
-            "--partial_encoder_full_ratio + --partial_encoder_deep_ratio + "
-            "--partial_encoder_mid_ratio must be <= 1"
-        )
     if not args.graph_eager_token_lengths:
         parser.error("--graph_eager_token_lengths must contain at least one length")
     if any(length <= 0 for length in args.graph_eager_token_lengths):

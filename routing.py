@@ -280,18 +280,6 @@ def build_log_path(dataset_log_dir, ds_key, args):
             f"_{embedding_tag}"
             f"_mx{int(getattr(args, 'residual_max_train_pairs', 4096))}"
         ).replace(".", "p").replace("-", "m")
-    if getattr(args, "experiment_suite", None) == "partial_encoder":
-        layers_tag = "-".join(str(int(layer)) for layer in getattr(args, "partial_encoder_layers", [4, 8, 16]))
-        config_tag += (
-            f"_pe{getattr(args, 'real_quant_model_name', 'model')}"
-            f"_{getattr(args, 'partial_encoder_reference_tag', 'ref')}"
-            f"_{getattr(args, 'partial_encoder_full_tag', 'full')}"
-            f"_{getattr(args, 'partial_encoder_partial_tag', 'partial')}"
-            f"_L{layers_tag}"
-            f"_fr{float(getattr(args, 'partial_encoder_full_ratio', 0.2)):.2f}"
-            f"_dr{float(getattr(args, 'partial_encoder_deep_ratio', 0.3)):.2f}"
-            f"_mr{float(getattr(args, 'partial_encoder_mid_ratio', 0.3)):.2f}"
-        ).replace(".", "p")
     if getattr(args, "experiment_suite", None) == "graph_eager_token":
         lengths_tag = "-".join(
             str(int(length)) for length in getattr(args, "graph_eager_token_lengths", [128, 256])

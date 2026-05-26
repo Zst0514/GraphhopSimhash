@@ -500,7 +500,7 @@ def load_model_and_tokenizer(llm_name, config_name, cache_dir, force_cpu=False):
 
     kwargs = {
         "cache_dir": cache_dir,
-        "output_hidden_states": True,
+        "output_hidden_states": False,
     }
     if spec["model_class"] == "llama" and not force_cpu:
         kwargs["device_map"] = "auto"
@@ -527,49 +527,22 @@ def load_model_and_tokenizer(llm_name, config_name, cache_dir, force_cpu=False):
     return model, tokenizer, tag
 
 
-def _resolve_hidden_state_index(layer_idx, num_hidden_states):
-    idx = int(layer_idx)
-    if idx < 0:
-        idx = int(num_hidden_states) + idx
-    if idx < 0 or idx >= int(num_hidden_states):
-        raise ValueError(
-            f"Requested hidden-state layer {layer_idx}, but model returned "
-            f"{num_hidden_states} hidden states. Valid positive partial-depth "
-            f"indices are 1..{num_hidden_states - 1}; -1 selects the final layer."
-        )
-    return idx
-
-
-def _forward_hidden_states(model, tokens, layer_indices=None):
-    return_single = layer_indices is None
+def _forward_last_hidden_state(model, tokens):
     target_model = model
     if hasattr(model, "model") and model.__class__.__name__.endswith("ForCausalLM"):
         target_model = model.model
     outputs = target_model(
         input_ids=tokens["input_ids"],
         attention_mask=tokens["attention_mask"],
-        output_hidden_states=True,
+        output_hidden_states=False,
         return_dict=True,
     )
-    if layer_indices is None:
-        layer_indices = [-1]
-    hidden_by_layer = {}
-    for layer_idx in layer_indices:
-        resolved_idx = _resolve_hidden_state_index(layer_idx, len(outputs.hidden_states))
-        hidden = outputs.hidden_states[resolved_idx].to(torch.float32)
-        hidden_by_layer[int(layer_idx)] = torch.nan_to_num(hidden, nan=0.0, posinf=0.0, neginf=0.0)
-    if return_single:
-        return hidden_by_layer[-1]
-    return hidden_by_layer
+    hidden = outputs.last_hidden_state.to(torch.float32)
+    return torch.nan_to_num(hidden, nan=0.0, posinf=0.0, neginf=0.0)
 
 
-def encode_texts(model, tokenizer, texts, batch_size, max_length, device, layer_indices=None):
-    return_single = layer_indices is None
-    if layer_indices is None:
-        layer_indices = [-1]
-    layer_indices = [int(layer_idx) for layer_idx in layer_indices]
-
-    all_embs = {layer_idx: [] for layer_idx in layer_indices}
+def encode_texts(model, tokenizer, texts, batch_size, max_length, device):
+    all_embs = []
     with torch.no_grad():
         for start in tqdm(range(0, len(texts), batch_size), desc="Encoding"):
             batch = texts[start : start + batch_size]
@@ -581,15 +554,10 @@ def encode_texts(model, tokenizer, texts, batch_size, max_length, device, layer_
                 max_length=max_length,
             )
             tokens = {key: value.to(device) for key, value in tokens.items()}
-            hidden_by_layer = _forward_hidden_states(model, tokens, layer_indices=layer_indices)
-            for layer_idx, hidden in hidden_by_layer.items():
-                embs = mean_pool(hidden, tokens["attention_mask"]).cpu()
-                all_embs[layer_idx].append(embs)
-
-    pooled = {layer_idx: torch.cat(chunks, dim=0) for layer_idx, chunks in all_embs.items()}
-    if return_single:
-        return pooled[-1]
-    return pooled
+            hidden = _forward_last_hidden_state(model, tokens)
+            embs = mean_pool(hidden, tokens["attention_mask"]).cpu()
+            all_embs.append(embs)
+    return torch.cat(all_embs, dim=0)
 
 
 def ensure_awq_project_on_path():
@@ -906,37 +874,15 @@ def generate_pool(dataset, llm_name, config_name, args):
     _canonical, config_spec = resolve_config(config_name)
     tag = config_spec["tag"]
 
-    partial_layers = [int(layer_idx) for layer_idx in getattr(args, "partial_layers", []) or []]
-    if partial_layers:
-        layer_targets = []
-        for layer_idx in partial_layers:
-            layer_tag = f"{tag}_L{layer_idx}"
-            out_path = args.output_path
-            if out_path is None:
-                out_path = os.path.join("cache_data", f"{dataset}_{llm_name}_oracle_{layer_tag}.pt")
-            layer_targets.append((layer_idx, layer_tag, out_path))
-    else:
-        out_path = args.output_path
-        if out_path is None:
-            out_path = os.path.join("cache_data", f"{dataset}_{llm_name}_oracle_{tag}.pt")
-        layer_targets = [(-1, tag, out_path)]
-
-    pending_targets = [
-        (layer_idx, layer_tag, out_path)
-        for layer_idx, layer_tag, out_path in layer_targets
-        if args.overwrite or not os.path.exists(out_path)
-    ]
-    if not pending_targets:
-        for _layer_idx, _layer_tag, out_path in layer_targets:
-            print(f"[Skip] {out_path} already exists. Use --overwrite to regenerate.")
+    out_path = args.output_path
+    if out_path is None:
+        out_path = os.path.join("cache_data", f"{dataset}_{llm_name}_oracle_{tag}.pt")
+    if os.path.exists(out_path) and not args.overwrite:
+        print(f"[Skip] {out_path} already exists. Use --overwrite to regenerate.")
         return
 
     print(f"\n{'=' * 72}")
-    if partial_layers:
-        layers_desc = ", ".join(f"L{layer_idx}" for layer_idx, _layer_tag, _out_path in pending_targets)
-        print(f"Generating {tag} partial-depth pools ({layers_desc}) | dataset={dataset} | llm={llm_name}")
-    else:
-        print(f"Generating {tag} pool | dataset={dataset} | llm={llm_name}")
+    print(f"Generating {tag} pool | dataset={dataset} | llm={llm_name}")
     print(f"{'=' * 72}")
     texts = load_raw_texts(dataset)
     batch_size = args.batch_size
@@ -1002,28 +948,12 @@ def generate_pool(dataset, llm_name, config_name, args):
             )
 
     encode_texts_input = compact_texts_for_encoder(texts, dataset, tokenizer, args)
-    layer_indices = [layer_idx for layer_idx, _layer_tag, _out_path in pending_targets]
-    if layer_indices == [-1]:
-        embs_by_layer = {-1: encode_texts(model, tokenizer, encode_texts_input, batch_size, args.max_length, device)}
-    else:
-        embs_by_layer = encode_texts(
-            model,
-            tokenizer,
-            encode_texts_input,
-            batch_size,
-            args.max_length,
-            device,
-            layer_indices=layer_indices,
-        )
+    embs = encode_texts(model, tokenizer, encode_texts_input, batch_size, args.max_length, device)
+    embs = maybe_align_output_embeddings(embs, dataset, llm_name, tag, config_spec, out_path, args)
 
-    for layer_idx, layer_tag, out_path in pending_targets:
-        embs = embs_by_layer[int(layer_idx)]
-        if int(layer_idx) == -1:
-            embs = maybe_align_output_embeddings(embs, dataset, llm_name, tag, config_spec, out_path, args)
-
-        os.makedirs(os.path.dirname(out_path) or ".", exist_ok=True)
-        torch.save(embs, out_path)
-        print(f"[Saved] {out_path} | tag={layer_tag} | shape={tuple(embs.shape)}")
+    os.makedirs(os.path.dirname(out_path) or ".", exist_ok=True)
+    torch.save(embs, out_path)
+    print(f"[Saved] {out_path} | shape={tuple(embs.shape)}")
 
     del model
     gc.collect()
@@ -1063,17 +993,6 @@ def main():
     parser.add_argument("--text_compaction_seed", type=int, default=42)
     parser.add_argument("--cache_dir", type=str, default="cache_data/model")
     parser.add_argument("--output_path", type=str, default=None, help="Only valid with one dataset and one config.")
-    parser.add_argument(
-        "--partial_layers",
-        nargs="+",
-        type=int,
-        default=None,
-        help=(
-            "Save mean-pooled hidden states after the requested Transformer layer counts. "
-            "For example, --partial_layers 4 8 16 writes tags like W4A8_L4/W4A8_L8/W4A8_L16. "
-            "Layer 0 is the token embedding state and is intentionally not accepted."
-        ),
-    )
     parser.add_argument("--w4a_calib_samples", type=int, default=64)
     parser.add_argument("--w4a_awq_grid", type=int, default=21)
     parser.add_argument(
@@ -1144,10 +1063,6 @@ def main():
 
     if args.output_path is not None and (len(args.datasets) != 1 or len(args.configs) != 1):
         parser.error("--output_path requires exactly one dataset and one config")
-    if args.output_path is not None and args.partial_layers is not None and len(args.partial_layers) != 1:
-        parser.error("--output_path with --partial_layers requires exactly one partial layer")
-    if args.partial_layers is not None and any(int(layer_idx) <= 0 for layer_idx in args.partial_layers):
-        parser.error("--partial_layers must contain positive layer counts; omit the flag for the final layer")
     if args.batch_size <= 0:
         parser.error("--batch_size must be positive")
     if args.max_length <= 0:
