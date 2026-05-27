@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
+ROOT_DIR="$(cd "${REPO_DIR}/.." && pwd)"
 PYTHON="${PYTHON:-/home/zhangshangtong/.conda/envs/OFA/bin/python}"
 
 cd "${ROOT_DIR}"

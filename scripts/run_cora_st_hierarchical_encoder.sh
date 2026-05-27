@@ -3,7 +3,11 @@ set -euo pipefail
 
 PYTHON_BIN="${PYTHON_BIN:-/home/zhangshangtong/.conda/envs/OFA/bin/python}"
 
-cd "$(dirname "$0")/.."
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
+ROOT_DIR="$(cd "${REPO_DIR}/.." && pwd)"
+
+cd "${ROOT_DIR}"
 
 "${PYTHON_BIN}" -m GraphhopSimhash \
   --datasets cora \

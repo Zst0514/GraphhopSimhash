@@ -82,6 +82,10 @@ activation_outlier_calibration.py
 
 features.py / projections.py
     cheap feature、hash feature、多头 learned hash projection。
+
+scripts/
+    所有项目级 `.sh` 入口脚本统一放在这里。运行示例：
+    `bash GraphhopSimhash/scripts/run_cora_tser_reuse_sweep.sh`
 ```
 
 ## 0. 当前系统总览
@@ -276,13 +280,13 @@ python -m GraphhopSimhash \
 Cora：
 
 ```bash
-RUNS=5 bash GraphhopSimhash/run_cora_tser_reuse_sweep.sh
+RUNS=5 bash GraphhopSimhash/scripts/run_cora_tser_reuse_sweep.sh
 ```
 
 PubMed：
 
 ```bash
-RUNS=5 bash GraphhopSimhash/run_pubmed_tser_reuse_sweep.sh
+RUNS=5 bash GraphhopSimhash/scripts/run_pubmed_tser_reuse_sweep.sh
 ```
 
 结果目录：

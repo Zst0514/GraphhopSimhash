@@ -177,13 +177,13 @@ array utilization
 运行 Cora/LLaMA-7B：
 
 ```bash
-bash GraphhopSimhash/run_cora_llama_token_compaction.sh
+bash GraphhopSimhash/scripts/run_cora_llama_token_compaction.sh
 ```
 
 运行 PubMed/ST：
 
 ```bash
-bash GraphhopSimhash/run_pubmed_st_token_compaction.sh
+bash GraphhopSimhash/scripts/run_pubmed_st_token_compaction.sh
 ```
 
 ### 6.1 Cora/LLaMA-7B
@@ -233,7 +233,7 @@ PrefixGraphContext128   0.092  0.7588  1.22%  0.02583
 生成 Cora/LLaMA-7B token pools 并运行评估：
 
 ```bash
-bash GraphhopSimhash/run_cora_llama_graph_eager_token.sh
+bash GraphhopSimhash/scripts/run_cora_llama_graph_eager_token.sh
 ```
 
 该脚本会生成：

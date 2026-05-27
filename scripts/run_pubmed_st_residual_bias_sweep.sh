@@ -1,9 +1,11 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-ROOT_DIR="/home/zhangshangtong/Transformer/OFA"
-REPO_DIR="${ROOT_DIR}/GraphhopSimhash"
-PYTHON_BIN="/home/zhangshangtong/.conda/envs/OFA/bin/python"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
+DEFAULT_ROOT_DIR="$(cd "${REPO_DIR}/.." && pwd)"
+ROOT_DIR="${ROOT_DIR:-${DEFAULT_ROOT_DIR}}"
+PYTHON_BIN="${PYTHON_BIN:-/home/zhangshangtong/.conda/envs/OFA/bin/python}"
 OUT_DIR="${ROOT_DIR}/output/residual_reuse/pubmed_st_bias_sweep"
 SUMMARY_TSV="${OUT_DIR}/summary.tsv"
 SUMMARY_MD="${OUT_DIR}/summary.md"
@@ -109,7 +111,7 @@ PY
   done
 done
 
-"${PYTHON_BIN}" - "${SUMMARY_TSV}" "${SUMMARY_MD}" "${REPO_DIR}/RESIDUAL_CORRECTED_REUSE.md" <<'PY'
+"${PYTHON_BIN}" - "${SUMMARY_TSV}" "${SUMMARY_MD}" "${REPO_DIR}/docs/RESIDUAL_CORRECTED_REUSE.md" <<'PY'
 import csv
 import subprocess
 import sys
@@ -118,6 +120,7 @@ from pathlib import Path
 summary_tsv = Path(sys.argv[1])
 summary_md = Path(sys.argv[2])
 doc_path = Path(sys.argv[3])
+repo_dir = doc_path.parent.parent
 
 rows = list(csv.DictReader(summary_tsv.open("r", encoding="utf-8"), delimiter="\t"))
 rows.sort(key=lambda r: (int(r["confidence_bias"]), int(r["threshold"])))
@@ -170,16 +173,20 @@ else:
         updated = doc.replace(marker, "\n\n" + block + "\n" + marker, 1)
 doc_path.write_text(updated, encoding="utf-8")
 
-subprocess.run(["git", "add", "RESIDUAL_CORRECTED_REUSE.md", "run_pubmed_st_residual_bias_sweep.sh"], cwd=doc_path.parent, check=True)
-diff_cached = subprocess.run(["git", "diff", "--cached", "--quiet"], cwd=doc_path.parent)
+subprocess.run(
+    ["git", "add", "docs/RESIDUAL_CORRECTED_REUSE.md", "scripts/run_pubmed_st_residual_bias_sweep.sh"],
+    cwd=repo_dir,
+    check=True,
+)
+diff_cached = subprocess.run(["git", "diff", "--cached", "--quiet"], cwd=repo_dir)
 if diff_cached.returncode != 0:
     subprocess.run(
         ["git", "commit", "-m", "docs: add pubmed residual confidence bias sweep"],
-        cwd=doc_path.parent,
+        cwd=repo_dir,
         check=True,
     )
-subprocess.run(["git", "pull", "--rebase", "--autostash", "origin", "main"], cwd=doc_path.parent, check=True)
-subprocess.run(["git", "push", "origin", "main"], cwd=doc_path.parent, check=True)
+subprocess.run(["git", "pull", "--rebase", "--autostash", "origin", "main"], cwd=repo_dir, check=True)
+subprocess.run(["git", "push", "origin", "main"], cwd=repo_dir, check=True)
 PY
 
 echo "[PubMedResidualBias] $(date '+%F %T') finished and pushed docs"

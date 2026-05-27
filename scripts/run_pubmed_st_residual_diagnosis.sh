@@ -1,8 +1,11 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-ROOT_DIR="/home/zhangshangtong/Transformer/OFA"
-PYTHON_BIN="/home/zhangshangtong/.conda/envs/OFA/bin/python"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
+DEFAULT_ROOT_DIR="$(cd "${REPO_DIR}/.." && pwd)"
+ROOT_DIR="${ROOT_DIR:-${DEFAULT_ROOT_DIR}}"
+PYTHON_BIN="${PYTHON_BIN:-/home/zhangshangtong/.conda/envs/OFA/bin/python}"
 OUT_DIR="${ROOT_DIR}/output/residual_reuse/pubmed_st_diagnosis"
 SUMMARY_TSV="${OUT_DIR}/summary.tsv"
 SUMMARY_TXT="${OUT_DIR}/summary_aligned.txt"

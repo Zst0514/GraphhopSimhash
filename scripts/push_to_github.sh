@@ -5,7 +5,10 @@ REPO_URL="${REPO_URL:-git@github-zst0514:Zst0514/GraphhopSimhash.git}"
 BRANCH="${BRANCH:-main}"
 COMMIT_MSG="${1:-Update GraphhopSimhash}"
 
-cd "$(dirname "$0")"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
+
+cd "${REPO_DIR}"
 
 echo "[GraphhopSimhash] Working directory: $(pwd)"
 echo "[GraphhopSimhash] Remote: ${REPO_URL}"

@@ -1,7 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-ROOT_DIR="${ROOT_DIR:-/home/zhangshangtong/Transformer/OFA}"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
+DEFAULT_ROOT_DIR="$(cd "${REPO_DIR}/.." && pwd)"
+ROOT_DIR="${ROOT_DIR:-${DEFAULT_ROOT_DIR}}"
 PYTHON_BIN="${PYTHON_BIN:-/home/zhangshangtong/.conda/envs/OFA/bin/python}"
 OUT_DIR="${OUT_DIR:-$ROOT_DIR/output/llama7b_precision_depth_budget_sweep}"
 

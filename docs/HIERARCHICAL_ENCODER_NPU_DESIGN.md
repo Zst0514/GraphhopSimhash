@@ -286,7 +286,7 @@ batch-level path scheduling
 当前 Cora/ST hierarchical encoder 脚本：
 
 ```bash
-bash GraphhopSimhash/run_cora_st_hierarchical_encoder.sh
+bash GraphhopSimhash/scripts/run_cora_st_hierarchical_encoder.sh
 ```
 
 默认设置：
@@ -388,13 +388,13 @@ python -m GraphhopSimhash.generate_real_quant_pools \
 运行 hierarchical encoder 验证：
 
 ```bash
-bash GraphhopSimhash/run_cora_st_hierarchical_encoder.sh
+bash GraphhopSimhash/scripts/run_cora_st_hierarchical_encoder.sh
 ```
 
 只看 reuse/residual，不混入 FFN gating：
 
 ```bash
-GATED_ROUTE_RATIO=0 bash GraphhopSimhash/run_cora_st_hierarchical_encoder.sh
+GATED_ROUTE_RATIO=0 bash GraphhopSimhash/scripts/run_cora_st_hierarchical_encoder.sh
 ```
 
 ## 7. Next Steps

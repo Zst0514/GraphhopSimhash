@@ -378,11 +378,11 @@ python -m GraphhopSimhash \
 Cora 参数扫：
 
 ```bash
-RUNS=5 bash GraphhopSimhash/run_cora_tser_reuse_sweep.sh
+RUNS=5 bash GraphhopSimhash/scripts/run_cora_tser_reuse_sweep.sh
 ```
 
 PubMed 参数扫：
 
 ```bash
-RUNS=5 bash GraphhopSimhash/run_pubmed_tser_reuse_sweep.sh
+RUNS=5 bash GraphhopSimhash/scripts/run_pubmed_tser_reuse_sweep.sh
 ```
