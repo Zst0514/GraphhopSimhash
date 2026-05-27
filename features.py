@@ -12,14 +12,27 @@ HASH_VIEW_PRESETS = {
 def _compute_neighbor_mean(features, edge_index):
     num_nodes = features.size(0)
     row, col = edge_index
-    sym_row = torch.cat([row, col], dim=0)
-    sym_col = torch.cat([col, row], dim=0)
+    row = row.to(device=features.device, non_blocking=True)
+    col = col.to(device=features.device, non_blocking=True)
 
     neighbor_sum = torch.zeros_like(features)
-    neighbor_sum.index_add_(0, sym_row, features[sym_col])
+    feature_dim = max(1, int(features.size(1)))
+    # Avoid materializing features[sym_col] for large graph + LLM embeddings.
+    chunk_edges = max(1, min(int(row.numel()), 32_000_000 // feature_dim))
+
+    def add_direction(dst, src):
+        for start in range(0, int(dst.numel()), chunk_edges):
+            end = min(start + chunk_edges, int(dst.numel()))
+            dst_chunk = dst[start:end]
+            src_chunk = src[start:end]
+            neighbor_sum.index_add_(0, dst_chunk, features.index_select(0, src_chunk))
+
+    add_direction(row, col)
+    add_direction(col, row)
 
     total_degree = torch.zeros(num_nodes, device=features.device)
-    total_degree.index_add_(0, sym_row, torch.ones(sym_row.size(0), device=features.device))
+    total_degree.index_add_(0, row, torch.ones(row.size(0), device=features.device))
+    total_degree.index_add_(0, col, torch.ones(col.size(0), device=features.device))
 
     neighbor_mean = neighbor_sum / total_degree.clamp(min=1).unsqueeze(1)
     isolated_mask = total_degree == 0
