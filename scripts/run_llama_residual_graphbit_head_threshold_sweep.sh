@@ -67,7 +67,7 @@ run_case() {
   local done_path="${log_path}.done"
   mkdir -p "$log_dir"
 
-  if [[ -s "$done_path" ]]; then
+  if [[ -e "$done_path" ]]; then
     echo "[$(timestamp)] [Skip] dataset=${dataset} heads=${heads} T=${threshold} runs=${runs}"
     return
   fi
