@@ -28,12 +28,14 @@ def build_parser():
             "hierarchical_encoder",
             "precision_depth_ablation",
             "reuse_precision_depth",
+            "residual_precision_depth",
         ],
         help=(
             "Run one config, score/quant ablations, real quantization, joint reuse+real-quantization, "
             "residual reuse validation, graph-eager token routing, token compaction validation, "
             "FFN channel-gating validation, full hierarchical encoder validation, graph-conditioned "
-            "precision-depth routing, or hash reuse plus precision-depth routing."
+            "precision-depth routing, hash reuse plus precision-depth routing, or residual reuse plus "
+            "precision-depth routing."
         ),
     )
     parser.add_argument(

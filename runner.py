@@ -1808,6 +1808,79 @@ def apply_reuse_trace_to_embeddings(trace, selected_embs):
     return final_embs, hit_mask
 
 
+def build_active_residual_mask(trace, correction_mask, min_dist, device):
+    hit_mask = trace["hit_mask"].to(device=device, dtype=torch.bool)
+    source_ok = trace["source_ids"].to(device=device, dtype=torch.long) >= 0
+    active = hit_mask & source_ok & correction_mask.to(device=device, dtype=torch.bool)
+    if float(min_dist) > 0.0:
+        active = active & (
+            trace["best_dists"].to(device=device, dtype=torch.float32) >= float(min_dist)
+        )
+    return active
+
+
+def apply_residual_precision_depth_trace(trace, selected_raw, reference_raw, residual_raw, residual_mask):
+    """Compose exact reuse, residual fuzzy reuse, and precision-depth miss execution."""
+    final_raw = selected_raw.clone()
+    device = selected_raw.device
+    hit_mask = trace["hit_mask"].to(device=device, dtype=torch.bool)
+    source_ids = trace["source_ids"].to(device=device, dtype=torch.long)
+    source_ok = source_ids >= 0
+    residual_mask = residual_mask.to(device=device, dtype=torch.bool) & hit_mask & source_ok
+    direct_mask = hit_mask & source_ok & ~residual_mask
+    if bool(direct_mask.any()):
+        final_raw[direct_mask] = reference_raw[source_ids[direct_mask]]
+    if bool(residual_mask.any()):
+        final_raw[residual_mask] = residual_raw[residual_mask]
+    return final_raw, direct_mask, residual_mask, hit_mask
+
+
+def summarize_residual_precision_depth_execution(
+    actions,
+    trace,
+    residual_mask,
+    errors_by_bit,
+    bits,
+    args,
+    fp_embs,
+    final_embs,
+):
+    total = max(1, int(actions.numel()))
+    device = actions.device
+    hit_mask = trace["hit_mask"].to(device=device, dtype=torch.bool)
+    source_ok = trace["source_ids"].to(device=device, dtype=torch.long) >= 0
+    residual_mask = residual_mask.to(device=device, dtype=torch.bool) & hit_mask & source_ok
+    direct_mask = hit_mask & source_ok & ~residual_mask
+    miss_mask = ~hit_mask
+    ref_bit = int(args.precision_depth_reference_bits)
+    all_bits = [ref_bit, *sorted((int(bit) for bit in bits), reverse=True)]
+
+    selected_err = torch.zeros(total, dtype=torch.float32, device=device)
+    rates = {}
+    cost = float(residual_mask.float().mean().item()) * float(args.hierarchical_residual_cost)
+    for bit in all_bits:
+        mask = miss_mask & (actions == int(bit))
+        rate = float(mask.float().mean().item())
+        rates[int(bit)] = rate
+        cost += rate * precision_depth_cost(int(bit), args)
+        selected_err[mask] = errors_by_bit[int(bit)][mask]
+
+    final_err = (1.0 - F.cosine_similarity(fp_embs, final_embs, dim=1)).clamp(min=0.0)
+    miss_count = max(1, int(miss_mask.sum().item()))
+    return {
+        "reuse_num": int(hit_mask.sum().item()),
+        "reuse_den": total,
+        "reuse_rate": float(hit_mask.float().mean().item()),
+        "direct_rate": float(direct_mask.float().mean().item()),
+        "residual_rate": float(residual_mask.float().mean().item()),
+        "residual_num": int(residual_mask.sum().item()),
+        "rates": rates,
+        "cost": float(cost),
+        "miss_avg_selected_error": float(selected_err[miss_mask].sum().item() / miss_count),
+        "final_avg_error": float(final_err.mean().item()),
+    }
+
+
 def fit_precision_depth_damage_predictor(ds_key, scores, data, target, args, seed, device):
     original_samples = getattr(args, "graph_eager_predictor_calib_samples", None)
     original_ridge = getattr(args, "graph_eager_predictor_ridge", None)
@@ -2254,6 +2327,353 @@ def run_reuse_precision_depth_experiment(args):
                     + " | ".join(f"{rate:<8.1%}" for rate in rate_values)
                     + f" | {cost:<8.3f} | {acc:<10.4f} | {drop:<10.2%} | "
                     f"{final_err:<10.5f} | {reuse_frac:<15}"
+                )
+            log_important(f"{'=' * 72}\n")
+
+
+def run_residual_precision_depth_experiment(args):
+    target_datasets = args.datasets if args.datasets else ["cora"]
+    log_dir = os.path.join("output", "residual_precision_depth")
+    os.makedirs(log_dir, exist_ok=True)
+
+    for ds_key in target_datasets:
+        if ds_key not in DATASET_CONFIGS:
+            continue
+
+        dataset_log_dir = os.path.join(log_dir, ds_key)
+        os.makedirs(dataset_log_dir, exist_ok=True)
+        log_path = build_log_path(dataset_log_dir, ds_key, args)
+        bits = sorted(int(bit) for bit in args.precision_depth_bits)
+        ref_bit = int(args.precision_depth_reference_bits)
+        configs = build_precision_depth_policy_configs(args, bits)
+        depth_order = [ref_bit, *sorted(bits, reverse=True)]
+
+        results = {
+            name: {
+                "reuse": [],
+                "direct": [],
+                "residual": [],
+                "reuse_num": [],
+                "reuse_den": [],
+                "cost": [],
+                "acc": [],
+                "drop": [],
+                "final_err": [],
+                "miss_err": [],
+                "train_pairs": [],
+                "alpha": [],
+                **{f"P{bit}": [] for bit in depth_order},
+            }
+            for name, _policy in configs
+        }
+        results["baseline"] = []
+
+        with open(log_path, "w", encoding="utf-8") as summary_file:
+            def log_important(msg):
+                print(msg)
+                summary_file.write(msg + "\n")
+                summary_file.flush()
+
+            log_important(f"\n{'=' * 72}")
+            log_important(f"Running Residual Reuse + Graph-Bit Precision-Depth on {ds_key.upper()}")
+            log_important(f"{'=' * 72}")
+            log_important(
+                "[FullStack] Exact hit -> direct cache reuse | fuzzy hit -> residual correction | "
+                f"miss -> P{ref_bit}/" + "/".join(f"P{bit}" for bit in sorted(bits, reverse=True))
+            )
+            log_important(
+                "[PrecisionDepthCost] "
+                f"model={args.real_quant_model_name} | reference={args.precision_depth_reference_tag}/P{ref_bit} "
+                f"| tags={list(zip(args.precision_depth_tags, args.precision_depth_bits))} "
+                f"| high_ratio={args.precision_depth_high_ratio:.2f} "
+                f"| mid_ratio={args.precision_depth_mid_ratio:.2f} "
+                f"| low_ratio={args.precision_depth_low_ratio:.2f} "
+                f"| cost_scale={args.precision_depth_cost_scale:.2f} "
+                f"| fixed_cost={args.precision_depth_fixed_cost:.2f} "
+                f"| residual_cost={args.hierarchical_residual_cost:.4f}"
+            )
+
+            seeds = [int(args.seed) + run_idx for run_idx in range(args.runs)]
+            for run_idx, seed in enumerate(seeds):
+                log_important(f"\n--- Run {run_idx + 1}/{args.runs} (Seed {seed}) ---")
+                run_args = make_run_args(args, seed)
+                run_args.enable_quant_policy = False
+                _conf, data, verify_features, device = load_run_state(ds_key, run_args, seed)
+                pools = load_precision_depth_pools(ds_key, run_args, data, device, log_important)
+
+                reference_raw = pools["reference"]
+                depth_raw = {int(bit): pool for bit, pool in pools["depth"].items()}
+                data.x = reference_raw
+                model, base_acc, ref_embs, ref_logits = train_baseline_model(data, run_args, device)
+                results["baseline"].append(base_acc)
+                log_important(f"[Baseline:P{ref_bit}] Acc: {base_acc:.4f}")
+
+                model.eval()
+                with torch.no_grad():
+                    depth_embs = {
+                        int(bit): model.encoder(pool)
+                        for bit, pool in depth_raw.items()
+                    }
+
+                scores = build_real_quant_scores(verify_features, data, run_args, device)
+                errors_by_bit = {ref_bit: embedding_error(ref_embs, ref_embs)}
+                for bit, embs in depth_embs.items():
+                    errors_by_bit[int(bit)] = embedding_error(ref_embs, embs)
+                log_important(
+                    "[PrecisionDepthScore] "
+                    f"prop_mean={scores['propagation_q'].float().mean().item():.1f} | "
+                    f"context_mean={scores['graph_context_q'].float().mean().item():.1f} | "
+                    f"low_unique_mean={scores['low_degree_unique_q'].float().mean().item():.1f} | "
+                    f"tser_mean={scores['sensitivity_q'].float().mean().item():.1f}"
+                )
+                err_parts = [f"P{ref_bit}=0.00000"] + [
+                    f"P{bit}={errors_by_bit[int(bit)].mean().item():.5f}"
+                    for bit in sorted(bits, reverse=True)
+                ]
+                log_important("[PrecisionDepthError] " + " | ".join(err_parts))
+
+                route_bundle = build_route_bundle(
+                    verify_features,
+                    data,
+                    ref_embs,
+                    ref_logits,
+                    run_args,
+                    log_important,
+                    device,
+                )
+                controller = build_controller(
+                    data,
+                    verify_features,
+                    route_bundle,
+                    {"name": "FullStack", "overrides": {}},
+                    run_args,
+                    device,
+                )
+                direct_raw, trace_hits = controller.query_full_batch(
+                    route_bundle["hash_route_features"],
+                    verify_features,
+                    reference_raw,
+                )
+                trace = controller.last_query_trace
+                if run_args.residual_anchor_mode == "random":
+                    trace, direct_raw, anchor_info = replace_reuse_anchors_with_random(
+                        trace,
+                        direct_raw,
+                        reference_raw,
+                        verify_features,
+                        seed,
+                    )
+                else:
+                    anchor_info = {"randomized": 0}
+                trace_stats = controller.stats
+                hit_mask = trace["hit_mask"].to(device=device, dtype=torch.bool)
+                miss_mask = ~hit_mask
+                exact_mask = hit_mask & (
+                    torch.tensor([kind == "exact" for kind in trace["hit_kinds"]], device=device)
+                )
+                fuzzy_mask = hit_mask & (
+                    torch.tensor([kind == "fuzzy" for kind in trace["hit_kinds"]], device=device)
+                )
+                log_important(
+                    f"[ReuseTrace] Reuse={hit_mask.float().mean().item():.1%} "
+                    f"(exact={exact_mask.float().mean().item():.1%}, fuzzy={fuzzy_mask.float().mean().item():.1%}) "
+                    f"| miss={miss_mask.float().mean().item():.1%} "
+                    f"| reuse n/d={trace_stats['reuse']}/{trace_stats['reuse_denominator']} "
+                    f"| randomized={anchor_info['randomized']}"
+                )
+
+                correction_mask, correction_info = build_residual_correction_mask(
+                    trace,
+                    controller.risk_gate,
+                    run_args.residual_direct_threshold,
+                    device,
+                    min_route_hits=run_args.residual_min_route_hits,
+                    min_base_hits=run_args.residual_min_base_hits,
+                )
+                adapter, train_info = train_residual_adapter(
+                    target_embeddings=reference_raw,
+                    verify_features=verify_features,
+                    edge_index=data.edge_index,
+                    trace=trace,
+                    data=data,
+                    risk_scores=controller.node_risk_scores,
+                    rank=run_args.residual_rank,
+                    epochs=run_args.residual_epochs,
+                    lr=run_args.residual_lr,
+                    weight_decay=run_args.residual_weight_decay,
+                    residual_l2=run_args.residual_l2,
+                    train_split=run_args.residual_train_split,
+                    max_pairs=run_args.residual_max_train_pairs,
+                    correction_mask=correction_mask,
+                    min_dist=run_args.residual_min_dist,
+                )
+
+                if adapter is not None and float(run_args.residual_alpha) < 0.0:
+                    selected_alpha = float(run_args.residual_alpha_grid[0])
+                    selected_val_acc = -1.0
+                    for alpha in sorted(float(value) for value in run_args.residual_alpha_grid):
+                        candidate_raw, _candidate_info = apply_residual_adapter(
+                            direct_embeddings=direct_raw,
+                            target_embeddings=reference_raw,
+                            verify_features=verify_features,
+                            edge_index=data.edge_index,
+                            trace=trace,
+                            adapter=adapter,
+                            risk_scores=controller.node_risk_scores,
+                            alpha=alpha,
+                            min_dist=run_args.residual_min_dist,
+                            correction_mask=correction_mask,
+                        )
+                        val_acc = evaluate_raw_node_features(model, data, candidate_raw, mask=data.val_mask)
+                        if val_acc > selected_val_acc + 1e-12:
+                            selected_val_acc = val_acc
+                            selected_alpha = alpha
+                    alpha_for_apply = selected_alpha
+                    alpha_note = f"auto(val_acc={selected_val_acc:.4f})"
+                else:
+                    alpha_for_apply = max(0.0, float(run_args.residual_alpha))
+                    alpha_note = "fixed"
+
+                residual_raw, apply_info = apply_residual_adapter(
+                    direct_embeddings=direct_raw,
+                    target_embeddings=reference_raw,
+                    verify_features=verify_features,
+                    edge_index=data.edge_index,
+                    trace=trace,
+                    adapter=adapter,
+                    risk_scores=controller.node_risk_scores,
+                    alpha=alpha_for_apply,
+                    min_dist=run_args.residual_min_dist,
+                    correction_mask=correction_mask,
+                )
+                active_residual_mask = (
+                    build_active_residual_mask(trace, correction_mask, run_args.residual_min_dist, device)
+                    if adapter is not None
+                    else torch.zeros(int(data.num_nodes), dtype=torch.bool, device=device)
+                )
+                log_important(
+                    "[ResidualFit] "
+                    f"candidates={correction_info['residual_candidates']} | "
+                    f"active={int(active_residual_mask.sum().item())} | "
+                    f"train_pairs={int(train_info['train_pairs'])} | "
+                    f"loss={float(train_info['loss']):.6f} | "
+                    f"alpha={float(apply_info['alpha']):.3f} ({alpha_note}) | "
+                    f"corrected={int(apply_info['corrected'])}"
+                )
+
+                oracle_priority = errors_by_bit[int(bits[0])]
+                predictor_priority = None
+                if any(policy.get("priority") == "predictor" for _name, policy in configs):
+                    predictor_priority, predictor_info = fit_precision_depth_damage_predictor(
+                        ds_key,
+                        scores,
+                        data,
+                        oracle_priority,
+                        run_args,
+                        seed,
+                        device,
+                    )
+                    log_important(
+                        "[PrecisionDepthPredictor] "
+                        f"calib={predictor_info['calib_samples']} | "
+                        f"rho_train={predictor_info['train_rho']:.3f} | "
+                        f"rho_all={predictor_info['all_rho']:.3f}"
+                    )
+
+                for name, policy in configs:
+                    actions = select_precision_depth_actions(
+                        policy,
+                        scores,
+                        run_args,
+                        int(data.num_nodes),
+                        bits,
+                        seed,
+                        device,
+                        eligible_mask=miss_mask,
+                        oracle_priority=oracle_priority,
+                        predictor_priority=predictor_priority,
+                    )
+                    selected_raw = assemble_precision_depth_embeddings(actions, reference_raw, depth_raw)
+                    final_raw, direct_mask, residual_mask, _hits = apply_residual_precision_depth_trace(
+                        trace,
+                        selected_raw,
+                        reference_raw,
+                        residual_raw,
+                        active_residual_mask,
+                    )
+                    with torch.no_grad():
+                        final_embs = model.encoder(final_raw)
+                    acc = evaluate_gnn_embeddings(model, data, final_embs)
+                    drop = base_acc - acc
+                    stats = summarize_residual_precision_depth_execution(
+                        actions,
+                        trace,
+                        residual_mask,
+                        errors_by_bit,
+                        bits,
+                        run_args,
+                        ref_embs,
+                        final_embs,
+                    )
+
+                    results[name]["reuse"].append(stats["reuse_rate"])
+                    results[name]["direct"].append(stats["direct_rate"])
+                    results[name]["residual"].append(stats["residual_rate"])
+                    results[name]["reuse_num"].append(stats["reuse_num"])
+                    results[name]["reuse_den"].append(stats["reuse_den"])
+                    results[name]["cost"].append(stats["cost"])
+                    results[name]["acc"].append(acc)
+                    results[name]["drop"].append(drop)
+                    results[name]["final_err"].append(stats["final_avg_error"])
+                    results[name]["miss_err"].append(stats["miss_avg_selected_error"])
+                    results[name]["train_pairs"].append(int(train_info["train_pairs"]))
+                    results[name]["alpha"].append(float(apply_info["alpha"]))
+                    for bit in depth_order:
+                        results[name][f"P{int(bit)}"].append(stats["rates"].get(int(bit), 0.0))
+
+                    bit_rate_text = " | ".join(
+                        f"P{bit}={stats['rates'].get(int(bit), 0.0):.1%}"
+                        for bit in depth_order
+                    )
+                    log_important(
+                        f"[{name}] Reuse={stats['reuse_rate']:.1%} "
+                        f"(direct={stats['direct_rate']:.1%}, residual={stats['residual_rate']:.1%}) "
+                        f"| {bit_rate_text} | Cost={stats['cost']:.3f} | Acc={acc:.4f} "
+                        f"| Drop={drop:.2%} | FinalErr={stats['final_avg_error']:.5f} "
+                        f"| MissErr={stats['miss_avg_selected_error']:.5f}"
+                    )
+
+            log_important(f"\n{'=' * 72}")
+            log_important(f"FINAL RESIDUAL + GRAPH-BIT SUMMARY ({args.runs} Runs) | {ds_key.upper()}")
+            log_important(f"{'=' * 72}")
+            base_mean = float(np.mean(results["baseline"]))
+            log_important(f"Baseline Acc: {base_mean:.4f}")
+            log_important("-" * 188)
+            log_important(
+                f"{'Config':<24} | {'Reuse %':<9} | {'Direct %':<9} | {'Residual %':<10} | "
+                + " | ".join(f"P{bit} %".ljust(8) for bit in depth_order)
+                + f" | {'Cost':<8} | {'Acc':<10} | {'Drop %':<10} | {'FinalErr':<10} | {'Train':<8} | {'Alpha':<7}"
+            )
+            log_important("-" * 188)
+            for name, _policy in configs:
+                reuse = float(np.mean(results[name]["reuse"]))
+                direct = float(np.mean(results[name]["direct"]))
+                residual = float(np.mean(results[name]["residual"]))
+                rate_values = [
+                    float(np.mean(results[name][f"P{bit}"]))
+                    for bit in depth_order
+                ]
+                cost = float(np.mean(results[name]["cost"]))
+                acc = float(np.mean(results[name]["acc"]))
+                drop = float(np.mean(results[name]["drop"]))
+                final_err = float(np.mean(results[name]["final_err"]))
+                train_pairs = float(np.mean(results[name]["train_pairs"]))
+                alpha = float(np.mean(results[name]["alpha"]))
+                log_important(
+                    f"{name:<24} | {reuse:<9.1%} | {direct:<9.1%} | {residual:<10.1%} | "
+                    + " | ".join(f"{rate:<8.1%}" for rate in rate_values)
+                    + f" | {cost:<8.3f} | {acc:<10.4f} | {drop:<10.2%} | "
+                    f"{final_err:<10.5f} | {train_pairs:<8.1f} | {alpha:<7.3f}"
                 )
             log_important(f"{'=' * 72}\n")
 
@@ -3618,6 +4038,8 @@ def run_adaptive_simulation(args):
         return run_precision_depth_ablation(args)
     if args.experiment_suite == "reuse_precision_depth":
         return run_reuse_precision_depth_experiment(args)
+    if args.experiment_suite == "residual_precision_depth":
+        return run_residual_precision_depth_experiment(args)
 
     target_datasets = args.datasets if args.datasets else ["cora"]
     log_dir = os.path.join("output", "graph_simhash")

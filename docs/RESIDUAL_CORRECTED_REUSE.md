@@ -547,7 +547,75 @@ output/residual_reuse/pubmed_support_split_sweep/pubmed_h5_s4_t38_runs3.log
 
 <!-- PUBMED_ST_SUPPORT_SPLIT_END -->
 
-## 8. Current Limitations
+## 8. Residual Reuse + Graph-Bit Full Stack
+
+Residual reuse now has a full-stack evaluation entry with Graph-Bit:
+
+```text
+exact hit      -> direct cache reuse
+fuzzy hit      -> residual correction
+reject / miss  -> Graph-Bit P8/P6/P5/P4
+```
+
+Reproduce the LLaMA-7B conservative operating point:
+
+```bash
+python -m GraphhopSimhash \
+  --datasets cora pubmed \
+  --runs 3 \
+  --experiment_suite residual_precision_depth \
+  --real_quant_model_name llama2_7b \
+  --precision_depth_reference_tag W4A8 \
+  --precision_depth_tags W4A6 W4A5 W4A4 \
+  --precision_depth_bits 6 5 4 \
+  --precision_depth_reference_bits 8 \
+  --precision_depth_high_ratio 0.20 \
+  --precision_depth_mid_ratio 0.30 \
+  --precision_depth_low_ratio 0.30 \
+  --radius 2 \
+  --hash_heads_per_route 4 \
+  --main_hash_head_bits 16 16 16 16 \
+  --learned_hash_epochs 10 \
+  --learned_hash_dim 128 \
+  --hamming_only_acceptor \
+  --enable_score_gate \
+  --allow_rare_fuzzy \
+  --score_reuse_threshold 20 \
+  --score_propagation_weight 3 \
+  --score_graph_context_weight 1 \
+  --score_low_unique_weight 1 \
+  --residual_rank 32 \
+  --residual_epochs 60 \
+  --residual_max_train_pairs 1024 \
+  --residual_min_dist 1.0
+```
+
+LLaMA-7B 3-run summary:
+
+| Dataset | T | Reuse | FullP8-miss Drop | Degree Graph-Bit Drop |
+|---|---:|---:|---:|---:|
+| Cora | 20 | 4.5% | 0.27% | 2.22% |
+| Cora | 30 | 46.9% | 3.68% | 5.25% |
+| PubMed | 20 | 31.3% | 2.79% | 3.90% |
+| PubMed | 30 | 77.2% | 6.02% | 6.60% |
+
+Interpretation:
+
+1. `FullP8-miss` is the right reuse baseline: hits use direct/residual reuse, misses use P8.
+2. Graph-Bit only changes miss-node bit depth; it cannot fix bad fuzzy reuse hits.
+3. `T=20` is the safer full-stack point for LLaMA-7B. `T=30` is too aggressive on PubMed because reuse hit error already dominates.
+4. ST results should not be directly extrapolated to LLaMA. Cora/ST at `T=30` gives `FullP8-miss Drop=1.90%`, while Cora/LLaMA at the same threshold gives `3.68%`.
+
+Logs:
+
+```text
+output/residual_precision_depth_manual/cora_pubmed_llama7b_T20_fullstack.log
+output/residual_precision_depth_manual/cora_llama7b_T30_fullstack.log
+output/residual_precision_depth_manual/pubmed_llama7b_T30_fullstack.log
+output/residual_precision_depth_manual/cora_ST_T30_fullstack.log
+```
+
+## 9. Current Limitations
 
 当前版本仍是第一版机制验证，有几个边界需要注意：
 
@@ -557,7 +625,7 @@ output/residual_reuse/pubmed_support_split_sweep/pubmed_h5_s4_t38_runs3.log
 4. `residual_direct_threshold` 的简单风险分段目前效果不如“exact direct + fuzzy residual”；
 5. 当前 adapter 是离线校准后固定使用，还没有做 dataset-adaptive 或 class-aware 版本。
 
-## 9. Suggested Paper Framing
+## 10. Suggested Paper Framing
 
 建议把它作为第三条执行路径，而不是简单附属 trick：
 

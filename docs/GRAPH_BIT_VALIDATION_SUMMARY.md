@@ -67,12 +67,46 @@ python -m GraphhopSimhash \
   --score_low_unique_weight 1
 ```
 
+Residual reuse + Graph-Bit full-stack experiment:
+
+```bash
+python -m GraphhopSimhash \
+  --datasets cora pubmed \
+  --runs 3 \
+  --experiment_suite residual_precision_depth \
+  --real_quant_model_name llama2_7b \
+  --precision_depth_reference_tag W4A8 \
+  --precision_depth_tags W4A6 W4A5 W4A4 \
+  --precision_depth_bits 6 5 4 \
+  --precision_depth_reference_bits 8 \
+  --precision_depth_high_ratio 0.20 \
+  --precision_depth_mid_ratio 0.30 \
+  --precision_depth_low_ratio 0.30 \
+  --radius 2 \
+  --hash_heads_per_route 4 \
+  --main_hash_head_bits 16 16 16 16 \
+  --learned_hash_epochs 10 \
+  --learned_hash_dim 128 \
+  --hamming_only_acceptor \
+  --enable_score_gate \
+  --allow_rare_fuzzy \
+  --score_reuse_threshold T \
+  --score_propagation_weight 3 \
+  --score_graph_context_weight 1 \
+  --score_low_unique_weight 1 \
+  --residual_rank 32 \
+  --residual_epochs 60 \
+  --residual_max_train_pairs 1024 \
+  --residual_min_dist 1.0
+```
+
 Logs:
 
 - `output/graph_bit_validation/precision_depth/*.log`
 - `output/graph_bit_validation/precision_depth_aggressive_10runs/*.log`
 - `output/graph_bit_validation/reuse_precision_depth/*.log`
 - `output/graph_bit_validation/precision_depth_arxiv_10runs/*.log`
+- `output/residual_precision_depth_manual/*_fullstack.log`
 
 Debug / oracle policies are intentionally not part of the main strategy:
 
@@ -169,7 +203,9 @@ Main observation:
 
 ## Reuse + Graph-Bit Results
 
-Here reuse hits are treated as free cache reads. Only hash misses are routed to P8/P6/P5/P4 with a 20/30/30/20 miss-node budget.
+Here reuse hits are treated as direct cache reads. Only hash misses are routed to P8/P6/P5/P4 with a 20/30/30/20 miss-node budget.
+
+This table is useful for isolating miss-node Graph-Bit behavior, but it is not the final full-stack policy because fuzzy hits are not residual-corrected.
 
 ### T = 20
 
@@ -189,9 +225,58 @@ Main observation:
 
 When reuse is conservative, Graph-Bit behavior is visible and Degree protects better than Random. When reuse is aggressive, total drop is dominated by direct reuse error; Graph-Bit still saves miss-node cost, but it cannot fix bad reuse hits.
 
+## Residual Reuse + Graph-Bit Full Stack
+
+Correct full-stack policy:
+
+```text
+exact hit      -> direct cache reuse
+fuzzy hit      -> residual correction
+reject / miss  -> Graph-Bit P8/P6/P5/P4
+high-risk miss -> P8 through the same budget router
+```
+
+The `FullP8` row below still includes reuse. It means "reuse hits use direct/residual, all misses use P8". It is the correct baseline for measuring how much extra error Graph-Bit adds on top of the reuse subsystem.
+
+### LLaMA-7B, T = 20
+
+| Dataset | Reuse | Direct | Residual | FullP8 Cost | FullP8 Drop | Graph-Bit Cost | Random | Degree | TSER | Context | LowUnique |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| Cora | 4.5 | 0.5 | 4.0 | 0.477 | 0.27 | 0.361 | 2.74 | 2.22 | 2.77 | 2.55 | 2.50 |
+| PubMed | 31.3 | 4.1 | 27.2 | 0.345 | 2.79 | 0.261 | 4.16 | 3.90 | 3.97 | 4.21 | 4.46 |
+
+### LLaMA-7B, T = 30
+
+| Dataset | Reuse | Direct | Residual | FullP8 Cost | FullP8 Drop | Graph-Bit Cost | Random | Degree | TSER | Context | LowUnique |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| Cora | 46.9 | 3.6 | 43.4 | 0.267 | 3.68 | 0.203 | 5.53 | 5.25 | 5.34 | 5.34 | 5.45 |
+| PubMed | 77.2 | 8.3 | 68.9 | 0.118 | 6.02 | 0.090 | 6.75 | 6.60 | 6.65 | 6.78 | 7.00 |
+
+### Backend sanity check: Cora/ST, T = 30
+
+| Dataset/Backend | Reuse | Direct | Residual | FullP8 Cost | FullP8 Drop | Graph-Bit Cost | Random | Degree | TSER | Context | LowUnique |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| Cora/ST | 35.5 | 3.7 | 31.9 | 0.324 | 1.90 | 0.245 | 2.26 | 1.81 | 2.22 | 2.03 | 2.61 |
+
+Main observation:
+
+- The old Cora/ST residual result (`T=30`, drop about 2.43%) should not be directly compared with LLaMA-7B full-stack results. LLaMA raw embeddings are harder for CAM/residual reuse.
+- For LLaMA-7B, `T=20` is the safer full-stack operating point. `T=30` is too aggressive on PubMed because reuse hit error dominates even when misses use P8.
+- Once reuse error is controlled, Graph-Bit behaves as expected: Degree is consistently better than Random on PubMed and competitive on Cora.
+- Graph-Bit is a miss-node NPU optimization. It cannot compensate for overly aggressive fuzzy reuse. The reuse gate and residual path must first keep `FullP8` drop acceptable.
+
 ## Implementation Note
 
 The combined experiment now computes the CAM/hash reuse trace once per run and reuses the same `hit_mask/source_ids` for every P8/P6/P5/P4 policy. This matches the intended system behavior and avoids rerunning CAM for every routing baseline.
+
+For `residual_precision_depth`, the trace is applied at raw embedding level:
+
+```text
+selected_raw = P8/P6/P5/P4 pool for miss nodes
+exact hits   = reference_raw[source]
+fuzzy hits   = residual_adapter(reference_raw[source], pair features)
+final_raw    -> GNN encoder/classifier
+```
 
 ## Takeaway
 
