@@ -27,12 +27,13 @@ def build_parser():
             "ffn_channel_gating",
             "hierarchical_encoder",
             "precision_depth_ablation",
+            "reuse_precision_depth",
         ],
         help=(
             "Run one config, score/quant ablations, real quantization, joint reuse+real-quantization, "
             "residual reuse validation, graph-eager token routing, token compaction validation, "
-            "FFN channel-gating validation, full hierarchical encoder validation, or graph-conditioned "
-            "precision-depth routing."
+            "FFN channel-gating validation, full hierarchical encoder validation, graph-conditioned "
+            "precision-depth routing, or hash reuse plus precision-depth routing."
         ),
     )
     parser.add_argument(
@@ -582,6 +583,25 @@ def build_parser():
         help="Ratio routed to the safest lower precision-depth in budget policies. The rest use the cheapest depth.",
     )
     parser.add_argument(
+        "--precision_depth_low_ratio",
+        type=float,
+        default=0.0,
+        help=(
+            "Additional ratio routed to the second-safest lower precision-depth in budget policies. "
+            "With P8/P6/P5/P4, high->P8, mid->P6, low->P5, and the rest -> P4."
+        ),
+    )
+    parser.add_argument(
+        "--precision_depth_include_predictor",
+        action="store_true",
+        help="Include the calibration-fitted predictor policy in precision-depth tables.",
+    )
+    parser.add_argument(
+        "--precision_depth_include_oracle",
+        action="store_true",
+        help="Include the oracle damage policy in precision-depth tables.",
+    )
+    parser.add_argument(
         "--precision_depth_predictor_calib_samples",
         type=int,
         default=512,
@@ -1036,8 +1056,18 @@ def validate_args(parser, args):
         parser.error("--precision_depth_high_ratio must be in [0, 1]")
     if not (0.0 <= args.precision_depth_mid_ratio <= 1.0):
         parser.error("--precision_depth_mid_ratio must be in [0, 1]")
-    if args.precision_depth_high_ratio + args.precision_depth_mid_ratio > 1.0:
-        parser.error("--precision_depth_high_ratio + --precision_depth_mid_ratio must be <= 1")
+    if not (0.0 <= args.precision_depth_low_ratio <= 1.0):
+        parser.error("--precision_depth_low_ratio must be in [0, 1]")
+    if (
+        args.precision_depth_high_ratio
+        + args.precision_depth_mid_ratio
+        + args.precision_depth_low_ratio
+        > 1.0
+    ):
+        parser.error(
+            "--precision_depth_high_ratio + --precision_depth_mid_ratio + "
+            "--precision_depth_low_ratio must be <= 1"
+        )
     if args.precision_depth_predictor_calib_samples <= 0:
         parser.error("--precision_depth_predictor_calib_samples must be positive")
     if args.precision_depth_predictor_ridge < 0:

@@ -1651,10 +1651,12 @@ def build_precision_depth_policy_configs(args, bits):
             ("TSERDepthBudget", {"kind": "budget", "priority": "tser"}),
             ("ContextDepthBudget", {"kind": "budget", "priority": "context"}),
             ("LowUniqueDepthBudget", {"kind": "budget", "priority": "low_unique"}),
-            ("PredictorDepthBudget", {"kind": "budget", "priority": "predictor"}),
-            ("OracleDamageBudget", {"kind": "budget", "priority": "oracle_damage"}),
         ]
     )
+    if bool(getattr(args, "precision_depth_include_predictor", False)):
+        configs.append(("PredictorDepthBudget", {"kind": "budget", "priority": "predictor"}))
+    if bool(getattr(args, "precision_depth_include_oracle", False)):
+        configs.append(("OracleDamageBudget", {"kind": "budget", "priority": "oracle_damage"}))
     return configs
 
 
@@ -1666,6 +1668,7 @@ def select_precision_depth_actions(
     bits,
     seed,
     device,
+    eligible_mask=None,
     oracle_priority=None,
     predictor_priority=None,
 ):
@@ -1703,15 +1706,34 @@ def select_precision_depth_actions(
         raise ValueError(f"Unknown precision-depth priority: {priority_name}")
 
     cheapest_bit = int(bits[0])
-    safest_low_bit = int(bits[-1])
-    actions = torch.full((num_nodes,), cheapest_bit, dtype=torch.int64, device=device)
-    order = torch.argsort(priority, descending=True)
-    high_count = int(round(float(args.precision_depth_high_ratio) * num_nodes))
-    mid_count = int(round(float(args.precision_depth_mid_ratio) * num_nodes))
-    high_count = max(0, min(high_count, num_nodes))
-    mid_count = max(0, min(mid_count, num_nodes - high_count))
+    low_to_high_bits = sorted(bits, reverse=True)
+    safest_low_bit = int(low_to_high_bits[0])
+    second_low_bit = int(low_to_high_bits[1]) if len(low_to_high_bits) > 1 else safest_low_bit
+
+    actions = torch.full((num_nodes,), ref_bit, dtype=torch.int64, device=device)
+    if eligible_mask is None:
+        eligible = torch.ones(num_nodes, dtype=torch.bool, device=device)
+    else:
+        eligible = torch.as_tensor(eligible_mask, dtype=torch.bool, device=device)
+        if eligible.numel() != num_nodes:
+            raise ValueError(f"eligible_mask length must match node count {num_nodes}, got {eligible.numel()}")
+
+    eligible_idx = torch.nonzero(eligible, as_tuple=False).flatten()
+    eligible_count = int(eligible_idx.numel())
+    if eligible_count <= 0:
+        return actions
+
+    actions[eligible_idx] = cheapest_bit
+    order = eligible_idx[torch.argsort(priority[eligible_idx], descending=True)]
+    high_count = int(round(float(args.precision_depth_high_ratio) * eligible_count))
+    mid_count = int(round(float(args.precision_depth_mid_ratio) * eligible_count))
+    low_count = int(round(float(getattr(args, "precision_depth_low_ratio", 0.0)) * eligible_count))
+    high_count = max(0, min(high_count, eligible_count))
+    mid_count = max(0, min(mid_count, eligible_count - high_count))
+    low_count = max(0, min(low_count, eligible_count - high_count - mid_count))
     actions[order[:high_count]] = ref_bit
     actions[order[high_count : high_count + mid_count]] = safest_low_bit
+    actions[order[high_count + mid_count : high_count + mid_count + low_count]] = second_low_bit
     return actions
 
 
@@ -1742,6 +1764,48 @@ def summarize_precision_depth_policy(actions, errors_by_bit, bits, args):
         "cost": float(cost),
         "avg_err": float(selected_err.mean().item()),
     }
+
+
+def summarize_reuse_precision_depth_execution(actions, hit_mask, errors_by_bit, bits, args, fp_embs, final_embs):
+    total = max(1, int(actions.numel()))
+    hit_mask = hit_mask.to(dtype=torch.bool, device=actions.device)
+    miss_mask = ~hit_mask
+    ref_bit = int(args.precision_depth_reference_bits)
+    all_bits = [ref_bit, *sorted((int(bit) for bit in bits), reverse=True)]
+
+    selected_err = torch.zeros(total, dtype=torch.float32, device=actions.device)
+    rates = {}
+    cost = 0.0
+    for bit in all_bits:
+        mask = miss_mask & (actions == int(bit))
+        rate = float(mask.float().mean().item())
+        rates[int(bit)] = rate
+        cost += rate * precision_depth_cost(int(bit), args)
+        selected_err[mask] = errors_by_bit[int(bit)][mask]
+
+    final_err = 1.0 - F.cosine_similarity(fp_embs, final_embs, dim=1)
+    final_err = final_err.clamp(min=0.0)
+    miss_count = max(1, int(miss_mask.sum().item()))
+    return {
+        "reuse_num": int(hit_mask.sum().item()),
+        "reuse_den": total,
+        "reuse_rate": float(hit_mask.float().mean().item()),
+        "rates": rates,
+        "cost": float(cost),
+        "miss_avg_selected_error": float(selected_err[miss_mask].sum().item() / miss_count),
+        "final_avg_error": float(final_err.mean().item()),
+    }
+
+
+def apply_reuse_trace_to_embeddings(trace, selected_embs):
+    """Apply a fixed CAM/hash reuse trace to a candidate embedding pool."""
+    final_embs = selected_embs.clone()
+    hit_mask = trace["hit_mask"].to(device=selected_embs.device, dtype=torch.bool)
+    source_ids = trace["source_ids"].to(device=selected_embs.device, dtype=torch.long)
+    reusable = hit_mask & (source_ids >= 0)
+    if bool(reusable.any()):
+        final_embs[reusable] = selected_embs[source_ids[reusable]]
+    return final_embs, hit_mask
 
 
 def fit_precision_depth_damage_predictor(ds_key, scores, data, target, args, seed, device):
@@ -1802,6 +1866,7 @@ def run_precision_depth_ablation(args):
                 f"| tags={list(zip(args.precision_depth_tags, args.precision_depth_bits))} "
                 f"| high_ratio={args.precision_depth_high_ratio:.2f} "
                 f"| mid_ratio={args.precision_depth_mid_ratio:.2f} "
+                f"| low_ratio={args.precision_depth_low_ratio:.2f} "
                 f"| cost_scale={args.precision_depth_cost_scale:.2f} "
                 f"| fixed_cost={args.precision_depth_fixed_cost:.2f}"
             )
@@ -1876,22 +1941,24 @@ def run_precision_depth_ablation(args):
                     predictor_target = margin_drop_by_bit[cheapest_bit]
                 else:
                     predictor_target = oracle_priority
-                predictor_priority, predictor_info = fit_precision_depth_damage_predictor(
-                    ds_key,
-                    scores,
-                    data,
-                    predictor_target,
-                    run_args,
-                    seed,
-                    device,
-                )
-                log_important(
-                    "[PrecisionDepthPredictor] "
-                    f"target={run_args.precision_depth_predictor_target} | "
-                    f"calib={predictor_info['calib_samples']} | "
-                    f"rho_train={predictor_info['train_rho']:.3f} | "
-                    f"rho_all={predictor_info['all_rho']:.3f}"
-                )
+                predictor_priority = None
+                if any(policy.get("priority") == "predictor" for _name, policy in configs):
+                    predictor_priority, predictor_info = fit_precision_depth_damage_predictor(
+                        ds_key,
+                        scores,
+                        data,
+                        predictor_target,
+                        run_args,
+                        seed,
+                        device,
+                    )
+                    log_important(
+                        "[PrecisionDepthPredictor] "
+                        f"target={run_args.precision_depth_predictor_target} | "
+                        f"calib={predictor_info['calib_samples']} | "
+                        f"rho_train={predictor_info['train_rho']:.3f} | "
+                        f"rho_all={predictor_info['all_rho']:.3f}"
+                    )
 
                 for name, policy in configs:
                     actions = select_precision_depth_actions(
@@ -1954,6 +2021,239 @@ def run_precision_depth_ablation(args):
                     f"{name:<24} | "
                     + " | ".join(f"{rate:<8.1%}" for rate in rate_values)
                     + f" | {cost:<8.3f} | {acc:<10.4f} | {drop:<10.2%} | {avg_err:<10.5f}"
+                )
+            log_important(f"{'=' * 72}\n")
+
+
+def run_reuse_precision_depth_experiment(args):
+    target_datasets = args.datasets if args.datasets else ["cora"]
+    log_dir = os.path.join("output", "reuse_precision_depth")
+    os.makedirs(log_dir, exist_ok=True)
+
+    for ds_key in target_datasets:
+        if ds_key not in DATASET_CONFIGS:
+            continue
+
+        dataset_log_dir = os.path.join(log_dir, ds_key)
+        os.makedirs(dataset_log_dir, exist_ok=True)
+        log_path = build_log_path(dataset_log_dir, ds_key, args)
+        bits = sorted(int(bit) for bit in args.precision_depth_bits)
+        ref_bit = int(args.precision_depth_reference_bits)
+        configs = build_precision_depth_policy_configs(args, bits)
+
+        results = {
+            name: {
+                "reuse": [],
+                "reuse_num": [],
+                "reuse_den": [],
+                "cost": [],
+                "acc": [],
+                "drop": [],
+                "final_err": [],
+                "miss_err": [],
+                f"P{ref_bit}": [],
+                **{f"P{bit}": [] for bit in bits},
+            }
+            for name, _policy in configs
+        }
+        results["baseline"] = []
+
+        with open(log_path, "w", encoding="utf-8") as summary_file:
+            def log_important(msg):
+                print(msg)
+                summary_file.write(msg + "\n")
+                summary_file.flush()
+
+            log_important(f"\n{'=' * 72}")
+            log_important(f"Running Hash Reuse + Graph-Bit Precision-Depth on {ds_key.upper()}")
+            log_important(f"{'=' * 72}")
+            log_important(
+                "[ReuseGraphBit] Reuse hits are free cache reads; hash misses are routed to "
+                f"P{ref_bit}/" + "/".join(f"P{bit}" for bit in sorted(bits, reverse=True)) + "."
+            )
+            log_important(
+                "[PrecisionDepthCost] "
+                f"model={args.real_quant_model_name} | reference={args.precision_depth_reference_tag}/P{ref_bit} "
+                f"| tags={list(zip(args.precision_depth_tags, args.precision_depth_bits))} "
+                f"| high_ratio={args.precision_depth_high_ratio:.2f} "
+                f"| mid_ratio={args.precision_depth_mid_ratio:.2f} "
+                f"| low_ratio={args.precision_depth_low_ratio:.2f} "
+                f"| cost_scale={args.precision_depth_cost_scale:.2f} "
+                f"| fixed_cost={args.precision_depth_fixed_cost:.2f}"
+            )
+
+            seeds = [int(args.seed) + run_idx for run_idx in range(args.runs)]
+            for run_idx, seed in enumerate(seeds):
+                log_important(f"\n--- Run {run_idx + 1}/{args.runs} (Seed {seed}) ---")
+                run_args = make_run_args(args, seed)
+                run_args.enable_quant_policy = False
+                _conf, data, verify_features, device = load_run_state(ds_key, run_args, seed)
+                pools = load_precision_depth_pools(ds_key, run_args, data, device, log_important)
+
+                data.x = pools["reference"]
+                model, base_acc, ref_embs, ref_logits = train_baseline_model(data, run_args, device)
+                results["baseline"].append(base_acc)
+                log_important(f"[Baseline:P{ref_bit}] Acc: {base_acc:.4f}")
+
+                model.eval()
+                with torch.no_grad():
+                    depth_embs = {
+                        int(bit): model.encoder(pool)
+                        for bit, pool in pools["depth"].items()
+                    }
+
+                scores = build_real_quant_scores(verify_features, data, run_args, device)
+                errors_by_bit = {ref_bit: embedding_error(ref_embs, ref_embs)}
+                for bit, embs in depth_embs.items():
+                    errors_by_bit[int(bit)] = embedding_error(ref_embs, embs)
+                log_important(
+                    "[PrecisionDepthScore] "
+                    f"prop_mean={scores['propagation_q'].float().mean().item():.1f} | "
+                    f"context_mean={scores['graph_context_q'].float().mean().item():.1f} | "
+                    f"low_unique_mean={scores['low_degree_unique_q'].float().mean().item():.1f} | "
+                    f"tser_mean={scores['sensitivity_q'].float().mean().item():.1f}"
+                )
+                err_parts = [f"P{ref_bit}=0.00000"] + [
+                    f"P{bit}={errors_by_bit[int(bit)].mean().item():.5f}"
+                    for bit in sorted(bits, reverse=True)
+                ]
+                log_important("[PrecisionDepthError] " + " | ".join(err_parts))
+
+                route_bundle = build_route_bundle(
+                    verify_features,
+                    data,
+                    ref_embs,
+                    ref_logits,
+                    run_args,
+                    log_important,
+                    device,
+                )
+                trace_controller = build_controller(
+                    data,
+                    verify_features,
+                    route_bundle,
+                    {"name": "Trace", "overrides": {}},
+                    run_args,
+                    device,
+                )
+                _trace_embs, trace_hits = trace_controller.query_full_batch(
+                    route_bundle["hash_route_features"],
+                    verify_features,
+                    ref_embs,
+                )
+                trace = trace_controller.last_query_trace
+                trace_stats = trace_controller.stats
+                trace_reuse = trace_stats["reuse"] / max(1, trace_stats["total_queries"])
+                log_important(
+                    f"[ReuseTrace] Reuse={trace_reuse:.1%} "
+                    f"| miss={(~trace_hits).float().mean().item():.1%} "
+                    f"| reuse n/d={trace_stats['reuse']}/{trace_stats['reuse_denominator']}"
+                )
+
+                miss_mask = ~trace_hits
+                oracle_priority = errors_by_bit[int(bits[0])]
+                predictor_priority = None
+                if any(policy.get("priority") == "predictor" for _name, policy in configs):
+                    predictor_priority, predictor_info = fit_precision_depth_damage_predictor(
+                        ds_key,
+                        scores,
+                        data,
+                        oracle_priority,
+                        run_args,
+                        seed,
+                        device,
+                    )
+                    log_important(
+                        "[PrecisionDepthPredictor] "
+                        f"calib={predictor_info['calib_samples']} | "
+                        f"rho_train={predictor_info['train_rho']:.3f} | "
+                        f"rho_all={predictor_info['all_rho']:.3f}"
+                    )
+
+                for name, policy in configs:
+                    actions = select_precision_depth_actions(
+                        policy,
+                        scores,
+                        run_args,
+                        int(data.num_nodes),
+                        bits,
+                        seed,
+                        device,
+                        eligible_mask=miss_mask,
+                        oracle_priority=oracle_priority,
+                        predictor_priority=predictor_priority,
+                    )
+                    selected_embs = assemble_precision_depth_embeddings(actions, ref_embs, depth_embs)
+                    reconstructed_embs, hits = apply_reuse_trace_to_embeddings(trace, selected_embs)
+                    acc = evaluate_gnn_embeddings(model, data, reconstructed_embs)
+                    drop = base_acc - acc
+                    stats = summarize_reuse_precision_depth_execution(
+                        actions,
+                        hits,
+                        errors_by_bit,
+                        bits,
+                        run_args,
+                        ref_embs,
+                        reconstructed_embs,
+                    )
+
+                    results[name]["reuse"].append(stats["reuse_rate"])
+                    results[name]["reuse_num"].append(stats["reuse_num"])
+                    results[name]["reuse_den"].append(stats["reuse_den"])
+                    results[name]["cost"].append(stats["cost"])
+                    results[name]["acc"].append(acc)
+                    results[name]["drop"].append(drop)
+                    results[name]["final_err"].append(stats["final_avg_error"])
+                    results[name]["miss_err"].append(stats["miss_avg_selected_error"])
+                    for bit in [ref_bit, *bits]:
+                        results[name][f"P{int(bit)}"].append(stats["rates"].get(int(bit), 0.0))
+
+                    bit_rate_text = " | ".join(
+                        f"P{bit}={stats['rates'].get(int(bit), 0.0):.1%}"
+                        for bit in [ref_bit, *sorted(bits, reverse=True)]
+                    )
+                    log_important(
+                        f"[{name}] Reuse={stats['reuse_rate']:.1%} | {bit_rate_text} "
+                        f"| Cost={stats['cost']:.3f} | Acc={acc:.4f} "
+                        f"| Drop={drop:.2%} | FinalErr={stats['final_avg_error']:.5f} "
+                        f"| MissErr={stats['miss_avg_selected_error']:.5f}"
+                    )
+
+            log_important(f"\n{'=' * 72}")
+            log_important(f"FINAL REUSE + GRAPH-BIT SUMMARY ({args.runs} Runs) | {ds_key.upper()}")
+            log_important(f"{'=' * 72}")
+            base_mean = float(np.mean(results["baseline"]))
+            log_important(f"Baseline Acc: {base_mean:.4f}")
+            depth_order = [ref_bit, *sorted(bits, reverse=True)]
+            log_important("-" * 168)
+            log_important(
+                f"{'Config':<24} | {'Reuse %':<9} | "
+                + " | ".join(f"P{bit} %".ljust(8) for bit in depth_order)
+                + f" | {'Cost':<8} | {'Acc':<10} | {'Drop %':<10} | {'FinalErr':<10} | {'Reuse n/d':<15}"
+            )
+            log_important("-" * 168)
+            for name, _policy in configs:
+                reuse = float(np.mean(results[name]["reuse"]))
+                reuse_num = float(np.mean(results[name]["reuse_num"]))
+                reuse_den = float(np.mean(results[name]["reuse_den"]))
+                reuse_frac = (
+                    f"{reuse_num:.1f}/{reuse_den:.1f}"
+                    if args.runs > 1
+                    else f"{int(reuse_num)}/{int(reuse_den)}"
+                )
+                rate_values = [
+                    float(np.mean(results[name][f"P{bit}"]))
+                    for bit in depth_order
+                ]
+                cost = float(np.mean(results[name]["cost"]))
+                acc = float(np.mean(results[name]["acc"]))
+                drop = float(np.mean(results[name]["drop"]))
+                final_err = float(np.mean(results[name]["final_err"]))
+                log_important(
+                    f"{name:<24} | {reuse:<9.1%} | "
+                    + " | ".join(f"{rate:<8.1%}" for rate in rate_values)
+                    + f" | {cost:<8.3f} | {acc:<10.4f} | {drop:<10.2%} | "
+                    f"{final_err:<10.5f} | {reuse_frac:<15}"
                 )
             log_important(f"{'=' * 72}\n")
 
@@ -3316,6 +3616,8 @@ def run_adaptive_simulation(args):
         return run_hierarchical_encoder_experiment(args)
     if args.experiment_suite == "precision_depth_ablation":
         return run_precision_depth_ablation(args)
+    if args.experiment_suite == "reuse_precision_depth":
+        return run_reuse_precision_depth_experiment(args)
 
     target_datasets = args.datasets if args.datasets else ["cora"]
     log_dir = os.path.join("output", "graph_simhash")

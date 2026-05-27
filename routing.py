@@ -334,17 +334,19 @@ def build_log_path(dataset_log_dir, ds_key, args):
             f"_gk{float(getattr(args, 'hierarchical_gated_keep_ratio', 0.75)):.2f}"
             f"_{getattr(args, 'hierarchical_gated_route_policy', 'tser')}"
         ).replace(".", "p").replace("/", "_")
-    if getattr(args, "experiment_suite", None) == "precision_depth_ablation":
+    if getattr(args, "experiment_suite", None) in ("precision_depth_ablation", "reuse_precision_depth"):
         bits = "-".join(str(int(bit)) for bit in getattr(args, "precision_depth_bits", [6, 5, 4]))
         tags = "-".join(str(tag) for tag in getattr(args, "precision_depth_tags", ["W4A6", "W4A5", "W4A4"]))
         if len(tags) > 64:
             tags = tags[:64]
+        prefix = "_rpd" if getattr(args, "experiment_suite", None) == "reuse_precision_depth" else "_pd"
         config_tag += (
-            f"_pd{getattr(args, 'real_quant_model_name', 'model')}"
+            f"{prefix}{getattr(args, 'real_quant_model_name', 'model')}"
             f"_{getattr(args, 'precision_depth_reference_tag', 'ref')}"
             f"_P{int(getattr(args, 'precision_depth_reference_bits', 8))}-{bits}"
             f"_hr{float(getattr(args, 'precision_depth_high_ratio', 0.2)):.2f}"
             f"_mr{float(getattr(args, 'precision_depth_mid_ratio', 0.3)):.2f}"
+            f"_lr{float(getattr(args, 'precision_depth_low_ratio', 0.0)):.2f}"
             f"_pt{getattr(args, 'precision_depth_predictor_target', 'embedding')}"
             f"_{tags}"
         ).replace(".", "p").replace("/", "_")
