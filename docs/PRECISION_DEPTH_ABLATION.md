@@ -80,11 +80,25 @@ DegreeDepthBudget
 TSERDepthBudget
 ContextDepthBudget
 LowUniqueDepthBudget
-PredictorDepthBudget
-OracleDamageBudget
 ```
 
-其中 `OracleDamageBudget` 使用真实 embedding damage 排序，只用于诊断上界；实际系统不能依赖它，因为它要求已经有 reference embedding。
+主线只使用不需要全图 reference embedding、不需要额外训练校准器的策略：
+
+```text
+Random / Degree / TSER / Context / LowUnique
+```
+
+`PredictorDepthBudget` 和 `OracleDamageBudget` 只保留为 debug / oracle 行，不作为系统主策略：
+
+```text
+PredictorDepthBudget:
+    需要额外 calibration nodes 拟合 damage predictor。
+    它可以帮助判断手写 proxy 是否还有空间，但不作为主线 deployable policy。
+
+OracleDamageBudget:
+    使用真实 embedding damage 排序。
+    它要求已经有 reference embedding 和低精度 embedding 的差值，因此不能作为实际系统策略。
+```
 
 `PredictorDepthBudget` 用 512 个 calibration nodes 拟合一个轻量 ridge predictor。当前支持两个目标：
 
@@ -153,6 +167,8 @@ margin:    预测下游分类 margin damage
 
 10 runs，baseline 是 FullP8。
 
+注意：表中的 `PredictorDepthBudget` / `OracleDamageBudget` 是 debug/oracle 行，不进入主策略比较。
+
 | Config | Cost | Drop, embedding predictor | Drop, margin predictor | AvgErr, embedding predictor |
 | --- | ---: | ---: | ---: | ---: |
 | FullP8 | 0.500 | 0.00% | 0.00% | 0.00000 |
@@ -171,14 +187,16 @@ margin:    预测下游分类 margin damage
 
 ```text
 1. P6/P5 对 Cora/ST 基本安全，P4 开始明显掉点。
-2. 相同 cost=0.362 下，Context / TSER / Predictor 都优于 Random。
-3. margin-target predictor 比 embedding-target predictor 更接近任务目标。
-4. Oracle 仍有空间，说明路由 proxy 还没有完全抓住真实损伤。
+2. 相同 cost=0.362 下，Context / TSER / Degree 都优于 Random。
+3. Predictor 只能作为 debug 行，用来估计校准式 predictor 的上限收益。
+4. Oracle 只能作为不可部署上界，用来判断真实 damage 信息还有多少空间。
 ```
 
 ## 6. PubMed/ST 结果
 
 10 runs，baseline 是 FullP8。
+
+注意：表中的 `PredictorDepthBudget` / `OracleDamageBudget` 是 debug/oracle 行，不进入主策略比较。
 
 | Config | Cost | Drop, embedding predictor | Drop, margin predictor | AvgErr, embedding predictor |
 | --- | ---: | ---: | ---: | ---: |
@@ -199,8 +217,8 @@ margin:    预测下游分类 margin damage
 ```text
 1. PubMed/ST 的 P4 比 P5 更稳，bit-depth damage 不完全单调。
 2. Degree / TSER / Context 在 PubMed 上差距很小，但都略优于 Random。
-3. embedding-target predictor 略好；margin-target 没有带来收益。
-4. Oracle 明显更好，说明真实 damage 信息很有价值，但不能作为在线路由策略。
+3. Predictor/Oracle 不作为主策略：前者需要额外校准，后者需要真实 reference damage。
+4. Oracle 明显更好，说明真实 damage 信息有诊断价值，但不能用于实际部署。
 ```
 
 ## 7. 当前结论
@@ -216,15 +234,16 @@ Precision-depth execution 是值得保留的 NPU 路径。
 
 ```text
 1. 不同 backend 的 bit-depth profile 不一定单调，必须实际测量。
-2. 图风险分数能带来小幅收益，但目前不是决定性优势。
-3. 512-sample predictor 对 Cora 有帮助，对 PubMed 仍偏弱。
+2. 图风险分数能带来小幅收益，尤其用于证明 graph risk 可以控制 arithmetic effort。
+3. Predictor/Oracle 只作为 debug/oracle 上界，不进入主线结论。
 ```
 
 因此更稳的论文表述是：
 
 ```text
-Graph risk can condition arithmetic precision depth,
-but the final route should be calibrated against backend-specific precision profiles.
+Graph risk can condition arithmetic precision depth.
+The deployable mainline should use Degree / TSER / Context style graph scores,
+while Predictor / Oracle rows are only diagnostic baselines.
 ```
 
 ## 8. 下一步

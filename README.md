@@ -4,7 +4,7 @@
 
 1. **GraphHop SimHash reuse**：用图上下文 hash 找可复用节点，减少 embedding 计算。
 2. **TSER score gate**：用图风险分数过滤危险复用，降低复用带来的精度掉点。
-3. **Hierarchical encoder execution**：把节点路由到 exact reuse、residual reuse、FFN-gated W4A8 或 full W4A8 encoder。
+3. **Graph-Bit NPU execution**：把必须执行 encoder 的节点路由到 P8/P6/P5/P4 precision-depth datapath，用图风险控制 NPU 内部 bit-plane 计算深度。
 
 ## 文档结构
 
@@ -24,13 +24,19 @@ docs/RESIDUAL_CORRECTED_REUSE.md
     fuzzy hash hit 上的 low-rank residual correction 机制与实验结果。
 
 docs/FFN_CHANNEL_GATING.md
-    面向 W4A8 encoder NPU 的 FFN channel gating 原型。
+    面向 W4A8 encoder NPU 的 FFN channel gating 原型，当前作为 Graph-Bit 之外的辅助消融。
 
 docs/HIERARCHICAL_ENCODER_NPU_DESIGN.md
     当前完整系统思路：P0/P1/P2/P3 分层 encoder 执行路径、硬件落点和端到端结果。
 
+docs/GRAPH_BIT_NPU_DESIGN.md
+    Graph-Bit NPU 主线设计：datapath、scheduler、buffer、cost model 和验证边界。
+
 docs/GRAPH_AWARE_ENCODER_NPU_PROPOSAL.md
     基于当前实验和加速器综述提炼的 Graph-aware encoder NPU 方案建议。
+
+docs/GRAPH_BIT_VALIDATION_SUMMARY.md
+    Graph-Bit 在 Cora/PubMed/Arxiv + LLaMA-7B 上的 precision-depth 验证结果。
 
 docs/NPU_ADAPTIVE_ENCODER_EXPERIMENTS.md
     面向 graph-aware encoder NPU 的实验设计与验证路线。
@@ -89,8 +95,8 @@ P0: exact hash reuse
 P1: fuzzy hash reuse + residual correction
     cost ~= tiny adapter
 
-P2: W4A8 encoder + FFN channel gating
-    cost < full W4A8
+P2: Graph-Bit precision-depth encoder
+    必须跑 encoder，但图风险决定 P8/P6/P5/P4 bit-plane 深度
 
 P3: full W4A8 encoder
     精度兜底路径
@@ -100,8 +106,9 @@ P3: full W4A8 encoder
 
 ```text
 docs/HIERARCHICAL_ENCODER_NPU_DESIGN.md
+docs/GRAPH_BIT_NPU_DESIGN.md
 docs/RESIDUAL_CORRECTED_REUSE.md
-docs/FFN_CHANNEL_GATING.md
+docs/GRAPH_BIT_VALIDATION_SUMMARY.md
 ```
 
 ## 1. 生成 AWQ Embedding Pool

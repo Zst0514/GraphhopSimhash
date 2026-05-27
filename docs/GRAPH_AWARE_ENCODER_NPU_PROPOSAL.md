@@ -153,8 +153,16 @@ RandomDepthBudget
 DegreeDepthBudget
 TSERDepthBudget
 ContextDepthBudget
-PredictorDepthBudget
-OracleDamageBudget
+```
+
+`PredictorDepthBudget` 和 `OracleDamageBudget` 只作为 debug/oracle 行：
+
+```text
+PredictorDepthBudget:
+    需要 calibration nodes 学 predictor，不作为主策略。
+
+OracleDamageBudget:
+    需要真实 reference damage，只能作为不可部署上界。
 ```
 
 第二阶段再做真正的 bit-level bound：
@@ -758,6 +766,8 @@ OracleDamageBudget
 ```
 
 它们只能作为上界和 debug 工具。
+
+同理，任何需要额外 calibration nodes 学习 damage predictor 的 `Predictor*Budget` 也不进入主线策略；它只能用来诊断手写 graph proxy 还有多少提升空间。
 
 ## 8. 建议的最终论文贡献组织
 
@@ -1604,3 +1614,11 @@ Step 4:
 ```
 
 如果 Step 1/2 能跑通，论文的新意会比单纯 FFN gating 强很多。
+
+当前 Step 3/4 的正式设计定义已经整理到：
+
+```text
+docs/GRAPH_BIT_NPU_DESIGN.md
+```
+
+其中 Step 3 对应 bit-plane early-termination simulator，Step 4 对应 mode-adaptive PE array。FFN gating 只作为 mode-adaptive array 的可选执行模式，不再作为 P2 主线。

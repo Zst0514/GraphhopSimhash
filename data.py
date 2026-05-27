@@ -12,6 +12,67 @@ ensure_repo_paths()
 from task_constructor import UnifiedTaskConstructor  # noqa: E402
 from utils import SentenceEncoder  # noqa: E402
 
+
+def ensure_arxiv_masks(data, ds_key, device):
+    if hasattr(data, "train_mask") or ds_key.lower() != "arxiv":
+        return False
+
+    print("[Info] Generating masks for Arxiv...")
+    node_year_path = os.path.join("data", "ogbn_arxiv", "raw", "node_year.csv.gz")
+    if os.path.exists(node_year_path):
+        try:
+            import gzip
+            import pandas as pd
+
+            print(f"[Info] Found {node_year_path}. Generating Standard Time Split (<2018, 2018, >=2019)...")
+            with gzip.open(node_year_path, "rt") as f:
+                node_years = pd.read_csv(f, header=None).values.flatten()
+
+            node_years = torch.tensor(node_years, device=device)
+            data.train_mask = node_years <= 2017
+            data.val_mask = node_years == 2018
+            data.test_mask = node_years >= 2019
+            print(
+                f"[Success] Generated Time-Split Masks. "
+                f"Train: {data.train_mask.sum()}, Val: {data.val_mask.sum()}, Test: {data.test_mask.sum()}"
+            )
+            return True
+        except Exception as e:
+            print(f"[Warning] Manual split failed: {e}. Falling back...")
+
+    try:
+        import builtins
+        from ogb.nodeproppred import PygNodePropPredDataset
+
+        original_input = builtins.input
+        try:
+            builtins.input = lambda *args: "n"
+            dataset = PygNodePropPredDataset(name="ogbn-arxiv", root="./data")
+        finally:
+            builtins.input = original_input
+
+        split_idx = dataset.get_idx_split()
+        train_idx, valid_idx, test_idx = split_idx["train"], split_idx["valid"], split_idx["test"]
+        data.train_mask = torch.zeros(data.num_nodes, dtype=torch.bool, device=device)
+        data.train_mask[train_idx] = True
+        data.val_mask = torch.zeros(data.num_nodes, dtype=torch.bool, device=device)
+        data.val_mask[valid_idx] = True
+        data.test_mask = torch.zeros(data.num_nodes, dtype=torch.bool, device=device)
+        data.test_mask[test_idx] = True
+        return True
+    except Exception as e:
+        print(f"[Warning] OGB Split failed: {e}. Fallback to random splits...")
+        n = data.num_nodes
+        indices = torch.randperm(n, device=device)
+        data.train_mask = torch.zeros(n, dtype=torch.bool, device=device)
+        data.train_mask[indices[: int(n * 0.6)]] = True
+        data.val_mask = torch.zeros(n, dtype=torch.bool, device=device)
+        data.val_mask[indices[int(n * 0.6) : int(n * 0.8)]] = True
+        data.test_mask = torch.zeros(n, dtype=torch.bool, device=device)
+        data.test_mask[indices[int(n * 0.8) :]] = True
+        return True
+
+
 def load_data_pipeline(ds_key, params, device):
     batch_size = 1 if "llama2" in params.llm_name.lower() else params.batch_size
     encoder = SentenceEncoder(params.llm_name, batch_size=batch_size)
@@ -26,57 +87,8 @@ def load_data_pipeline(ds_key, params, device):
         loaded = torch.load(st_data_path)
         data = loaded[0] if isinstance(loaded, tuple) else loaded
 
-        if not hasattr(data, "train_mask") and ds_key.lower() == "arxiv":
-            print("[Info] Generating masks for Arxiv...")
-            node_year_path = os.path.join("data", "ogbn_arxiv", "raw", "node_year.csv.gz")
-            if os.path.exists(node_year_path):
-                try:
-                    import gzip
-                    import pandas as pd
-
-                    print(f"[Info] Found {node_year_path}. Generating Standard Time Split (<2018, 2018, >=2019)...")
-                    with gzip.open(node_year_path, "rt") as f:
-                        node_years = pd.read_csv(f, header=None).values.flatten()
-
-                    node_years = torch.tensor(node_years, device=device)
-                    data.train_mask = node_years <= 2017
-                    data.val_mask = node_years == 2018
-                    data.test_mask = node_years >= 2019
-                    print(
-                        f"[Success] Generated Time-Split Masks. "
-                        f"Train: {data.train_mask.sum()}, Val: {data.val_mask.sum()}, Test: {data.test_mask.sum()}"
-                    )
-                    return data.to(device), encoder
-                except Exception as e:
-                    print(f"[Warning] Manual split failed: {e}. Falling back...")
-
-            try:
-                import builtins
-                from ogb.nodeproppred import PygNodePropPredDataset
-
-                original_input = builtins.input
-                builtins.input = lambda *args: "n"
-                dataset = PygNodePropPredDataset(name="ogbn-arxiv", root="./data")
-                builtins.input = original_input
-
-                split_idx = dataset.get_idx_split()
-                train_idx, valid_idx, test_idx = split_idx["train"], split_idx["valid"], split_idx["test"]
-                data.train_mask = torch.zeros(data.num_nodes, dtype=torch.bool, device=device)
-                data.train_mask[train_idx] = True
-                data.val_mask = torch.zeros(data.num_nodes, dtype=torch.bool, device=device)
-                data.val_mask[valid_idx] = True
-                data.test_mask = torch.zeros(data.num_nodes, dtype=torch.bool, device=device)
-                data.test_mask[test_idx] = True
-            except Exception as e:
-                print(f"[Warning] OGB Split failed: {e}. Fallback to random splits...")
-                n = data.num_nodes
-                indices = torch.randperm(n, device=device)
-                data.train_mask = torch.zeros(n, dtype=torch.bool, device=device)
-                data.train_mask[indices[: int(n * 0.6)]] = True
-                data.val_mask = torch.zeros(n, dtype=torch.bool, device=device)
-                data.val_mask[indices[int(n * 0.6) : int(n * 0.8)]] = True
-                data.test_mask = torch.zeros(n, dtype=torch.bool, device=device)
-                data.test_mask[indices[int(n * 0.8) :]] = True
+        if ensure_arxiv_masks(data, ds_key, device):
+            torch.save(data.cpu(), st_data_path)
 
         if hasattr(data, "train_masks") and not hasattr(data, "train_mask"):
             data.train_mask = data.train_masks[0]
@@ -107,6 +119,8 @@ def load_data_pipeline(ds_key, params, device):
         data.val_mask = data.val_masks[0]
         data.test_mask = data.test_masks[0]
 
+    ensure_arxiv_masks(data, ds_key, device)
+
     if not os.path.exists(st_data_path):
         print(f"[Cache] Saving generated Features to {st_data_path}")
         os.makedirs(os.path.dirname(st_data_path), exist_ok=True)
@@ -114,6 +128,8 @@ def load_data_pipeline(ds_key, params, device):
         data = data.to(device)
 
     return data.to(device), encoder
+
+
 def load_raw_texts(ds_key):
     ds_key = ds_key.lower()
     if ds_key == "cora":

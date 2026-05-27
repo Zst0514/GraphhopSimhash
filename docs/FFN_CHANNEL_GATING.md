@@ -175,4 +175,4 @@ Graph/TSER scheduler
 - 对高风险 batch 走 full-channel GEMM；
 - scheduler 以 degree / TSER / confidence score 选择 gated node set。
 
-当前结论：FFN channel gating 不是单独替代 FullW4A8 的精度方案，而是一个 graph-aware hierarchical encoder execution path。它适合作为 NPU 层面的核心落地点之一。
+当前结论：FFN channel gating 不是单独替代 FullW4A8 的精度方案，也不再作为 P2 主线。它更适合作为 Graph-Bit NPU 中 mode-adaptive PE array 的辅助执行模式；主线硬件点是 graph-conditioned activation precision-depth / bit-plane execution。

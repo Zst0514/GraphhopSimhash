@@ -2,7 +2,7 @@
 
 Date: 2026-05-27
 
-This summary records the first validation pass for Graph-Bit: graph-conditioned bit-depth execution for LLaMA-7B encoder embeddings on Cora and PubMed.
+This summary records the validation pass for Graph-Bit: graph-conditioned bit-depth execution for LLaMA-7B encoder embeddings on Cora, PubMed, and Arxiv.
 
 ## Goal
 
@@ -72,6 +72,19 @@ Logs:
 - `output/graph_bit_validation/precision_depth/*.log`
 - `output/graph_bit_validation/precision_depth_aggressive_10runs/*.log`
 - `output/graph_bit_validation/reuse_precision_depth/*.log`
+- `output/graph_bit_validation/precision_depth_arxiv_10runs/*.log`
+
+Debug / oracle policies are intentionally not part of the main strategy:
+
+```text
+PredictorDepthBudget:
+    uses calibration nodes to fit a damage predictor.
+    useful for debugging proxy quality, not the main deployable policy.
+
+OracleDamageBudget:
+    uses true reference-vs-low-precision embedding damage.
+    useful as an upper bound, not deployable.
+```
 
 ## Pure Graph-Bit Results
 
@@ -95,15 +108,25 @@ Each row uses the same P8/P6/P5/P4 budget across routing policies. Lower Drop is
 | 30/40/20/10 | 0.404 | 1.25 | 1.03 | 1.21 | 1.24 | 1.51 | Degree |
 | 50/30/20/0  | 0.436 | 0.72 | 0.64 | 0.74 | 0.70 | 0.86 | Degree |
 
+### Arxiv / LLaMA-7B
+
+| Budget P8/P6/P5/P4 | Cost | Random | Degree | TSER | Context | LowUnique | Best |
+|---|---:|---:|---:|---:|---:|---:|---|
+| 10/20/30/40 | 0.346 | 0.82 | 0.59 | 0.66 | 0.75 | 0.87 | Degree |
+| 20/30/30/20 | 0.378 | 0.52 | 0.36 | 0.38 | 0.45 | 0.57 | Degree |
+| 30/40/20/10 | 0.404 | 0.36 | 0.22 | 0.26 | 0.34 | 0.43 | Degree |
+| 50/30/20/0  | 0.436 | 0.21 | 0.12 | 0.13 | 0.18 | 0.21 | Degree |
+
 Main observation:
 
-Degree / propagation risk is the most stable deployable policy, especially on PubMed. Context is sometimes strong on Cora, but less stable across datasets.
+Degree / propagation risk is the most stable deployable policy across PubMed and Arxiv, and remains competitive on Cora. Context is sometimes strong on Cora, but less stable across datasets.
 
 Recommended operating points:
 
 - Cost 0.404 (`P8/P6/P5/P4 = 30/40/20/10`): best balanced point. Degree gives 0.64% drop on Cora and 1.03% drop on PubMed.
 - Cost 0.436 (`P8/P6/P5/P4 = 50/30/20/0`): near-lossless point. Context is best on Cora, Degree is best on PubMed.
 - Cost 0.378 (`P8/P6/P5/P4 = 20/30/30/20`): aggressive but usable; Degree remains the most stable deployable policy.
+- On Arxiv, Degree is best in all four budget points, with drops from 0.59% down to 0.12%.
 
 ## Aggressive Graph-Bit Sweep
 

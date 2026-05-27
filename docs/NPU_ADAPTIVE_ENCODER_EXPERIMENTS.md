@@ -98,11 +98,19 @@ RandomBudget
 DegreeBudget
 TSERBudget
 ContextBudget
-PredictorBudget
-OracleDamageBudget
 ```
 
-其中 `OracleDamageBudget` 只能作为上界，因为它需要全图已知低成本路径相对 reference 的真实误差。
+主线策略只使用在线可得的图/文本 proxy。`PredictorBudget` 和 `OracleDamageBudget` 降级为 debug/oracle：
+
+```text
+PredictorBudget:
+    需要额外 calibration nodes 学 damage predictor。
+    用于检查 proxy 上限，不作为主策略。
+
+OracleDamageBudget:
+    需要全图已知低成本路径相对 reference 的真实误差。
+    只能作为不可部署上界。
+```
 
 ### 4.2 Token Budget Router
 
@@ -269,7 +277,7 @@ PredictorTokenBudget  20%    50%    30%    0.208  0.7308  0.02%  0.00455
 OracleDamageBudget    20%    50%    30%    0.208  0.7328 -0.18%  0.00349
 ```
 
-`PredictorTokenBudget` 使用少量 calibration nodes 拟合线性 damage predictor：
+`PredictorTokenBudget` 使用少量 calibration nodes 拟合线性 damage predictor。它是 debug/profiling baseline，不作为主线 deployable 策略：
 
 ```text
 input:

@@ -14,7 +14,7 @@
 ```text
 P0: exact hash reuse
 P1: fuzzy hash reuse + residual correction
-P2: W4A8 encoder + FFN channel gating
+P2: Graph-Bit precision-depth encoder
 P3: full W4A8 encoder
 ```
 
@@ -83,7 +83,26 @@ Cora/ST 纯 reuse sweep 中，TSER `3/1/1` 下的结果：
 
 结论：residual correction 的价值不是单点大幅救回精度，而是在相同 reuse 率下把 reuse-drop 曲线整体下移。
 
-### P2: W4A8 + FFN Channel Gating
+### P2: Graph-Bit Precision-Depth Encoder
+
+当前 P2 主线已经从 FFN channel gating 升级为 Graph-Bit precision-depth execution：
+
+```text
+P8:
+    完整 W4A8 activation bit-plane
+
+P6/P5/P4:
+    对低风险节点提前停止低位 activation bit-plane
+```
+
+正式 datapath、scheduler、buffer 和 cost model 见：
+
+```text
+docs/GRAPH_BIT_NPU_DESIGN.md
+docs/GRAPH_BIT_VALIDATION_SUMMARY.md
+```
+
+### Legacy / Auxiliary: W4A8 + FFN Channel Gating
 
 对没有被 reuse 接收、但风险较低的节点，仍然运行 encoder，但只在 FFN 中保留一部分 channel group：
 
@@ -306,8 +325,9 @@ router supervision       = data_x
 
 ```text
 P0/P1 reuse hierarchy 已验证；
-P2 FFN gating 作为 NPU 执行路径已初步验证；
-P0/P1/P2/P3 的全链路组合仍需要同源 W4A8 backend 下的最终确认。
+P2 主线改为 Graph-Bit precision-depth encoder；
+FFN gating 保留为 mode-adaptive PE array 的辅助执行模式；
+P0/P1/P2/P3 的最终全链路组合应以 Graph-Bit 为 P2。
 ```
 
 ## 6. Reproduce Commands
