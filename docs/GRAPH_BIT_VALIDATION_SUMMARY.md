@@ -70,6 +70,7 @@ python -m GraphhopSimhash \
 Logs:
 
 - `output/graph_bit_validation/precision_depth/*.log`
+- `output/graph_bit_validation/precision_depth_aggressive_10runs/*.log`
 - `output/graph_bit_validation/reuse_precision_depth/*.log`
 
 ## Pure Graph-Bit Results
@@ -103,6 +104,45 @@ Recommended operating points:
 - Cost 0.404 (`P8/P6/P5/P4 = 30/40/20/10`): best balanced point. Degree gives 0.64% drop on Cora and 1.03% drop on PubMed.
 - Cost 0.436 (`P8/P6/P5/P4 = 50/30/20/0`): near-lossless point. Context is best on Cora, Degree is best on PubMed.
 - Cost 0.378 (`P8/P6/P5/P4 = 20/30/30/20`): aggressive but usable; Degree remains the most stable deployable policy.
+
+## Aggressive Graph-Bit Sweep
+
+This sweep pushes more nodes into P5/P4 to find the low-cost boundary. It uses Cora/PubMed, LLaMA-7B, 10 runs.
+
+### Cora / LLaMA-7B
+
+| Budget P8/P6/P5/P4 | Cost | Random | Degree | TSER | Context | LowUnique | Best |
+|---|---:|---:|---:|---:|---:|---:|---|
+| 0/0/50/50   | 0.314 | 3.53 | 3.25 | 3.47 | 3.16 | 3.62 | Context |
+| 0/0/60/40   | 0.319 | 3.14 | 3.08 | 3.12 | 2.86 | 3.09 | Context |
+| 0/10/40/50  | 0.319 | 3.44 | 3.10 | 3.36 | 3.02 | 3.53 | Context |
+| 0/20/30/50  | 0.325 | 3.40 | 3.09 | 3.41 | 3.06 | 3.52 | Context |
+| 0/30/0/70   | 0.319 | 4.02 | 3.79 | 4.04 | 3.86 | 4.29 | Degree |
+| 5/10/35/50  | 0.327 | 3.45 | 3.05 | 3.32 | 3.09 | 3.40 | Degree |
+| 10/0/30/60  | 0.325 | 3.70 | 3.80 | 3.63 | 3.64 | 3.67 | TSER |
+| 10/10/20/60 | 0.330 | 3.63 | 3.68 | 3.62 | 3.65 | 3.57 | LowUnique |
+
+### PubMed / LLaMA-7B
+
+| Budget P8/P6/P5/P4 | Cost | Random | Degree | TSER | Context | LowUnique | Best |
+|---|---:|---:|---:|---:|---:|---:|---|
+| 0/0/50/50   | 0.314 | 3.22 | 3.17 | 3.21 | 3.21 | 3.30 | Degree |
+| 0/0/60/40   | 0.319 | 2.96 | 2.93 | 3.00 | 3.03 | 3.10 | Degree |
+| 0/10/40/50  | 0.319 | 3.12 | 2.93 | 3.01 | 3.12 | 3.22 | Degree |
+| 0/20/30/50  | 0.325 | 3.02 | 2.82 | 2.89 | 2.99 | 3.13 | Degree |
+| 0/30/0/70   | 0.319 | 3.32 | 3.09 | 3.16 | 3.37 | 3.55 | Degree |
+| 5/10/35/50  | 0.327 | 2.98 | 2.68 | 2.77 | 2.98 | 3.10 | Degree |
+| 10/0/30/60  | 0.325 | 3.19 | 2.79 | 2.92 | 3.21 | 3.34 | Degree |
+| 10/10/20/60 | 0.330 | 3.06 | 2.70 | 2.80 | 3.08 | 3.24 | Degree |
+
+Main observation:
+
+- The aggressive region is viable: cost can go down to about 0.319-0.327 while keeping drops around 2.7%-3.1%.
+- PubMed remains Degree-dominated. Degree is best for every aggressive budget.
+- Cora is more context-sensitive. Context wins most low-cost budgets, while Degree remains competitive.
+- Avoid abrupt P6/P4-only routing such as `0/30/0/70`. At the same cost, keeping a P5 middle tier is clearly better.
+- Useful aggressive point: `5/10/35/50`, cost 0.327. Degree gives 3.05% drop on Cora and 2.68% drop on PubMed.
+- Useful no-P8/no-P6 point: `0/0/60/40`, cost 0.319. Context gives 2.86% drop on Cora and Degree gives 2.93% drop on PubMed.
 
 ## Reuse + Graph-Bit Results
 
