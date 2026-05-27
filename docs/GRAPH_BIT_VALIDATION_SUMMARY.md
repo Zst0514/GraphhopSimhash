@@ -23,7 +23,7 @@ Pure Graph-Bit precision-depth budget sweep:
 ```bash
 python -m GraphhopSimhash \
   --datasets cora pubmed \
-  --runs 3 \
+  --runs 10 \
   --experiment_suite precision_depth_ablation \
   --real_quant_model_name llama2_7b \
   --precision_depth_reference_tag W4A8 \
@@ -74,29 +74,35 @@ Logs:
 
 ## Pure Graph-Bit Results
 
-Each row uses the same P8/P6/P5/P4 budget across routing policies. Lower Drop is better.
+Each row uses the same P8/P6/P5/P4 budget across routing policies. Lower Drop is better. The table below is the 10-run LLaMA-7B result.
 
 ### Cora / LLaMA-7B
 
 | Budget P8/P6/P5/P4 | Cost | Random | Degree | TSER | Context | LowUnique | Best |
 |---|---:|---:|---:|---:|---:|---:|---|
-| 10/20/30/40 | 0.346 | 3.61 | 3.30 | 3.55 | 3.27 | 3.27 | Context/LowUnique |
-| 20/30/30/20 | 0.378 | 2.47 | 1.97 | 2.56 | 2.06 | 2.35 | Degree |
-| 30/40/20/10 | 0.404 | 1.79 | 1.32 | 1.81 | 1.32 | 1.64 | Degree/Context |
-| 50/30/20/0  | 0.436 | 0.92 | 0.77 | 0.76 | 0.60 | 0.98 | Context |
+| 10/20/30/40 | 0.346 | 2.73 | 2.52 | 2.66 | 2.43 | 2.69 | Context |
+| 20/30/30/20 | 0.378 | 1.75 | 1.43 | 1.76 | 1.52 | 1.60 | Degree |
+| 30/40/20/10 | 0.404 | 1.07 | 0.64 | 1.19 | 1.03 | 0.98 | Degree |
+| 50/30/20/0  | 0.436 | 0.37 | 0.50 | 0.51 | 0.33 | 0.55 | Context |
 
 ### PubMed / LLaMA-7B
 
 | Budget P8/P6/P5/P4 | Cost | Random | Degree | TSER | Context | LowUnique | Best |
 |---|---:|---:|---:|---:|---:|---:|---|
-| 10/20/30/40 | 0.346 | 2.52 | 2.15 | 2.26 | 2.52 | 2.78 | Degree |
-| 20/30/30/20 | 0.378 | 1.80 | 1.52 | 1.61 | 1.78 | 2.15 | Degree |
-| 30/40/20/10 | 0.404 | 1.35 | 1.03 | 1.18 | 1.31 | 1.75 | Degree |
-| 50/30/20/0  | 0.436 | 0.84 | 0.64 | 0.76 | 0.74 | 1.05 | Degree |
+| 10/20/30/40 | 0.346 | 2.46 | 2.22 | 2.33 | 2.52 | 2.73 | Degree |
+| 20/30/30/20 | 0.378 | 1.74 | 1.53 | 1.66 | 1.74 | 1.95 | Degree |
+| 30/40/20/10 | 0.404 | 1.25 | 1.03 | 1.21 | 1.24 | 1.51 | Degree |
+| 50/30/20/0  | 0.436 | 0.72 | 0.64 | 0.74 | 0.70 | 0.86 | Degree |
 
 Main observation:
 
 Degree / propagation risk is the most stable deployable policy, especially on PubMed. Context is sometimes strong on Cora, but less stable across datasets.
+
+Recommended operating points:
+
+- Cost 0.404 (`P8/P6/P5/P4 = 30/40/20/10`): best balanced point. Degree gives 0.64% drop on Cora and 1.03% drop on PubMed.
+- Cost 0.436 (`P8/P6/P5/P4 = 50/30/20/0`): near-lossless point. Context is best on Cora, Degree is best on PubMed.
+- Cost 0.378 (`P8/P6/P5/P4 = 20/30/30/20`): aggressive but usable; Degree remains the most stable deployable policy.
 
 ## Reuse + Graph-Bit Results
 
@@ -132,4 +138,3 @@ For the full stack, reuse and Graph-Bit should be evaluated as two coupled but s
 
 - reuse gate decides whether a node can skip encoder execution,
 - Graph-Bit decides how deeply the NPU computes bit-planes for nodes that still execute the encoder.
-
