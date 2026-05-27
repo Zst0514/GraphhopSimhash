@@ -1578,6 +1578,386 @@ def run_internal_split_calibration_only(args):
             log_important(f"{'=' * 72}\n")
 
 
+def load_precision_depth_pools(ds_key, args, data, device, log_important):
+    model_name = str(args.real_quant_model_name)
+    reference_tag = str(args.precision_depth_reference_tag)
+    tags = [str(tag) for tag in args.precision_depth_tags]
+    bits = [int(bit) for bit in args.precision_depth_bits]
+    tag_by_bit = {int(bit): str(tag) for bit, tag in zip(bits, tags)}
+
+    reference_path = default_pool_path(ds_key, model_name, reference_tag)
+    depth_paths = {
+        int(bit): default_pool_path(ds_key, model_name, tag)
+        for bit, tag in tag_by_bit.items()
+    }
+    missing = [
+        path
+        for path in [reference_path, *depth_paths.values()]
+        if not os.path.exists(path)
+    ]
+    if missing:
+        msg = "\n".join(f"  - {path}" for path in missing)
+        raise FileNotFoundError(
+            "Precision-depth pools are missing:\n"
+            f"{msg}\n"
+            "Generate them with generate_real_quant_pools, e.g. --configs W4A8 W4A6 W4A5 W4A4."
+        )
+
+    reference = load_tensor_pool(reference_path, device)
+    depth = {bit: load_tensor_pool(path, device) for bit, path in depth_paths.items()}
+
+    expected_nodes = int(data.num_nodes)
+    expected_shape = tuple(reference.shape)
+    for bit, tensor in depth.items():
+        if int(tensor.size(0)) != expected_nodes:
+            raise ValueError(f"P{bit} pool has wrong node count: {tuple(tensor.shape)} vs {expected_nodes}")
+        if tuple(tensor.shape) != expected_shape:
+            raise ValueError(f"P{bit} pool shape {tuple(tensor.shape)} must match reference {expected_shape}")
+
+    log_important(
+        "[PrecisionDepthPools] "
+        f"reference=P{int(args.precision_depth_reference_bits)}:{reference_path} | "
+        f"depths={', '.join(f'P{bit}:{path}' for bit, path in depth_paths.items())}"
+    )
+    log_important(f"[PrecisionDepthPools] shape={expected_shape} | bits={sorted(bits, reverse=True)}")
+    return {
+        "reference": reference,
+        "depth": depth,
+        "bits": sorted(bits),
+        "reference_path": reference_path,
+        "depth_paths": depth_paths,
+        "tag_by_bit": tag_by_bit,
+    }
+
+
+def precision_depth_cost(bit, args):
+    ref_bits = float(args.precision_depth_reference_bits)
+    ratio = 1.0 if int(bit) == int(args.precision_depth_reference_bits) else float(bit) / ref_bits
+    fixed = float(args.precision_depth_fixed_cost)
+    variable = 1.0 - fixed
+    return float(args.precision_depth_cost_scale) * (fixed + variable * ratio)
+
+
+def build_precision_depth_policy_configs(args, bits):
+    bits = sorted(int(bit) for bit in bits)
+    ref_bit = int(args.precision_depth_reference_bits)
+    configs = [(f"FullP{ref_bit}", {"kind": "all_ref"})]
+    for bit in sorted(bits, reverse=True):
+        configs.append((f"AllP{bit}", {"kind": "all_depth", "bit": int(bit)}))
+    configs.extend(
+        [
+            ("RandomDepthBudget", {"kind": "budget", "priority": "random"}),
+            ("DegreeDepthBudget", {"kind": "budget", "priority": "degree"}),
+            ("TSERDepthBudget", {"kind": "budget", "priority": "tser"}),
+            ("ContextDepthBudget", {"kind": "budget", "priority": "context"}),
+            ("LowUniqueDepthBudget", {"kind": "budget", "priority": "low_unique"}),
+            ("PredictorDepthBudget", {"kind": "budget", "priority": "predictor"}),
+            ("OracleDamageBudget", {"kind": "budget", "priority": "oracle_damage"}),
+        ]
+    )
+    return configs
+
+
+def select_precision_depth_actions(
+    policy,
+    scores,
+    args,
+    num_nodes,
+    bits,
+    seed,
+    device,
+    oracle_priority=None,
+    predictor_priority=None,
+):
+    bits = sorted(int(bit) for bit in bits)
+    ref_bit = int(args.precision_depth_reference_bits)
+    if policy["kind"] == "all_ref":
+        return torch.full((num_nodes,), ref_bit, dtype=torch.int64, device=device)
+    if policy["kind"] == "all_depth":
+        return torch.full((num_nodes,), int(policy["bit"]), dtype=torch.int64, device=device)
+    if policy["kind"] != "budget":
+        raise ValueError(f"Unknown precision-depth policy: {policy}")
+
+    priority_name = policy["priority"]
+    if priority_name == "degree":
+        priority = scores["propagation_q"].to(dtype=torch.float32)
+    elif priority_name == "tser":
+        priority = scores["sensitivity_q"].to(dtype=torch.float32)
+    elif priority_name == "context":
+        priority = scores["graph_context_q"].to(dtype=torch.float32)
+    elif priority_name == "low_unique":
+        priority = scores["low_degree_unique_q"].to(dtype=torch.float32)
+    elif priority_name == "oracle_damage":
+        if oracle_priority is None:
+            raise ValueError("oracle_damage policy requires oracle_priority")
+        priority = oracle_priority.to(dtype=torch.float32)
+    elif priority_name == "predictor":
+        if predictor_priority is None:
+            raise ValueError("predictor policy requires predictor_priority")
+        priority = predictor_priority.to(dtype=torch.float32)
+    elif priority_name == "random":
+        generator = torch.Generator(device="cpu")
+        generator.manual_seed(int(seed) + 59999)
+        priority = torch.rand(num_nodes, generator=generator, device="cpu").to(device=device)
+    else:
+        raise ValueError(f"Unknown precision-depth priority: {priority_name}")
+
+    cheapest_bit = int(bits[0])
+    safest_low_bit = int(bits[-1])
+    actions = torch.full((num_nodes,), cheapest_bit, dtype=torch.int64, device=device)
+    order = torch.argsort(priority, descending=True)
+    high_count = int(round(float(args.precision_depth_high_ratio) * num_nodes))
+    mid_count = int(round(float(args.precision_depth_mid_ratio) * num_nodes))
+    high_count = max(0, min(high_count, num_nodes))
+    mid_count = max(0, min(mid_count, num_nodes - high_count))
+    actions[order[:high_count]] = ref_bit
+    actions[order[high_count : high_count + mid_count]] = safest_low_bit
+    return actions
+
+
+def assemble_precision_depth_embeddings(actions, reference_embs, depth_embs):
+    mixed = reference_embs.clone()
+    for bit, embs in depth_embs.items():
+        mask = actions == int(bit)
+        if bool(mask.any()):
+            mixed[mask] = embs[mask]
+    return mixed
+
+
+def summarize_precision_depth_policy(actions, errors_by_bit, bits, args):
+    total = max(1, int(actions.numel()))
+    ref_bit = int(args.precision_depth_reference_bits)
+    rates = {ref_bit: float((actions == ref_bit).float().mean().item())}
+    cost = rates[ref_bit] * precision_depth_cost(ref_bit, args)
+    selected_err = torch.zeros(total, dtype=torch.float32, device=actions.device)
+    selected_err[actions == ref_bit] = errors_by_bit[ref_bit][actions == ref_bit]
+    for bit in bits:
+        mask = actions == int(bit)
+        rate = float(mask.float().mean().item())
+        rates[int(bit)] = rate
+        cost += rate * precision_depth_cost(int(bit), args)
+        selected_err[mask] = errors_by_bit[int(bit)][mask]
+    return {
+        "rates": rates,
+        "cost": float(cost),
+        "avg_err": float(selected_err.mean().item()),
+    }
+
+
+def fit_precision_depth_damage_predictor(ds_key, scores, data, target, args, seed, device):
+    original_samples = getattr(args, "graph_eager_predictor_calib_samples", None)
+    original_ridge = getattr(args, "graph_eager_predictor_ridge", None)
+    args.graph_eager_predictor_calib_samples = int(args.precision_depth_predictor_calib_samples)
+    args.graph_eager_predictor_ridge = float(args.precision_depth_predictor_ridge)
+    try:
+        return fit_graph_eager_damage_predictor(ds_key, scores, data, target, args, seed, device)
+    finally:
+        if original_samples is not None:
+            args.graph_eager_predictor_calib_samples = original_samples
+        if original_ridge is not None:
+            args.graph_eager_predictor_ridge = original_ridge
+
+
+def run_precision_depth_ablation(args):
+    target_datasets = args.datasets if args.datasets else ["cora"]
+    log_dir = os.path.join("output", "precision_depth")
+    os.makedirs(log_dir, exist_ok=True)
+
+    for ds_key in target_datasets:
+        if ds_key not in DATASET_CONFIGS:
+            continue
+
+        dataset_log_dir = os.path.join(log_dir, ds_key)
+        os.makedirs(dataset_log_dir, exist_ok=True)
+        log_path = build_log_path(dataset_log_dir, ds_key, args)
+        bits = sorted(int(bit) for bit in args.precision_depth_bits)
+        ref_bit = int(args.precision_depth_reference_bits)
+        configs = build_precision_depth_policy_configs(args, bits)
+
+        results = {
+            name: {
+                "acc": [],
+                "drop": [],
+                "avg_err": [],
+                "cost": [],
+                f"P{ref_bit}": [],
+                **{f"P{bit}": [] for bit in bits},
+            }
+            for name, _policy in configs
+        }
+        results["baseline"] = []
+
+        with open(log_path, "w", encoding="utf-8") as summary_file:
+            def log_important(msg):
+                print(msg)
+                summary_file.write(msg + "\n")
+                summary_file.flush()
+
+            log_important(f"\n{'=' * 72}")
+            log_important(f"Running Graph-Conditioned Precision-Depth Ablation on {ds_key.upper()}")
+            log_important(f"{'=' * 72}")
+            log_important(
+                "[PrecisionDepthCost] "
+                f"model={args.real_quant_model_name} | reference={args.precision_depth_reference_tag}/P{ref_bit} "
+                f"| tags={list(zip(args.precision_depth_tags, args.precision_depth_bits))} "
+                f"| high_ratio={args.precision_depth_high_ratio:.2f} "
+                f"| mid_ratio={args.precision_depth_mid_ratio:.2f} "
+                f"| cost_scale={args.precision_depth_cost_scale:.2f} "
+                f"| fixed_cost={args.precision_depth_fixed_cost:.2f}"
+            )
+
+            seeds = [int(args.seed) + run_idx for run_idx in range(args.runs)]
+            for run_idx, seed in enumerate(seeds):
+                log_important(f"\n--- Run {run_idx + 1}/{args.runs} (Seed {seed}) ---")
+                run_args = make_run_args(args, seed)
+                _conf, data, verify_features, device = load_run_state(ds_key, run_args, seed)
+                pools = load_precision_depth_pools(ds_key, run_args, data, device, log_important)
+
+                data.x = pools["reference"]
+                model, base_acc, ref_embs, ref_logits = train_baseline_model(data, run_args, device)
+                results["baseline"].append(base_acc)
+                log_important(f"[Baseline:P{ref_bit}] Acc: {base_acc:.4f}")
+
+                model.eval()
+                with torch.no_grad():
+                    depth_embs = {
+                        bit: model.encoder(pool)
+                        for bit, pool in pools["depth"].items()
+                    }
+
+                scores = build_real_quant_scores(verify_features, data, run_args, device)
+                errors_by_bit = {ref_bit: embedding_error(ref_embs, ref_embs)}
+                for bit, embs in depth_embs.items():
+                    errors_by_bit[int(bit)] = embedding_error(ref_embs, embs)
+
+                ref_pred = ref_logits.argmax(dim=1)
+                ref_margin = node_logit_margin(ref_logits)
+                proxy_items = [
+                    ("Degree", scores["propagation_q"]),
+                    ("Context", scores["graph_context_q"]),
+                    ("LowUnique", scores["low_degree_unique_q"]),
+                    ("TSER", scores["sensitivity_q"]),
+                ]
+                margin_drop_by_bit = {}
+                for bit in sorted(bits, reverse=True):
+                    with torch.no_grad():
+                        depth_logits = forward_gnn_logits(model, data, depth_embs[int(bit)])
+                    depth_pred = depth_logits.argmax(dim=1)
+                    depth_margin = node_logit_margin(depth_logits)
+                    margin_drop = (ref_margin - depth_margin).clamp(min=0.0)
+                    margin_drop_by_bit[int(bit)] = margin_drop
+                    flip = depth_pred != ref_pred
+                    err = errors_by_bit[int(bit)]
+                    proxy_text = []
+                    for proxy_name, proxy_score in proxy_items:
+                        proxy_text.append(
+                            f"{proxy_name}:rho_err={spearman_corr(proxy_score, err):.3f},"
+                            f"rho_margin={spearman_corr(proxy_score, margin_drop):.3f},"
+                            f"auc_flip={binary_auc(proxy_score, flip):.3f}"
+                        )
+                    log_important(f"[PrecisionDepthCorr] P{bit} " + " | ".join(proxy_text))
+
+                log_important(
+                    "[PrecisionDepthScore] "
+                    f"prop_mean={scores['propagation_q'].float().mean().item():.1f} | "
+                    f"context_mean={scores['graph_context_q'].float().mean().item():.1f} | "
+                    f"low_unique_mean={scores['low_degree_unique_q'].float().mean().item():.1f} | "
+                    f"tser_mean={scores['sensitivity_q'].float().mean().item():.1f}"
+                )
+                err_parts = [f"P{ref_bit}=0.00000"] + [
+                    f"P{bit}={errors_by_bit[int(bit)].mean().item():.5f}"
+                    for bit in sorted(bits, reverse=True)
+                ]
+                log_important("[PrecisionDepthError] " + " | ".join(err_parts))
+
+                cheapest_bit = int(bits[0])
+                oracle_priority = errors_by_bit[cheapest_bit]
+                if run_args.precision_depth_predictor_target == "margin":
+                    predictor_target = margin_drop_by_bit[cheapest_bit]
+                else:
+                    predictor_target = oracle_priority
+                predictor_priority, predictor_info = fit_precision_depth_damage_predictor(
+                    ds_key,
+                    scores,
+                    data,
+                    predictor_target,
+                    run_args,
+                    seed,
+                    device,
+                )
+                log_important(
+                    "[PrecisionDepthPredictor] "
+                    f"target={run_args.precision_depth_predictor_target} | "
+                    f"calib={predictor_info['calib_samples']} | "
+                    f"rho_train={predictor_info['train_rho']:.3f} | "
+                    f"rho_all={predictor_info['all_rho']:.3f}"
+                )
+
+                for name, policy in configs:
+                    actions = select_precision_depth_actions(
+                        policy,
+                        scores,
+                        run_args,
+                        int(data.num_nodes),
+                        bits,
+                        seed,
+                        device,
+                        oracle_priority=oracle_priority,
+                        predictor_priority=predictor_priority,
+                    )
+                    mixed_embs = assemble_precision_depth_embeddings(actions, ref_embs, depth_embs)
+                    acc = evaluate_gnn_embeddings(model, data, mixed_embs)
+                    drop = base_acc - acc
+                    stats = summarize_precision_depth_policy(actions, errors_by_bit, bits, run_args)
+
+                    results[name]["acc"].append(acc)
+                    results[name]["drop"].append(drop)
+                    results[name]["avg_err"].append(stats["avg_err"])
+                    results[name]["cost"].append(stats["cost"])
+                    results[name][f"P{ref_bit}"].append(stats["rates"][ref_bit])
+                    for bit in bits:
+                        results[name][f"P{bit}"].append(stats["rates"][int(bit)])
+
+                    bit_rate_text = " | ".join(
+                        f"P{bit}={stats['rates'][int(bit)]:.1%}"
+                        for bit in sorted(bits, reverse=True)
+                    )
+                    log_important(
+                        f"[{name}] P{ref_bit}={stats['rates'][ref_bit]:.1%} | {bit_rate_text} "
+                        f"| Cost={stats['cost']:.3f} | Acc={acc:.4f} "
+                        f"| Drop={drop:.2%} | AvgErr={stats['avg_err']:.5f}"
+                    )
+
+            log_important(f"\n{'=' * 72}")
+            log_important(f"FINAL PRECISION-DEPTH SUMMARY ({args.runs} Runs) | {ds_key.upper()}")
+            log_important(f"{'=' * 72}")
+            base_mean = float(np.mean(results["baseline"]))
+            log_important(f"Baseline Acc: {base_mean:.4f}")
+            depth_headers = [f"P{bit} %" for bit in [ref_bit, *sorted(bits, reverse=True)]]
+            log_important("-" * 144)
+            log_important(
+                f"{'Config':<24} | "
+                + " | ".join(f"{header:<8}" for header in depth_headers)
+                + f" | {'Cost':<8} | {'Acc':<10} | {'Drop %':<10} | {'AvgErr':<10}"
+            )
+            log_important("-" * 144)
+            for name, _policy in configs:
+                rate_values = [
+                    float(np.mean(results[name][f"P{bit}"]))
+                    for bit in [ref_bit, *sorted(bits, reverse=True)]
+                ]
+                cost = float(np.mean(results[name]["cost"]))
+                acc = float(np.mean(results[name]["acc"]))
+                drop = float(np.mean(results[name]["drop"]))
+                avg_err = float(np.mean(results[name]["avg_err"]))
+                log_important(
+                    f"{name:<24} | "
+                    + " | ".join(f"{rate:<8.1%}" for rate in rate_values)
+                    + f" | {cost:<8.3f} | {acc:<10.4f} | {drop:<10.2%} | {avg_err:<10.5f}"
+                )
+            log_important(f"{'=' * 72}\n")
+
+
 def run_graph_eager_token_experiment(args):
     target_datasets = args.datasets if args.datasets else ["cora"]
     log_dir = os.path.join("output", "graph_eager_token")
@@ -2934,6 +3314,8 @@ def run_adaptive_simulation(args):
         return run_ffn_channel_gating_experiment(args)
     if args.experiment_suite == "hierarchical_encoder":
         return run_hierarchical_encoder_experiment(args)
+    if args.experiment_suite == "precision_depth_ablation":
+        return run_precision_depth_ablation(args)
 
     target_datasets = args.datasets if args.datasets else ["cora"]
     log_dir = os.path.join("output", "graph_simhash")

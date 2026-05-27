@@ -26,11 +26,13 @@ def build_parser():
             "token_compaction",
             "ffn_channel_gating",
             "hierarchical_encoder",
+            "precision_depth_ablation",
         ],
         help=(
             "Run one config, score/quant ablations, real quantization, joint reuse+real-quantization, "
             "residual reuse validation, graph-eager token routing, token compaction validation, "
-            "FFN channel-gating validation, or full hierarchical encoder validation."
+            "FFN channel-gating validation, full hierarchical encoder validation, or graph-conditioned "
+            "precision-depth routing."
         ),
     )
     parser.add_argument(
@@ -529,6 +531,75 @@ def build_parser():
         choices=["embedding", "margin"],
         help="Predict shortened-token embedding damage or downstream logit margin damage.",
     )
+    parser.add_argument(
+        "--precision_depth_reference_tag",
+        type=str,
+        default="W4A8",
+        help="Full precision-depth embedding tag used as P8 reference.",
+    )
+    parser.add_argument(
+        "--precision_depth_tags",
+        type=str,
+        nargs="+",
+        default=["W4A6", "W4A5", "W4A4"],
+        help="Lower precision-depth embedding tags, ordered independently from --precision_depth_bits.",
+    )
+    parser.add_argument(
+        "--precision_depth_bits",
+        type=int,
+        nargs="+",
+        default=[6, 5, 4],
+        help="Activation precision-depth bits corresponding to --precision_depth_tags.",
+    )
+    parser.add_argument(
+        "--precision_depth_reference_bits",
+        type=int,
+        default=8,
+        help="Reference activation bit-depth, normally 8 for W4A8.",
+    )
+    parser.add_argument(
+        "--precision_depth_cost_scale",
+        type=float,
+        default=0.50,
+        help="Cost of full P8 W4A8 relative to full FP encoder cost.",
+    )
+    parser.add_argument(
+        "--precision_depth_fixed_cost",
+        type=float,
+        default=0.15,
+        help="Fixed non-bit-serial overhead fraction in the precision-depth cost model.",
+    )
+    parser.add_argument(
+        "--precision_depth_high_ratio",
+        type=float,
+        default=0.20,
+        help="Ratio routed to full reference precision in budget policies.",
+    )
+    parser.add_argument(
+        "--precision_depth_mid_ratio",
+        type=float,
+        default=0.30,
+        help="Ratio routed to the safest lower precision-depth in budget policies. The rest use the cheapest depth.",
+    )
+    parser.add_argument(
+        "--precision_depth_predictor_calib_samples",
+        type=int,
+        default=512,
+        help="Calibration nodes used to fit the precision-depth damage predictor.",
+    )
+    parser.add_argument(
+        "--precision_depth_predictor_ridge",
+        type=float,
+        default=1e-2,
+        help="Ridge regularization for the precision-depth linear damage predictor.",
+    )
+    parser.add_argument(
+        "--precision_depth_predictor_target",
+        type=str,
+        default="embedding",
+        choices=["embedding", "margin"],
+        help="Predict lowest-depth embedding damage or downstream logit margin damage.",
+    )
     parser.add_argument("--token_compaction_reference_tag", type=str, default="W4A16")
     parser.add_argument("--token_compaction_full_tag", type=str, default="W4A8")
     parser.add_argument(
@@ -945,6 +1016,32 @@ def validate_args(parser, args):
         parser.error("--graph_eager_predictor_calib_samples must be positive")
     if args.graph_eager_predictor_ridge < 0:
         parser.error("--graph_eager_predictor_ridge must be non-negative")
+    if not args.precision_depth_tags:
+        parser.error("--precision_depth_tags must contain at least one tag")
+    if not args.precision_depth_bits:
+        parser.error("--precision_depth_bits must contain at least one bit-depth")
+    if len(args.precision_depth_tags) != len(args.precision_depth_bits):
+        parser.error("--precision_depth_tags and --precision_depth_bits must have the same length")
+    if args.precision_depth_reference_bits <= 0:
+        parser.error("--precision_depth_reference_bits must be positive")
+    if any(bit <= 0 for bit in args.precision_depth_bits):
+        parser.error("--precision_depth_bits values must be positive")
+    if max(args.precision_depth_bits) >= args.precision_depth_reference_bits:
+        parser.error("--precision_depth_bits must be smaller than --precision_depth_reference_bits")
+    if args.precision_depth_cost_scale <= 0:
+        parser.error("--precision_depth_cost_scale must be positive")
+    if not (0.0 <= args.precision_depth_fixed_cost < 1.0):
+        parser.error("--precision_depth_fixed_cost must be in [0, 1)")
+    if not (0.0 <= args.precision_depth_high_ratio <= 1.0):
+        parser.error("--precision_depth_high_ratio must be in [0, 1]")
+    if not (0.0 <= args.precision_depth_mid_ratio <= 1.0):
+        parser.error("--precision_depth_mid_ratio must be in [0, 1]")
+    if args.precision_depth_high_ratio + args.precision_depth_mid_ratio > 1.0:
+        parser.error("--precision_depth_high_ratio + --precision_depth_mid_ratio must be <= 1")
+    if args.precision_depth_predictor_calib_samples <= 0:
+        parser.error("--precision_depth_predictor_calib_samples must be positive")
+    if args.precision_depth_predictor_ridge < 0:
+        parser.error("--precision_depth_predictor_ridge must be non-negative")
     if not args.token_compaction_tags:
         parser.error("--token_compaction_tags must contain at least one tag")
     if args.token_compaction_names is not None and len(args.token_compaction_names) != len(args.token_compaction_tags):

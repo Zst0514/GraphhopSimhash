@@ -1,6 +1,6 @@
 # Graph-Aware Encoder NPU Design Proposal
 
-本文档基于当前 GraphHopSimhash 实验、TSER/reuse 文档、FFN gating 原型和 LLM 加速器综述，整理一套更适合写成体系结构贡献的 NPU 设计方案。
+本文档基于当前 GraphHopSimhash 实验、TSER/reuse 文档、precision-depth 模拟、FFN gating 原型和 LLM 加速器综述，整理一套更适合写成体系结构贡献的 NPU 设计方案。
 
 核心判断先说清楚：
 
@@ -8,12 +8,211 @@
 不要把主创新写成 degree-guided W4A8/W4A4 quant routing。
 
 更有价值的主线是：
-Graph-aware hierarchical encoder execution
+Graph-Bit NPU: graph-conditioned precision-depth execution
 
 也就是：
-图后端风险信息不只用于 GNN，
-而是直接决定每个 graph-text node 的 LLM encoder 应该走哪条硬件执行路径。
+图后端风险信息不只用于 GNN 或 reuse gate，
+而是直接进入 LLM encoder NPU 的 datapath，
+控制每个 graph-text node 在 GEMM 内部到底算到多少 bit-plane。
 ```
+
+## 0. Graph-Bit NPU：当前最值得主打的架构线
+
+### 0.1 一句话定义
+
+Graph-Bit NPU 的目标是：
+
+```text
+Graph risk controls arithmetic precision depth inside the LLM encoder NPU.
+```
+
+它不是普通的量化路由，也不是简单决定某些节点走 W4A8、某些节点走 W4A4。它更深入一层：当一个节点已经被判定必须执行 LLM encoder 时，NPU 内部的 bit-serial / bit-grained GEMM 不必对所有节点都完整执行 A8 bit-plane，而是由图任务风险决定执行深度：
+
+```text
+high-risk node:
+    P8 / P6，保留更多 activation bit-plane
+
+medium-risk node:
+    P6 / P5，少算部分低位 bit-plane
+
+low-risk node:
+    P5 / P4，更早停止低位计算
+```
+
+因此 Graph-Bit 的核心不是“跳过一个模块”，而是让图后端信息控制 NPU array 的算术努力。
+
+### 0.2 为什么它比 degree-guided quant routing 更适合做主贡献
+
+Degree-guided W4A8/W4A4 routing 的问题是：它仍然停留在系统层选择路径。
+
+```text
+degree routing:
+    选择哪个节点用 W4A8，哪个节点用 W4A4
+
+Graph-Bit:
+    在 W4A8-style encoder NPU 内部，
+    控制 bit-plane sequencer、partial-sum accumulator、early-stop mask
+```
+
+前者更像硬件友好的 baseline；后者真正落到了：
+
+```text
+datatype
+bit-serial datapath
+activation bit-plane traffic
+partial-sum execution depth
+array utilization
+```
+
+这更符合 HPCA / ISCA / MICRO 体系结构论文需要回答的问题：不是只说“谁更重要”，而是说明“重要性如何改变硬件执行方式”。
+
+### 0.3 为什么它适合 graph-text encoder workload
+
+Graph-text encoder 与普通 LLM serving 的差别在于，每个节点 embedding 的任务价值不同：
+
+```text
+hub / high-degree node:
+    embedding 误差会传播到更多邻居，低位误差也可能放大
+
+boundary node:
+    节点位于语义或结构边界，embedding 扰动更容易跨分类边界
+
+rare low-degree node:
+    传播范围小，但自身语义稀有，错误 embedding 可能直接毁掉自身预测
+
+homogeneous low-risk node:
+    位于同质社区，邻域冗余强，对小数值扰动更鲁棒
+```
+
+普通 bit-serial accelerator 对所有样本使用统一 stopping rule。Graph-Bit 的新点是：
+
+```text
+同样是 bit-serial early termination，
+但 tolerance 不是固定常数，
+而是由 graph risk 动态设置。
+```
+
+### 0.4 建议的硬件抽象
+
+Graph-Bit NPU 内部保留一个 W4 weight path，activation 以 A8 逻辑格式进入，但执行时按 bit-plane 渐进计算：
+
+```text
+Activation A8:
+    b7 b6 b5 b4 b3 b2 b1 b0
+
+P8:
+    compute b7..b0
+
+P6:
+    compute b7..b2
+
+P5:
+    compute b7..b3
+
+P4:
+    compute b7..b4
+```
+
+硬件模块：
+
+```text
+1. graph-risk register
+   每个 node batch 保存 risk mode / precision depth
+
+2. bit-plane sequencer
+   控制 activation bit-plane 从 MSB 到 LSB 送入 PE array
+
+3. partial-sum scoreboard
+   记录当前 bit-plane 已累加的 partial sum
+
+4. remaining-error bound estimator
+   可选，用于 true early termination
+
+5. early-stop mask generator
+   达到 P6/P5/P4 或满足 bound 后停止低位 bit-plane
+
+6. mode-aware scheduler
+   把节点按 P8/P6/P5/P4 分 batch，提高阵列利用率
+```
+
+### 0.5 两阶段落地路线
+
+第一阶段使用固定 precision depth，先验证方向：
+
+```text
+P8 / P6 / P5 / P4 offline embedding pools
+    ~= bit-serial early termination 的离线近似
+```
+
+这正对应当前 `precision_depth_ablation`：
+
+```text
+FullP8
+AllP6 / AllP5 / AllP4
+RandomDepthBudget
+DegreeDepthBudget
+TSERDepthBudget
+ContextDepthBudget
+PredictorDepthBudget
+OracleDamageBudget
+```
+
+第二阶段再做真正的 bit-level bound：
+
+```text
+for each bit-plane:
+    update partial sum
+    estimate remaining low-bit contribution
+    if bound < graph-conditioned tolerance:
+        stop
+```
+
+这样可以从“离线多精度 embedding pool 实验”自然过渡到“真实 NPU bit-serial datapath 设计”。
+
+### 0.6 和现有系统路径的关系
+
+Graph-Bit 不替代 SimHash/reuse，而是补齐必须执行 encoder 的那部分：
+
+```text
+P0: exact hash reuse
+    不跑 encoder
+
+P1: fuzzy hash reuse + residual correction
+    不跑 full encoder，只做轻量 adapter
+
+P2: Graph-Bit precision-depth encoder
+    必须跑 encoder，但低风险节点少算 bit-plane
+
+P3: full W4A8 encoder
+    高风险节点完整执行
+```
+
+这条线把整个系统组织成：
+
+```text
+减少 encoder 调用次数:
+    SimHash reuse / residual correction
+
+降低单次 encoder 执行成本:
+    Graph-Bit precision-depth NPU
+```
+
+### 0.7 论文中应该主打的贡献表述
+
+推荐写法：
+
+```text
+We propose Graph-Bit, a graph-conditioned precision-depth NPU for graph-text LLM encoders.
+Graph-Bit maps graph semantic risk to bit-plane execution depth, allowing low-risk nodes to terminate activation bit-serial GEMM earlier while preserving high-risk nodes with full W4A8 execution.
+```
+
+不要写成：
+
+```text
+We route high-degree nodes to W4A8 and low-degree nodes to W4A4.
+```
+
+后者会显得像已有 degree-aware quantization 的变体；前者强调的是图任务风险进入 NPU 内部算术路径。
 
 ## 1. 当前场景的本质
 
@@ -35,7 +234,7 @@ Graph-text encoder:
 ```text
 某些节点可以直接复用相似节点 embedding；
 某些节点可以轻量修正复用结果；
-某些低风险节点可以少算一部分 FFN/channel；
+某些低风险节点可以少算一部分 bit-plane / mantissa / channel；
 少数高风险节点必须完整 W4A8 encoder。
 ```
 
@@ -52,8 +251,8 @@ P0: Exact hash reuse
 P1: Fuzzy hash reuse + residual correction
     cost ~= embedding cache read + tiny low-rank adapter
 
-P2: Graph-routed W4A8 encoder with FFN/channel gating
-    cost < full W4A8
+P2: Graph-Bit precision-depth encoder
+    graph risk controls bit-plane / mantissa execution depth
 
 P3: Full W4A8 encoder
     high-risk fallback
@@ -66,15 +265,15 @@ Node text + graph metadata
         |
 GraphHash / TSER Router
         |
-+----------------+----------------+---------------------+----------------+
-| P0 exact reuse | P1 residual    | P2 FFN-gated W4A8  | P3 full W4A8  |
-| cache read     | correction     | encoder            | encoder       |
-+----------------+----------------+---------------------+----------------+
++----------------+----------------+----------------------+---------------+
+| P0 exact reuse | P1 residual    | P2 Graph-Bit encoder | P3 full W4A8 |
+| cache read     | correction     | P6/P5/P4 depth       | encoder      |
++----------------+----------------+----------------------+---------------+
         |
 Final node embedding -> GNN / classifier
 ```
 
-这条线的好处是：P0/P1 减少 encoder 调用次数，P2/P3 解决必须执行 encoder 的节点怎么在 NPU 上更便宜地跑。
+这条线的好处是：P0/P1 减少 encoder 调用次数，P2/P3 解决必须执行 encoder 的节点怎么在 NPU datapath 上更便宜地跑。FFN/channel gating 可以作为 P2 的一个补充模式，但不再是唯一或最高优先级的 P2 定义。
 
 ## 3. P0/P1：Hash Reuse + Residual Engine
 
@@ -156,61 +355,169 @@ TSER 3/1/1, T=30:
 
 这条路径非常适合做系统级贡献的一部分。
 
-## 4. P2：Graph-Routed FFN Channel Gating
+## 4. P2：Graph-Bit Precision-Depth Encoder
 
-### 4.1 为什么选 FFN/channel，而不是 attention tile skipping
+### 4.1 为什么 P2 主线应从 FFN gating 升级到 Graph-Bit
 
-根据当前 encoder workload，第一版 NPU 本体优化更建议放在 FFN channel gating：
-
-```text
-1. FFN 在 encoder 中通常占主要 MAC 和 weight traffic；
-2. FFN 中间维度天然可以按 channel group 切；
-3. group-level mask 对硬件规则，不是不规则 sparse；
-4. 不改变 attention softmax 语义，精度风险更可控；
-5. 与 graph-aware scheduler 结合自然。
-```
-
-相比之下，直接迁移 FlashAttention 不够新；attention tile skipping 又容易引入复杂 predictor 和精度风险。
-
-### 4.2 机制
-
-对低风险节点，FFN 只保留部分 channel group：
+FFN/channel gating 已经证明“graph-aware scheduler 能让近似路径更安全”，但它仍然有两个限制：
 
 ```text
-h = FFN_up(x)
-h = activation(h)
-h = h * channel_group_mask
-out = FFN_down(h)
+1. 它只作用在 FFN channel，覆盖范围窄；
+2. channel 是否可跳过不一定和 graph risk 强绑定，精度扰动比较硬。
 ```
 
-例如 `FFN75`：
+Graph-Bit 更适合作为 P2 主线，因为它不改变 Transformer 结构，也不删除特定 token/channel，而是控制 GEMM 的数值执行深度：
 
 ```text
-保留 75% FFN channel
-跳过 25% FFN channel
+full W4A8:
+    所有节点都计算完整 activation bit-plane
+
+Graph-Bit:
+    高风险节点完整计算 P8
+    中风险节点计算 P6/P5
+    低风险节点计算 P4 或更早停止
 ```
 
-硬件可以直接省：
+这更像硬件论文的核心机制：图风险不是只影响路径选择，而是直接控制 bit-serial datapath。
+
+### 4.2 机制：从 A8 逻辑输入到 variable precision-depth execution
+
+NPU 仍然使用 W4 weight path，activation 在逻辑上是 A8，但执行时按 bit-plane 进入阵列：
 
 ```text
-1. skipped channel 的 weight fetch
-2. skipped channel 的 activation write/read
-3. skipped channel 的 MAC
+A8 activation bit-plane:
+    b7 b6 b5 b4 b3 b2 b1 b0
+
+P8:
+    b7..b0 全部计算
+
+P6:
+    b7..b2 计算，b1..b0 跳过
+
+P5:
+    b7..b3 计算，b2..b0 跳过
+
+P4:
+    b7..b4 计算，b3..b0 跳过
 ```
 
-### 4.3 为什么必须 graph-routed
+这等价于把低位 bit-plane 当作 residual precision。低风险节点可以丢掉更多 residual precision；高风险节点保留完整数值路径。
 
-实验已经说明，全图 uniform gating 不成立：
+### 4.3 路由：graph risk 映射到 precision depth
+
+P2 不依赖 oracle error。它使用图上可部署的风险代理：
+
+```text
+propagation_q:
+    误差会传播到多少邻居
+
+graph_context_q:
+    节点是否处在语义/结构边界
+
+low_unique_q:
+    低度但语义稀有节点是否需要保护自身预测
+
+hash/reuse confidence:
+    复用或候选匹配是否可靠
+```
+
+一个简单、稳定的 budget router 是：
+
+```text
+top 20% risk nodes:
+    P8
+
+next 30% risk nodes:
+    P6
+
+remaining 50% nodes:
+    P4
+```
+
+也可以加入 P5 作为中间深度：
+
+```text
+P8 / P6 / P5 / P4
+```
+
+这样避免把论文结论绑死在某个绝对阈值 `T` 上，而是转成固定成本预算下的排序问题。
+
+### 4.4 NPU 数据流
+
+Graph-Bit 的执行流程：
+
+```text
+for each node micro-batch:
+    read precision_depth_mode from graph-risk buffer
+    load W4 weight tile
+    for activation bit-plane from MSB to LSB:
+        feed bit-plane to PE array
+        update partial sum
+        if reached selected depth:
+            stop remaining low-bit planes
+    write output activation
+```
+
+对应新增硬件状态：
+
+```text
+precision-depth mode register:
+    P8 / P6 / P5 / P4
+
+bit-plane sequencer:
+    控制当前送入哪个 activation bit-plane
+
+partial-sum accumulator:
+    累加已计算 bit-plane 的贡献
+
+early-stop mask:
+    达到目标 depth 后关闭低位 bit-plane 的 fetch / MAC
+
+mode-aware batch queue:
+    把相同 depth 的节点聚成 micro-batch，减少控制发散
+```
+
+### 4.5 从固定 depth 到 true early termination
+
+当前离线实验用 P8/P6/P5/P4 embedding pool 模拟不同 bit-depth，这是第一阶段。
+
+更硬件化的第二阶段是 true bit-serial early termination：
+
+```text
+for each bit-plane k:
+    partial_sum += contribution(k)
+    remaining_bound = estimate_low_bit_bound(k)
+    if remaining_bound < graph_tolerance(v):
+        stop
+```
+
+其中：
+
+```text
+graph_tolerance(v) = f(propagation_q, graph_context_q, low_unique_q, confidence)
+```
+
+这和 PADE/BETA 的区别是：PADE/BETA 主要从数值 bound 自身决定能否停止；Graph-Bit 把图任务风险加入 tolerance，因此同样的数值 bound 对高风险节点和低风险节点会触发不同停止行为。
+
+### 4.6 FFN/channel gating 的位置
+
+FFN/channel gating 仍然有价值，但应作为 Graph-Bit 之外的补充候选路径：
+
+```text
+Graph-Bit:
+    优先级更高，控制 bit-plane / mantissa depth
+
+FFN gating:
+    可作为低风险节点上的进一步 channel-level skip
+```
+
+已有实验可以保留为旁证：
 
 ```text
 FullW4A8        Cost 0.500  Drop 0.08%
 Uniform FFN75   Cost 0.419  Drop 6.06%
 Uniform FFN50   Cost 0.338  Drop 9.75%
-```
 
-但只让低风险节点使用 gating 是有效的：
-
-```text
 TSER20_FFN75     Cost 0.484  Drop 0.44%
 Degree20_FFN75   Cost 0.484  Drop 0.52%
 TSER40_FFN75     Cost 0.468  Drop 1.08%
@@ -218,32 +525,7 @@ Degree60_FFN75   Cost 0.451  Drop 1.82%
 Random60_FFN75   Cost 0.451  Drop 3.16%
 ```
 
-这给了一个非常清楚的硬件故事：
-
-```text
-FFN gating 本身不是安全的；
-graph-aware scheduler 让它变安全。
-```
-
-这就是图后端带来的体系结构价值。
-
-### 4.4 推荐写法
-
-不要写成：
-
-```text
-我们提出 FFN channel pruning。
-```
-
-更应该写成：
-
-```text
-我们提出 graph-conditioned FFN execution：
-用节点的传播风险、复用置信和语义边界风险，
-决定该节点是否启用 reduced-channel W4A8 FFN path。
-```
-
-这才和普通 Transformer pruning 区分开。
+这说明 graph-aware scheduler 确实能让 NPU 内部近似路径更安全，但最终主线应提升为更通用的 Graph-Bit precision-depth execution。
 
 ## 5. P3：Full W4A8 Encoder 的底层数值路径
 
@@ -374,7 +656,7 @@ Batch P1:
     residual vector GEMM
 
 Batch P2:
-    W4A8 encoder + FFN75 mask
+    Graph-Bit W4A8-style encoder with P8/P6/P5/P4 depth
 
 Batch P3:
     full W4A8 encoder
@@ -449,7 +731,7 @@ token budget routing 在一些数据上结果不错，但作为主线风险较�
 1. 强依赖文本格式，例如 title/abstract 是否 front-loaded；
 2. 容易被质疑只是输入裁剪工程；
 3. 又增加额外 token/chunk scorer 和 preprocessing；
-4. 与 NPU array 本体创新关系弱于 FFN/channel gating。
+4. 与 NPU array 本体创新关系弱于 Graph-Bit precision-depth datapath。
 ```
 
 建议作为补充实验或 appendix，不要抢主线。
@@ -503,15 +785,15 @@ exact/fuzzy/reject breakdown
 
 ```text
 For non-reused nodes, graph risk routes nodes to:
-    FFN-gated W4A8 path
+    Graph-Bit P8/P6/P5/P4 precision-depth path
     or full W4A8 path.
 ```
 
 重点指标：
 
 ```text
-FFN keep ratio
-gated node ratio
+P8/P6/P5/P4 node ratio
+average executed bit-depth
 MAC reduction
 weight traffic reduction
 activation traffic reduction
@@ -649,9 +931,10 @@ P0/P1:
     CAM anchor vs random anchor
 
 P2:
-    ffn_channel_gating
-    uniform gating vs graph-routed gating
-    degree / TSER / random comparison
+    precision_depth_ablation
+    FullP8 / AllP6 / AllP5 / AllP4
+    random / degree / TSER / context / predictor / oracle depth routing
+    optional: ffn_channel_gating as secondary comparison
 
 P3:
     W4A8 full path accuracy
@@ -665,7 +948,7 @@ P0 + P1:
     reuse hierarchy
 
 P2 + P3:
-    graph-routed FFN gating
+    Graph-Bit precision-depth routing
 
 P0 + P1 + P2 + P3:
     full hierarchy
@@ -674,8 +957,8 @@ P0 + P1 + P2 + P3:
 组合实验必须保证：
 
 ```text
-FullW4A8 和 FFN-gated W4A8 来自同源 backend；
-否则 drop 差异可能来自 embedding pool 生成方式，而不是 gating 本身。
+FullP8 / P6 / P5 / P4 来自同源 backend；
+否则 drop 差异可能来自 embedding pool 生成方式，而不是 precision-depth 本身。
 ```
 
 ### Stage C: 硬件指标
@@ -685,7 +968,8 @@ FullW4A8 和 FFN-gated W4A8 来自同源 backend；
 ```text
 full encoder invocation reduction
 residual corrected node ratio
-FFN-gated node ratio
+P8 / P6 / P5 / P4 node ratio
+average executed bit-plane depth
 MAC reduction
 weight traffic reduction
 activation traffic reduction
@@ -703,7 +987,7 @@ energy/cost model
 
 ```text
 GraphHopSimhash turns graph-aware semantic risk into a hardware execution hierarchy for LLM encoders:
-exact reuse, corrected fuzzy reuse, graph-routed FFN-gated W4A8 execution, and full W4A8 fallback.
+exact reuse, corrected fuzzy reuse, graph-conditioned precision-depth execution, and full W4A8 fallback.
 ```
 
 中文表述：
@@ -712,7 +996,8 @@ exact reuse, corrected fuzzy reuse, graph-routed FFN-gated W4A8 execution, and f
 本文不是单纯加速 GNN，也不是单纯量化 LLM；
 而是利用图结构和节点语义风险，
 为每个 graph-text node 选择不同强度的 LLM encoder 执行路径，
-从而减少 full encoder 调用和 FFN 计算，同时保持 GNN 任务精度。
+并进一步控制 NPU 内部 bit-plane / mantissa 计算深度，
+从而减少 full encoder 调用和单次 encoder 的算术/访存成本，同时保持 GNN 任务精度。
 ```
 
 ## 12. 当前最靠谱的建议
@@ -723,14 +1008,14 @@ exact reuse, corrected fuzzy reuse, graph-routed FFN-gated W4A8 execution, and f
 主线:
     P0 exact reuse
     P1 fuzzy reuse + residual correction
-    P2 graph-routed FFN75 W4A8
+    P2 Graph-Bit precision-depth W4A8-style encoder
     P3 full W4A8
 
 主打创新:
-    graph-aware execution hierarchy
-    risk-separated scheduler
+    Graph-Bit NPU
+    graph-risk-conditioned bit-plane execution
     residual correction engine
-    FFN-gated W4A8 datapath
+    risk-separated scheduler
 
 Baseline:
     full W4A8
@@ -738,13 +1023,16 @@ Baseline:
     random routing
     degree routing
     TSER routing
-    uniform FFN gating
+    uniform P6/P5/P4
+    oracle damage routing
+    optional uniform FFN gating
 
 不要主打:
     degree-guided W4A8/W4A4 quant routing
     naive partial-depth encoder
     pure token truncation
     oracle error-aware routing
+    FFN channel gating as the only NPU contribution
     graph-aware FlashAttention reuse
 ```
 
@@ -1291,8 +1579,9 @@ Memory:
 Step 1:
     先做 graph-risk-conditioned activation precision / mantissa allocation。
     用已有 embedding pool 模拟：
-        high-risk -> W4A8
-        low-risk  -> W4A4 / BFP4 / approximate pool
+        high-risk -> P8 / full W4A8
+        mid-risk  -> P6 / P5
+        low-risk  -> P4
     观察 Degree/TSER/risk 是否能稳定筛出可激进节点。
 
 Step 2:
