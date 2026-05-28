@@ -558,6 +558,117 @@ output/residual_reuse/pubmed_support_split_sweep/pubmed_h6_s5_t60.log
 output/residual_reuse/pubmed_support_split_sweep/pubmed_h5_s4_t38_runs3.log
 ```
 
+### 7.7.3 Cross-Dataset Common Parameter Sweep
+
+前面的 Cora 和 PubMed 单独调参能找到各自更优点，但硬件上不应该为每个数据集重新设计 CAM/head/support 规则。因此又补了一组共同参数 sweep，目标是：
+
+```text
+同一套 R / head 数 / hard-soft support split / score threshold
+同时适用于 Cora 和 PubMed；
+在 drop < 3% 的约束下，尽量提高 reuse。
+```
+
+实验设置：
+
+```text
+datasets = Cora, PubMed
+runs = 3
+radius = 2
+target = ST/data.x
+hash bits = 4x16 或 8x16
+residual_rank = 64
+residual_epochs = 200
+residual_max_train_pairs = 2048
+alpha_grid = 0 / 0.0625 / 0.125 / 0.25
+```
+
+完整结果在：
+
+```text
+output/residual_reuse/common_param_sweep_20260528/summary_compact.txt
+output/residual_reuse/common_param_sweep_20260528/summary.tsv
+```
+
+核心表如下。`minReuse` 是 Cora/PubMed 两者中较低的 reuse，`maxDrop` 是两者中较高的 drop；因此它们更适合判断“共同参数”是否稳健。
+
+| Config | Heads | Hard / Soft | T | Cora Reuse | Cora Drop | PubMed Reuse | PubMed Drop | minReuse | maxDrop |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| `h4_43_T35` | 4 | `>=4 / ==3` | 35 | 6.0% | 0.15% | 23.0% | 1.08% | 6.0% | 1.08% |
+| `h4_43_T40` | 4 | `>=4 / ==3` | 40 | 17.7% | 0.32% | 38.6% | 2.25% | 17.7% | 2.25% |
+| `h4_43_T45` | 4 | `>=4 / ==3` | 45 | 24.3% | 0.61% | 45.3% | 2.78% | 24.3% | 2.78% |
+| `h8_54_T35` | 8 | `>=5 / ==4` | 35 | 8.2% | 0.18% | 29.9% | 1.45% | 8.2% | 1.45% |
+| `h8_54_T40` | 8 | `>=5 / ==4` | 40 | 25.7% | 0.45% | 50.3% | 2.52% | 25.7% | 2.52% |
+| `h8_64_T35` | 8 | `>=6 / ==4` | 35 | 8.2% | 0.19% | 29.9% | 1.44% | 8.2% | 1.44% |
+| `h8_64_T40` | 8 | `>=6 / ==4` | 40 | 25.7% | 0.42% | 50.3% | 2.70% | 25.7% | 2.70% |
+| `h8_64_T45` | 8 | `>=6 / ==4` | 45 | 35.7% | 0.61% | 58.3% | 3.28% | 35.7% | 3.28% |
+
+结论：
+
+1. 如果只看 Cora，`8 heads, hard>=6, soft=4, T=45` 很漂亮：`35.7%` reuse，`0.61%` drop。
+2. 但同一配置放到 PubMed 后，drop 到 `3.28%`，已经超过当前希望的 `3%` 线，因此不适合作为跨数据集固定硬件参数。
+3. 当前最推荐的共同参数是：
+
+```text
+radius = 2
+heads = 8 x 16-bit
+score threshold T = 40
+hard direct reuse: support heads >= 5
+residual reuse: support heads == 4
+compute: support heads < 4
+```
+
+对应结果：
+
+```text
+Cora:   reuse = 25.7%, drop = 0.45%
+PubMed: reuse = 50.3%, drop = 2.52%
+```
+
+4. 如果希望 hard direct 更保守，可以使用 `hard>=6, soft=4, T=40`：
+
+```text
+Cora:   reuse = 25.7%, drop = 0.42%
+PubMed: reuse = 50.3%, drop = 2.70%
+```
+
+这组和 `hard>=5` 的总 reuse 相同，因为 soft threshold 都是 `4`，差别主要在 hard direct 与 residual correction 的分配。当前结果里 `hard>=5` 在 PubMed 上略好，因此作为默认共同参数更合适。
+
+5. `4 heads, hard>=4, soft=3, T=45` 也是可用的简单版本：
+
+```text
+Cora:   reuse = 24.3%, drop = 0.61%
+PubMed: reuse = 45.3%, drop = 2.78%
+```
+
+但它的 `minReuse` 略低于 `8 heads, hard>=5, soft=4, T=40`，因此更适合作为低硬件开销 baseline，而不是主推配置。
+
+最终建议：
+
+```text
+主线固定配置:
+    R = 2
+    heads = 8 x 16-bit
+    T = 40
+    hard >= 5
+    soft = 4
+
+稳健备选:
+    R = 2
+    heads = 8 x 16-bit
+    T = 40
+    hard >= 6
+    soft = 4
+
+低开销 baseline:
+    R = 2
+    heads = 4 x 16-bit
+    T = 45
+    hard >= 4
+    soft = 3
+```
+
+这说明 residual reuse 的硬件策略可以固定，不需要为 Cora/PubMed 分别调规则；只要把目标设为 `drop < 3%`，`8x16, T=40, hard>=5, soft=4` 是当前最平衡的共同点。
+
 <!-- PUBMED_ST_SUPPORT_SPLIT_END -->
 
 ## 8. Residual Reuse + Graph-Bit Full Stack
