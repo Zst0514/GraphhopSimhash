@@ -8,30 +8,35 @@ import torch.nn.functional as F
 from tqdm import tqdm
 
 from .data import load_raw_texts
-from .paths import ensure_repo_paths
+from .paths import ensure_repo_paths, resolve_model_path
 
 ensure_repo_paths()
 
 
 MODEL_SPECS = {
     "llama2_7b": {
-        "path": "/home/zhangshangtong/Transformer/OFA/models/llama-7b/modelscope/Llama-2-7b-ms",
+        "path": "models/llama-7b/modelscope/Llama-2-7b-ms",
+        "env": "GRAPHHOP_LLAMA2_7B_PATH",
         "model_class": "llama",
     },
     "llama2_13b": {
         "path": "meta-llama/Llama-2-13b-hf",
+        "env": "GRAPHHOP_LLAMA2_13B_PATH",
         "model_class": "llama",
     },
     "ST": {
-        "path": "/home/zhangshangtong/Transformer/OFA/models/multi-qa-distilbert-cos-v1",
+        "path": "models/multi-qa-distilbert-cos-v1",
+        "env": "GRAPHHOP_ST_PATH",
         "model_class": "auto",
     },
     "BERT": {
-        "path": "/home/zhangshangtong/Transformer/OFA/models/bert-base-uncased",
+        "path": "models/bert-base-uncased",
+        "env": "GRAPHHOP_BERT_PATH",
         "model_class": "auto",
     },
     "e5": {
         "path": "intfloat/e5-large-v2",
+        "env": "GRAPHHOP_E5_PATH",
         "model_class": "auto",
     },
 }
@@ -566,7 +571,7 @@ def load_model_and_tokenizer(llm_name, config_name, cache_dir):
         raise ValueError(f"Unknown llm_name={llm_name}. Available: {sorted(MODEL_SPECS)}")
 
     spec = MODEL_SPECS[llm_name]
-    model_path = spec["path"]
+    model_path = resolve_model_path(spec["path"], spec.get("env"))
     quant_config, tag = build_quant_config(config_name)
 
     if spec["model_class"] == "llama":

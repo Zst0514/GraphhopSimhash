@@ -955,6 +955,55 @@ def load_residual_target_features(ds_key, data, args, device, log_important):
     return target
 
 
+def resolve_residual_fit_config(args, target_dim):
+    profile = str(getattr(args, "residual_fit_profile", "manual"))
+    model_name = str(getattr(args, "real_quant_model_name", ""))
+    target_dim = int(target_dim)
+    effective_profile = profile
+    if profile == "auto":
+        effective_profile = "llama" if target_dim >= 2048 or model_name.startswith("llama") else "st"
+
+    rank = int(getattr(args, "residual_rank", 32))
+    epochs = int(getattr(args, "residual_epochs", 200))
+    max_pairs = int(getattr(args, "residual_max_train_pairs", 4096))
+
+    if effective_profile == "llama":
+        rank = max(rank, 64)
+        epochs = max(epochs, 120)
+        max_pairs = max(max_pairs, 4096)
+    elif effective_profile == "st":
+        rank = max(rank, 32)
+        epochs = max(epochs, 100)
+        max_pairs = max(max_pairs, 1024)
+
+    return {
+        "profile": profile,
+        "effective_profile": effective_profile,
+        "target_dim": target_dim,
+        "rank": rank,
+        "epochs": epochs,
+        "max_pairs": max_pairs,
+    }
+
+
+def resolve_residual_alpha_grid(args, fit_cfg):
+    grid = sorted(float(value) for value in getattr(args, "residual_alpha_grid", [0.0, 0.125, 0.25, 0.5]))
+    if fit_cfg["effective_profile"] == "llama":
+        grid = [value for value in grid if value <= 0.5 + 1e-12]
+    return grid if grid else [0.0]
+
+
+def log_residual_fit_config(log_important, fit_cfg):
+    log_important(
+        "[ResidualFitConfig] "
+        f"profile={fit_cfg['profile']}->{fit_cfg['effective_profile']} "
+        f"| target_dim={fit_cfg['target_dim']} "
+        f"| rank={fit_cfg['rank']} "
+        f"| epochs={fit_cfg['epochs']} "
+        f"| max_pairs={fit_cfg['max_pairs']}"
+    )
+
+
 def build_support_split_masks(trace, soft_min_hits, hard_min_hits, device):
     hit_mask = trace["hit_mask"].to(device=device, dtype=torch.bool)
     source_ok = trace["source_ids"].to(device=device) >= 0
@@ -980,6 +1029,21 @@ def build_support_split_masks(trace, soft_min_hits, hard_min_hits, device):
         "soft_count": int(soft_mask.sum().item()),
         "residual_count": int(residual_hit_mask.sum().item()),
     }
+
+
+def format_trace_dist_hist(trace, mask, max_dist=6):
+    if mask is None or int(mask.sum().item()) <= 0:
+        return "empty"
+    dists = trace["best_dists"].to(device=mask.device)[mask]
+    parts = []
+    for dist in range(int(max_dist) + 1):
+        count = int((dists == dist).sum().item())
+        if count > 0:
+            parts.append(f"d{dist}={count}")
+    other = int((dists > int(max_dist)).sum().item())
+    if other > 0:
+        parts.append(f"d>{int(max_dist)}={other}")
+    return ", ".join(parts) if parts else "empty"
 
 
 def summarize_reuse_real_quant_execution(actions, hit_mask, errors, fp_embs, final_embs):
@@ -1110,6 +1174,8 @@ def run_residual_reuse_experiment(args):
                 )
 
                 target_features = load_residual_target_features(ds_key, data, run_args, device, log_important)
+                residual_fit_cfg = resolve_residual_fit_config(run_args, target_features.size(1))
+                log_residual_fit_config(log_important, residual_fit_cfg)
                 data.x = target_features
                 model, base_acc, baseline_embs, oracle_logits = train_baseline_model(data, run_args, device)
                 results["baseline"].append(base_acc)
@@ -1203,21 +1269,22 @@ def run_residual_reuse_experiment(args):
                     trace=trace,
                     data=data,
                     risk_scores=controller.node_risk_scores,
-                    rank=args.residual_rank,
-                    epochs=args.residual_epochs,
+                    rank=residual_fit_cfg["rank"],
+                    epochs=residual_fit_cfg["epochs"],
                     lr=args.residual_lr,
                     weight_decay=args.residual_weight_decay,
                     residual_l2=args.residual_l2,
                     train_split=args.residual_train_split,
-                    max_pairs=args.residual_max_train_pairs,
+                    max_pairs=residual_fit_cfg["max_pairs"],
                     correction_mask=correction_mask,
                     min_dist=args.residual_min_dist,
                 )
 
                 if adapter is not None and float(args.residual_alpha) < 0.0:
-                    selected_alpha = float(args.residual_alpha_grid[0])
+                    alpha_grid = resolve_residual_alpha_grid(args, residual_fit_cfg)
+                    selected_alpha = float(alpha_grid[0])
                     selected_val_acc = -1.0
-                    for alpha in sorted(float(value) for value in args.residual_alpha_grid):
+                    for alpha in alpha_grid:
                         candidate_features, _candidate_info = apply_residual_adapter(
                             direct_embeddings=residual_base_features,
                             target_embeddings=target_features,
@@ -1339,6 +1406,12 @@ def run_residual_reuse_experiment(args):
                         f"| residual_total={split_info['residual_count']} "
                         f"| compute={stats['total_queries'] - split_info['residual_count']} "
                         f"| soft_hist: {hist_text}"
+                    )
+                    log_important(
+                        "  DistHist: "
+                        f"hard[{format_trace_dist_hist(trace, direct_hit_mask)}] "
+                        f"| soft[{format_trace_dist_hist(trace, soft_mask)}] "
+                        f"| total[{format_trace_dist_hist(trace, residual_hit_mask)}]"
                     )
                 log_important(
                     f"  ReuseDetail: numerator={stats['reuse']} "
@@ -2403,6 +2476,8 @@ def run_residual_precision_depth_experiment(args):
 
                 reference_raw = pools["reference"]
                 depth_raw = {int(bit): pool for bit, pool in pools["depth"].items()}
+                residual_fit_cfg = resolve_residual_fit_config(run_args, reference_raw.size(1))
+                log_residual_fit_config(log_important, residual_fit_cfg)
                 data.x = reference_raw
                 model, base_acc, ref_embs, ref_logits = train_baseline_model(data, run_args, device)
                 results["baseline"].append(base_acc)
@@ -2497,21 +2572,22 @@ def run_residual_precision_depth_experiment(args):
                     trace=trace,
                     data=data,
                     risk_scores=controller.node_risk_scores,
-                    rank=run_args.residual_rank,
-                    epochs=run_args.residual_epochs,
+                    rank=residual_fit_cfg["rank"],
+                    epochs=residual_fit_cfg["epochs"],
                     lr=run_args.residual_lr,
                     weight_decay=run_args.residual_weight_decay,
                     residual_l2=run_args.residual_l2,
                     train_split=run_args.residual_train_split,
-                    max_pairs=run_args.residual_max_train_pairs,
+                    max_pairs=residual_fit_cfg["max_pairs"],
                     correction_mask=correction_mask,
                     min_dist=run_args.residual_min_dist,
                 )
 
                 if adapter is not None and float(run_args.residual_alpha) < 0.0:
-                    selected_alpha = float(run_args.residual_alpha_grid[0])
+                    alpha_grid = resolve_residual_alpha_grid(run_args, residual_fit_cfg)
+                    selected_alpha = float(alpha_grid[0])
                     selected_val_acc = -1.0
-                    for alpha in sorted(float(value) for value in run_args.residual_alpha_grid):
+                    for alpha in alpha_grid:
                         candidate_raw, _candidate_info = apply_residual_adapter(
                             direct_embeddings=direct_raw,
                             target_embeddings=reference_raw,
@@ -3415,6 +3491,8 @@ def run_hierarchical_encoder_experiment(args):
                     min_route_hits=run_args.residual_min_route_hits,
                     min_base_hits=run_args.residual_min_base_hits,
                 )
+                residual_fit_cfg = resolve_residual_fit_config(run_args, full_raw.size(1))
+                log_residual_fit_config(log_important, residual_fit_cfg)
                 adapter, train_info = train_residual_adapter(
                     target_embeddings=full_raw,
                     verify_features=verify_features,
@@ -3422,21 +3500,22 @@ def run_hierarchical_encoder_experiment(args):
                     trace=trace,
                     data=data,
                     risk_scores=controller.node_risk_scores,
-                    rank=run_args.residual_rank,
-                    epochs=run_args.residual_epochs,
+                    rank=residual_fit_cfg["rank"],
+                    epochs=residual_fit_cfg["epochs"],
                     lr=run_args.residual_lr,
                     weight_decay=run_args.residual_weight_decay,
                     residual_l2=run_args.residual_l2,
                     train_split=run_args.residual_train_split,
-                    max_pairs=run_args.residual_max_train_pairs,
+                    max_pairs=residual_fit_cfg["max_pairs"],
                     correction_mask=correction_mask,
                     min_dist=run_args.residual_min_dist,
                 )
 
                 if adapter is not None and float(run_args.residual_alpha) < 0.0:
-                    selected_alpha = float(run_args.residual_alpha_grid[0])
+                    alpha_grid = resolve_residual_alpha_grid(run_args, residual_fit_cfg)
+                    selected_alpha = float(alpha_grid[0])
                     selected_val_acc = -1.0
-                    for alpha in sorted(float(value) for value in run_args.residual_alpha_grid):
+                    for alpha in alpha_grid:
                         candidate_raw, _candidate_info = apply_residual_adapter(
                             direct_embeddings=direct_raw,
                             target_embeddings=full_raw,

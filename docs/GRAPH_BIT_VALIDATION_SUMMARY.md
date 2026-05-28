@@ -94,9 +94,11 @@ python -m GraphhopSimhash \
   --score_propagation_weight 3 \
   --score_graph_context_weight 1 \
   --score_low_unique_weight 1 \
-  --residual_rank 32 \
-  --residual_epochs 60 \
-  --residual_max_train_pairs 1024 \
+  --residual_fit_profile llama \
+  --residual_rank 64 \
+  --residual_epochs 120 \
+  --residual_max_train_pairs 4096 \
+  --residual_alpha_grid 0 0.125 0.25 0.5 \
   --residual_min_dist 1.0
 ```
 

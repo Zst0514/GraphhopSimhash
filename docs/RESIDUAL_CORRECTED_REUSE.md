@@ -134,6 +134,7 @@ loss =
 | 参数 | 默认值 | 含义 |
 |---|---:|---|
 | `--experiment_suite residual_reuse` | - | 启用 residual reuse 实验 |
+| `--residual_fit_profile` | `manual` | adapter 容量配置；`llama` 会按 4096d LLaMA embedding 放大 rank/epoch/pair |
 | `--residual_rank` | `32` | adapter bottleneck rank |
 | `--residual_epochs` | `200` | adapter 训练轮数 |
 | `--residual_lr` | `1e-3` | adapter 学习率 |
@@ -148,6 +149,18 @@ loss =
 | `--residual_soft_min_support_hits` | `-1` | 可选：支持头数在 soft/hard 阈值之间的命中走 residual correction |
 | `--residual_max_train_pairs` | `4096` | 最大 residual calibration pair 数 |
 | `--residual_train_split` | `train_val` | adapter 使用 train / train_val / all_hits |
+
+注意：ST/768d 和 LLaMA-7B/4096d 不应共用同一组 residual 容量。LLaMA 路径建议使用：
+
+```text
+residual_fit_profile = llama
+residual_rank >= 64
+residual_epochs >= 120
+residual_max_train_pairs >= 4096
+residual_alpha_grid <= 0.5
+```
+
+这样做不是额外 oracle 信息，只是让同一个 residual correction engine 的容量匹配 4096d embedding 空间。LLaMA/Cora 这类小校准集上不宜盲目把 rank/alpha 放太大；`llama` profile 会限制 alpha 搜索上限，避免 residual 过强扰动分类边界。
 
 目前最稳的版本是：
 
@@ -584,9 +597,11 @@ python -m GraphhopSimhash \
   --score_propagation_weight 3 \
   --score_graph_context_weight 1 \
   --score_low_unique_weight 1 \
-  --residual_rank 32 \
-  --residual_epochs 60 \
-  --residual_max_train_pairs 1024 \
+  --residual_fit_profile llama \
+  --residual_rank 64 \
+  --residual_epochs 120 \
+  --residual_max_train_pairs 4096 \
+  --residual_alpha_grid 0 0.125 0.25 0.5 \
   --residual_min_dist 1.0
 ```
 
@@ -604,7 +619,8 @@ Interpretation:
 1. `FullP8-miss` is the right reuse baseline: hits use direct/residual reuse, misses use P8.
 2. Graph-Bit only changes miss-node bit depth; it cannot fix bad fuzzy reuse hits.
 3. `T=20` is the safer full-stack point for LLaMA-7B. `T=30` is too aggressive on PubMed because reuse hit error already dominates.
-4. ST results should not be directly extrapolated to LLaMA. Cora/ST at `T=30` gives `FullP8-miss Drop=1.90%`, while Cora/LLaMA at the same threshold gives `3.68%`.
+4. ST results should not be directly extrapolated to LLaMA. Cora/ST at `T=30` is easier because the residual target is 768d ST. LLaMA uses 4096d targets and needs the `llama` residual fit profile.
+5. Earlier LLaMA full-stack runs used a ST-sized adapter (`rank=32`, `epochs=60`, `max_pairs=1024`). After switching to `residual_fit_profile=llama` (`rank=64`, `epochs=120`, `max_pairs=4096`, `alpha<=0.5`), the Cora/LLaMA T30 `FullP8-miss` 3-run smoke result improved from about `3.68%` drop to about `3.24%` drop. This confirms that the previous setting was biased toward ST, although LLaMA reuse is still intrinsically harder than ST reuse.
 
 Logs:
 

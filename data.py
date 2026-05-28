@@ -5,7 +5,7 @@ import torch
 import torch.nn.functional as F
 
 from .config import DATASET_CONFIGS
-from .paths import ensure_repo_paths
+from .paths import ensure_repo_paths, resolve_model_path
 from .runtime import get_available_devices, load_yaml, merge_mod, set_random_seed, setup_exp
 
 ensure_repo_paths()
@@ -175,7 +175,7 @@ def get_distilbert_embeddings(texts, device, layer_idx=-1, batch_size=128):
     from tqdm import tqdm
     from transformers import AutoModel, AutoTokenizer
 
-    model_name = "/home/zhangshangtong/Transformer/OFA/models/multi-qa-distilbert-cos-v1"
+    model_name = resolve_model_path("models/multi-qa-distilbert-cos-v1", "GRAPHHOP_ST_PATH")
     try:
         tokenizer = AutoTokenizer.from_pretrained(model_name)
         model = AutoModel.from_pretrained(model_name)

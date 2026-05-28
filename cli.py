@@ -312,6 +312,17 @@ def build_parser():
     parser.add_argument("--residual_weight_decay", type=float, default=1e-4)
     parser.add_argument("--residual_l2", type=float, default=1e-4)
     parser.add_argument(
+        "--residual_fit_profile",
+        type=str,
+        default="manual",
+        choices=["manual", "auto", "st", "llama"],
+        help=(
+            "Scale residual adapter capacity for the target embedding space. "
+            "manual uses the explicit rank/epochs/max_pairs values; auto chooses "
+            "llama for high-dimensional LLaMA-style pools and st otherwise."
+        ),
+    )
+    parser.add_argument(
         "--residual_embedding_source",
         type=str,
         default="data_x",

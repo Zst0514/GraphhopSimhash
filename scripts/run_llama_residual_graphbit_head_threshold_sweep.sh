@@ -18,9 +18,10 @@ CORA_RUNS="${CORA_RUNS:-3}"
 PUBMED_RUNS="${PUBMED_RUNS:-3}"
 ARXIV_RUNS="${ARXIV_RUNS:-1}"
 
-RESIDUAL_EPOCHS="${RESIDUAL_EPOCHS:-60}"
-RESIDUAL_RANK="${RESIDUAL_RANK:-32}"
-RESIDUAL_MAX_TRAIN_PAIRS="${RESIDUAL_MAX_TRAIN_PAIRS:-1024}"
+RESIDUAL_FIT_PROFILE="${RESIDUAL_FIT_PROFILE:-llama}"
+RESIDUAL_EPOCHS="${RESIDUAL_EPOCHS:-120}"
+RESIDUAL_RANK="${RESIDUAL_RANK:-64}"
+RESIDUAL_MAX_TRAIN_PAIRS="${RESIDUAL_MAX_TRAIN_PAIRS:-4096}"
 
 mkdir -p "${OUT_DIR}/logs"
 cd "$ROOT_DIR"
@@ -110,9 +111,11 @@ run_case() {
     --score_propagation_weight 3 \
     --score_graph_context_weight 1 \
     --score_low_unique_weight 1 \
+    --residual_fit_profile "$RESIDUAL_FIT_PROFILE" \
     --residual_rank "$RESIDUAL_RANK" \
     --residual_epochs "$RESIDUAL_EPOCHS" \
     --residual_max_train_pairs "$RESIDUAL_MAX_TRAIN_PAIRS" \
+    --residual_alpha_grid 0 0.125 0.25 0.5 \
     --residual_min_dist 1.0 2>&1 | tee "$log_path"
   local status="${PIPESTATUS[0]}"
   set -e
