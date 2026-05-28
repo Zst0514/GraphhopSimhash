@@ -12,13 +12,13 @@ RESIDUAL_FIT_PROFILE="${RESIDUAL_FIT_PROFILE:-llama}"
 RESIDUAL_EPOCHS="${RESIDUAL_EPOCHS:-120}"
 RESIDUAL_RANK="${RESIDUAL_RANK:-64}"
 RESIDUAL_MAX_TRAIN_PAIRS="${RESIDUAL_MAX_TRAIN_PAIRS:-4096}"
+RESIDUAL_HARD_MIN_SUPPORT_HITS="${RESIDUAL_HARD_MIN_SUPPORT_HITS:-5}"
+RESIDUAL_SOFT_MIN_SUPPORT_HITS="${RESIDUAL_SOFT_MIN_SUPPORT_HITS:-4}"
 
 # dataset heads threshold
 CASES=(
-  "cora 4 20"
-  "cora 4 22"
-  "pubmed 8 16"
-  "pubmed 8 20"
+  "cora 8 40"
+  "pubmed 8 40"
 )
 
 # name high mid low. Mapping with tags W4A6/W4A4:
@@ -62,7 +62,7 @@ run_case() {
 
   echo
   echo "================================================================"
-  echo "[$(timestamp)] [Run] dataset=${dataset} heads=${heads}x16 T=${threshold} budget=${budget_name} P8/P6/P4=${high}/${mid}/${low}"
+  echo "[$(timestamp)] [Run] dataset=${dataset} heads=${heads}x16 T=${threshold} hard>=${RESIDUAL_HARD_MIN_SUPPORT_HITS} soft=${RESIDUAL_SOFT_MIN_SUPPORT_HITS} budget=${budget_name} P8/P6/P4=${high}/${mid}/${low}"
   echo "[Log] ${log_path}"
   echo "================================================================"
 
@@ -97,6 +97,8 @@ run_case() {
     --residual_rank "$RESIDUAL_RANK" \
     --residual_epochs "$RESIDUAL_EPOCHS" \
     --residual_max_train_pairs "$RESIDUAL_MAX_TRAIN_PAIRS" \
+    --residual_hard_min_support_hits "$RESIDUAL_HARD_MIN_SUPPORT_HITS" \
+    --residual_soft_min_support_hits "$RESIDUAL_SOFT_MIN_SUPPORT_HITS" \
     --residual_alpha_grid 0 0.125 0.25 0.5 \
     --residual_min_dist 1.0 2>&1 | tee "$log_path"
   local status="${PIPESTATUS[0]}"

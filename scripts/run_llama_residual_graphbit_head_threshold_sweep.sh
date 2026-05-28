@@ -8,11 +8,11 @@ ROOT_DIR="${ROOT_DIR:-${DEFAULT_ROOT_DIR}}"
 PYTHON_BIN="${PYTHON_BIN:-/home/zhangshangtong/.conda/envs/OFA/bin/python}"
 OUT_DIR="${OUT_DIR:-${ROOT_DIR}/output/residual_graphbit_head_threshold_sweep}"
 
-DATASETS_STR="${DATASETS:-cora pubmed arxiv}"
-HEADS_STR="${HEADS:-4 8}"
-CORA_THRESHOLDS_STR="${CORA_THRESHOLDS:-12 15 18 20 22 25 30 35}"
-PUBMED_THRESHOLDS_STR="${PUBMED_THRESHOLDS:-12 16 20 24}"
-ARXIV_THRESHOLDS_STR="${ARXIV_THRESHOLDS:-12 16 20}"
+DATASETS_STR="${DATASETS:-cora pubmed}"
+HEADS_STR="${HEADS:-8}"
+CORA_THRESHOLDS_STR="${CORA_THRESHOLDS:-40}"
+PUBMED_THRESHOLDS_STR="${PUBMED_THRESHOLDS:-40}"
+ARXIV_THRESHOLDS_STR="${ARXIV_THRESHOLDS:-40}"
 
 CORA_RUNS="${CORA_RUNS:-3}"
 PUBMED_RUNS="${PUBMED_RUNS:-3}"
@@ -22,6 +22,8 @@ RESIDUAL_FIT_PROFILE="${RESIDUAL_FIT_PROFILE:-llama}"
 RESIDUAL_EPOCHS="${RESIDUAL_EPOCHS:-120}"
 RESIDUAL_RANK="${RESIDUAL_RANK:-64}"
 RESIDUAL_MAX_TRAIN_PAIRS="${RESIDUAL_MAX_TRAIN_PAIRS:-4096}"
+RESIDUAL_HARD_MIN_SUPPORT_HITS="${RESIDUAL_HARD_MIN_SUPPORT_HITS:-5}"
+RESIDUAL_SOFT_MIN_SUPPORT_HITS="${RESIDUAL_SOFT_MIN_SUPPORT_HITS:-4}"
 
 mkdir -p "${OUT_DIR}/logs"
 cd "$ROOT_DIR"
@@ -80,7 +82,7 @@ run_case() {
 
   echo
   echo "================================================================"
-  echo "[$(timestamp)] [Run] dataset=${dataset} heads=${heads}x16 radius=2 T=${threshold} runs=${runs}"
+  echo "[$(timestamp)] [Run] dataset=${dataset} heads=${heads}x16 radius=2 T=${threshold} hard>=${RESIDUAL_HARD_MIN_SUPPORT_HITS} soft=${RESIDUAL_SOFT_MIN_SUPPORT_HITS} runs=${runs}"
   echo "[Log] ${log_path}"
   echo "================================================================"
 
@@ -115,6 +117,8 @@ run_case() {
     --residual_rank "$RESIDUAL_RANK" \
     --residual_epochs "$RESIDUAL_EPOCHS" \
     --residual_max_train_pairs "$RESIDUAL_MAX_TRAIN_PAIRS" \
+    --residual_hard_min_support_hits "$RESIDUAL_HARD_MIN_SUPPORT_HITS" \
+    --residual_soft_min_support_hits "$RESIDUAL_SOFT_MIN_SUPPORT_HITS" \
     --residual_alpha_grid 0 0.125 0.25 0.5 \
     --residual_min_dist 1.0 2>&1 | tee "$log_path"
   local status="${PIPESTATUS[0]}"

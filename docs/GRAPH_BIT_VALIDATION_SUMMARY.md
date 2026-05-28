@@ -232,11 +232,31 @@ When reuse is conservative, Graph-Bit behavior is visible and Degree protects be
 Correct full-stack policy:
 
 ```text
-exact hit      -> direct cache reuse
-fuzzy hit      -> residual correction
-reject / miss  -> Graph-Bit P8/P6/P5/P4
-high-risk miss -> P8 through the same budget router
+support >= 5 hit -> direct cache reuse
+support == 4 hit -> residual correction
+support < 4      -> Graph-Bit P8/P6/P5/P4
+high-risk miss   -> P8 through the same budget router
 ```
+
+The default reuse front-end for later Graph-Bit experiments is now fixed to:
+
+```text
+R = 2
+8 heads x 16-bit
+score threshold T = 40
+hard direct reuse: support heads >= 5
+residual correction: support heads == 4
+compute / Graph-Bit: support heads < 4
+```
+
+This is the `h8_54_T40` operating point from the residual reuse sweep:
+
+```text
+Cora:   reuse = 25.7%, drop = 0.45%
+PubMed: reuse = 50.3%, drop = 2.52%
+```
+
+It is preferred over `h8_64_T40` because both have the same reuse, but routing support=5 hits to direct reuse gives lower PubMed drop than forcing them through residual correction.
 
 The `FullP8` row below still includes reuse. It means "reuse hits use direct/residual, all misses use P8". It is the correct baseline for measuring how much extra error Graph-Bit adds on top of the reuse subsystem.
 

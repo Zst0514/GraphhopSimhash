@@ -1893,7 +1893,7 @@ def build_active_residual_mask(trace, correction_mask, min_dist, device):
 
 
 def apply_residual_precision_depth_trace(trace, selected_raw, reference_raw, residual_raw, residual_mask):
-    """Compose exact reuse, residual fuzzy reuse, and precision-depth miss execution."""
+    """Compose direct reuse, residual reuse, and precision-depth miss execution."""
     final_raw = selected_raw.clone()
     device = selected_raw.device
     hit_mask = trace["hit_mask"].to(device=device, dtype=torch.bool)
@@ -2454,6 +2454,18 @@ def run_residual_precision_depth_experiment(args):
                 "[FullStack] Exact hit -> direct cache reuse | fuzzy hit -> residual correction | "
                 f"miss -> P{ref_bit}/" + "/".join(f"P{bit}" for bit in sorted(bits, reverse=True))
             )
+            support_split_enabled = (
+                int(getattr(args, "residual_hard_min_support_hits", -1)) > 0
+                and int(getattr(args, "residual_soft_min_support_hits", -1)) > 0
+            )
+            if support_split_enabled:
+                log_important(
+                    "[FullStackSupportSplit] "
+                    f"hard_direct>= {int(args.residual_hard_min_support_hits)} heads | "
+                    f"residual_soft= {int(args.residual_soft_min_support_hits)}.."
+                    f"{int(args.residual_hard_min_support_hits) - 1} heads | "
+                    f"compute< {int(args.residual_soft_min_support_hits)} heads"
+                )
             log_important(
                 "[PrecisionDepthCost] "
                 f"model={args.real_quant_model_name} | reference={args.precision_depth_reference_tag}/P{ref_bit} "
@@ -2471,6 +2483,8 @@ def run_residual_precision_depth_experiment(args):
                 log_important(f"\n--- Run {run_idx + 1}/{args.runs} (Seed {seed}) ---")
                 run_args = make_run_args(args, seed)
                 run_args.enable_quant_policy = False
+                if support_split_enabled:
+                    run_args.route_min_support_hits = [int(args.residual_soft_min_support_hits)]
                 _conf, data, verify_features, device = load_run_state(ds_key, run_args, seed)
                 pools = load_precision_depth_pools(ds_key, run_args, data, device, log_important)
 
@@ -2565,6 +2579,22 @@ def run_residual_precision_depth_experiment(args):
                     min_route_hits=run_args.residual_min_route_hits,
                     min_base_hits=run_args.residual_min_base_hits,
                 )
+                if support_split_enabled:
+                    split_info = build_support_split_masks(
+                        trace,
+                        run_args.residual_soft_min_support_hits,
+                        run_args.residual_hard_min_support_hits,
+                        device,
+                    )
+                    correction_mask = correction_mask & split_info["soft_mask"]
+                    correction_info["residual_candidates"] = int(correction_mask.sum().item())
+                    log_important(
+                        "[FullStackSupportTrace] "
+                        f"hard={split_info['hard_count']} | "
+                        f"soft={split_info['soft_count']} | "
+                        f"accepted={split_info['residual_count']} | "
+                        f"soft_hist={split_info['support_hist']}"
+                    )
                 adapter, train_info = train_residual_adapter(
                     target_embeddings=reference_raw,
                     verify_features=verify_features,

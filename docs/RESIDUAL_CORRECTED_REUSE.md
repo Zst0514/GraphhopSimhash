@@ -669,6 +669,27 @@ PubMed: reuse = 45.3%, drop = 2.78%
 
 这说明 residual reuse 的硬件策略可以固定，不需要为 Cora/PubMed 分别调规则；只要把目标设为 `drop < 3%`，`8x16, T=40, hard>=5, soft=4` 是当前最平衡的共同点。
 
+选择 `h8_54_T40` 而不是 `h8_64_T40` 的关键原因是：两者总 reuse 相同，因为二者的 soft threshold 都是 `support>=4`；差别只在 `support=5` 节点走哪条路径。
+
+```text
+h8_54_T40:
+    support >= 5 -> direct reuse
+    support == 4 -> residual correction
+
+h8_64_T40:
+    support >= 6 -> direct reuse
+    support == 4 or 5 -> residual correction
+```
+
+实验显示 `support=5` 的节点已经足够可靠，直接复用比强制 residual correction 更稳。因此 `h8_54_T40` 在相同 reuse 下取得更低的跨数据集最大掉点：
+
+```text
+h8_54_T40 maxDrop = 2.52%
+h8_64_T40 maxDrop = 2.70%
+```
+
+后续 Graph-Bit / full-stack 实验默认沿用这一组统一复用前端参数。Graph-Bit 只负责 accepted miss nodes 的 P8/P6/P5/P4 precision-depth 路由，不再重新调 reuse gate。
+
 <!-- PUBMED_ST_SUPPORT_SPLIT_END -->
 
 ## 8. Residual Reuse + Graph-Bit Full Stack
@@ -681,7 +702,18 @@ fuzzy hit      -> residual correction
 reject / miss  -> Graph-Bit P8/P6/P5/P4
 ```
 
-Reproduce the LLaMA-7B conservative operating point:
+后续 Graph-Bit full-stack 默认使用上一节确定的统一复用前端：
+
+```text
+R = 2
+heads = 8 x 16-bit
+score threshold T = 40
+hard direct reuse: support heads >= 5
+residual correction: support heads == 4
+compute / Graph-Bit: support heads < 4
+```
+
+推荐复现实验命令：
 
 ```bash
 python -m GraphhopSimhash \
@@ -697,14 +729,14 @@ python -m GraphhopSimhash \
   --precision_depth_mid_ratio 0.30 \
   --precision_depth_low_ratio 0.30 \
   --radius 2 \
-  --hash_heads_per_route 4 \
-  --main_hash_head_bits 16 16 16 16 \
+  --hash_heads_per_route 8 \
+  --main_hash_head_bits 16 16 16 16 16 16 16 16 \
   --learned_hash_epochs 10 \
   --learned_hash_dim 128 \
   --hamming_only_acceptor \
   --enable_score_gate \
   --allow_rare_fuzzy \
-  --score_reuse_threshold 20 \
+  --score_reuse_threshold 40 \
   --score_propagation_weight 3 \
   --score_graph_context_weight 1 \
   --score_low_unique_weight 1 \
@@ -712,11 +744,13 @@ python -m GraphhopSimhash \
   --residual_rank 64 \
   --residual_epochs 120 \
   --residual_max_train_pairs 4096 \
+  --residual_hard_min_support_hits 5 \
+  --residual_soft_min_support_hits 4 \
   --residual_alpha_grid 0 0.125 0.25 0.5 \
   --residual_min_dist 1.0
 ```
 
-LLaMA-7B 3-run summary:
+下面是早期 full-stack smoke run，未使用当前 `h8_54_T40` support split，仅保留为历史对照：
 
 | Dataset | T | Reuse | FullP8-miss Drop | Degree Graph-Bit Drop |
 |---|---:|---:|---:|---:|

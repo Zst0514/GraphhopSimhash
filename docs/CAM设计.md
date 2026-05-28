@@ -195,20 +195,31 @@ support 中  -> residual reuse
 support 低  -> compute
 ```
 
-在我们当前的 `cora` 实验里，比较均衡的一组切法是：
+在当前 Cora/PubMed 共同参数探索后，主线固定切法是：
 
 ```text
-8 heads
-hard_direct >= 6
-residual_soft = 4..5
+R = 2
+8 heads x 16 bits
+score threshold T = 40
+hard_direct >= 5
+residual_soft = 4
 compute < 4
 ```
 
 含义很直接：
 
-- `6~8` 个 head 同时支持：直接复用，风险低
-- `4~5` 个 head 同时支持：进入 residual correction
+- `5~8` 个 head 同时支持：直接复用，风险低
+- `4` 个 head 同时支持：进入 residual correction
 - `0~3` 个 head 同时支持：置信度不够，重算
+
+这组固定参数在 3-run 结果里得到：
+
+```text
+Cora:   reuse = 25.7%, drop = 0.45%
+PubMed: reuse = 50.3%, drop = 2.52%
+```
+
+`hard_direct >= 6, residual_soft = 4` 的总 reuse 相同，但 PubMed drop 略高，说明 support=5 的节点已经足够可靠，直接复用比强制 residual correction 更稳。
 
 所以，HD-CAM 只负责“找近似候选”，最终能不能复用，要看多头 support 聚合后的结果。
 

@@ -132,6 +132,19 @@ target path: P0/P1/P2/P3
 
 Graph-Bit 只处理 miss nodes，也就是仍然需要跑 encoder 的节点。
 
+当前主线的 reuse 前端固定为：
+
+```text
+R = 2
+8 heads x 16-bit
+score threshold T = 40
+support >= 5 -> direct reuse
+support == 4 -> residual correction
+support < 4  -> Graph-Bit / full encoder
+```
+
+因此 Graph-Bit 的输入集合不是全图节点，而是 support 小于 4 或被 score gate 拒绝、仍需执行 encoder 的节点。这个固定前端避免把 Graph-Bit 结果和 reuse 参数调优混在一起。
+
 ### 4.2 Risk-to-depth Mapping
 
 固定 budget 映射：
@@ -376,4 +389,3 @@ Degree-guided W4A8/W4A4 quantization routing.
 ```text
 Graph risk controls arithmetic effort inside the NPU datapath.
 ```
-
