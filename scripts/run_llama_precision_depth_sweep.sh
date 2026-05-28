@@ -123,6 +123,15 @@ row_re = re.compile(
 base_re = re.compile(r"Baseline Acc:\s+([-0-9.]+)")
 
 rows = []
+config_alias = {
+    "RandomDepthBudget": "Rand",
+    "DegreeDepthBudget": "Deg",
+    "TSERDepthBudget": "TSER",
+    "ContextDepthBudget": "Ctx",
+    "LowUniqueDepthBudget": "Uniq",
+    "PredictorDepthBudget": "Pred",
+    "OracleDamageBudget": "Oracle",
+}
 for log_path in sorted(sweep_dir.glob("*.log")):
     stem = log_path.stem
     parts = stem.split("_")
@@ -141,6 +150,7 @@ for log_path in sorted(sweep_dir.glob("*.log")):
         if not m:
             continue
         d = m.groupdict()
+        d["config"] = config_alias.get(d["config"], d["config"])
         rows.append({
             "dataset": dataset,
             "target": target,
@@ -184,6 +194,7 @@ for dataset in sorted({r["dataset"] for r in rows}):
                 "RandomDepthBudget", "DegreeDepthBudget", "TSERDepthBudget",
                 "ContextDepthBudget", "LowUniqueDepthBudget", "PredictorDepthBudget",
                 "OracleDamageBudget",
+                "Rand", "Deg", "TSER", "Ctx", "Uniq", "Pred", "Oracle",
             }
         ]
         interesting.sort(key=lambda r: (fnum(r, "cost"), fnum(r, "drop"), r["config"]))
@@ -212,6 +223,7 @@ try:
                 "RandomDepthBudget", "DegreeDepthBudget", "TSERDepthBudget",
                 "ContextDepthBudget", "LowUniqueDepthBudget", "PredictorDepthBudget",
                 "OracleDamageBudget",
+                "Rand", "Deg", "TSER", "Ctx", "Uniq", "Pred", "Oracle",
             ]
             plt.figure(figsize=(9, 5))
             for config in configs:

@@ -1618,7 +1618,7 @@ Step 4:
 当前 Step 3/4 的正式设计定义已经整理到：
 
 ```text
-docs/GRAPH_BIT_NPU_DESIGN.md
+GRAPH_BIT_NPU_DESIGN.md
 ```
 
 其中 Step 3 对应 bit-plane early-termination simulator，Step 4 对应 mode-adaptive PE array。FFN gating 只作为 mode-adaptive array 的可选执行模式，不再作为 P2 主线。

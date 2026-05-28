@@ -365,7 +365,7 @@ graph risk 尤其 Degree/propagation risk 能比 Random 更稳地保护精度。
 更多 Cora/PubMed/Arxiv 结果见：
 
 ```text
-docs/GRAPH_BIT_VALIDATION_SUMMARY.md
+../results/GRAPH_BIT_VALIDATION_SUMMARY.md
 ```
 
 ## 10. 论文表述建议

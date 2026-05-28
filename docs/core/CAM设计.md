@@ -26,7 +26,7 @@ direct / residual / compute 三段式复用
 
 对应架构如下：
 
-![普通 CAM 架构](figure/CAM.png)
+![普通 CAM 架构](../figures/CAM.png)
 
 图里可以看成三部分：
 
@@ -76,7 +76,7 @@ HD-CAM 的关键不是把 CAM 改成更复杂的存储单元，而是让它的 m
 
 参考的 HD-CAM cell 如下：
 
-![HD-CAM bitcell](figure/HD-CAM_cell.png)
+![HD-CAM bitcell](../figures/HD-CAM_cell.png)
 
 这里最关键的是新增的：
 
@@ -165,7 +165,7 @@ Head7 -> HD-CAM bank 7
 
 我们把上面的思想组合成一张完整架构图：
 
-![HD-CAM 哈希复用架构图](figure/HD-CAM_hash_reuse_architecture.png)
+![HD-CAM 哈希复用架构图](../figures/HD-CAM_hash_reuse_architecture.png)
 
 这张图表达的是整条链路：
 

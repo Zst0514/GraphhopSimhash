@@ -98,8 +98,8 @@ P6/P5/P4:
 正式 datapath、scheduler、buffer 和 cost model 见：
 
 ```text
-docs/GRAPH_BIT_NPU_DESIGN.md
-docs/GRAPH_BIT_VALIDATION_SUMMARY.md
+GRAPH_BIT_NPU_DESIGN.md
+../results/GRAPH_BIT_VALIDATION_SUMMARY.md
 ```
 
 ### Legacy / Auxiliary: W4A8 + FFN Channel Gating

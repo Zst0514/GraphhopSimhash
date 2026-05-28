@@ -16,6 +16,19 @@ CONFIGS = {
     "TSERDepthBudget",
     "ContextDepthBudget",
     "LowUniqueDepthBudget",
+    "Rand",
+    "Deg",
+    "TSER",
+    "Ctx",
+    "Uniq",
+}
+
+CONFIG_ALIAS = {
+    "RandomDepthBudget": "Rand",
+    "DegreeDepthBudget": "Deg",
+    "TSERDepthBudget": "TSER",
+    "ContextDepthBudget": "Ctx",
+    "LowUniqueDepthBudget": "Uniq",
 }
 
 
@@ -62,10 +75,11 @@ def parse_log(log_path):
         parts = [part.strip() for part in line.split("|")]
         if len(parts) < 14 or parts[0] not in CONFIGS:
             continue
+        config = CONFIG_ALIAS.get(parts[0], parts[0])
         rows.append(
             {
                 **meta,
-                "config": parts[0],
+                "config": config,
                 "reuse": parse_percent(parts[1]),
                 "direct": parse_percent(parts[2]),
                 "residual": parse_percent(parts[3]),
@@ -116,9 +130,9 @@ def write_pivot(rows, out_dir):
 
     for dataset, threshold in dataset_thresholds:
         h4_full = by_key.get((dataset, threshold, 4, "FullP8"))
-        h4_deg = by_key.get((dataset, threshold, 4, "DegreeDepthBudget"))
+        h4_deg = by_key.get((dataset, threshold, 4, "Deg"))
         h8_full = by_key.get((dataset, threshold, 8, "FullP8"))
-        h8_deg = by_key.get((dataset, threshold, 8, "DegreeDepthBudget"))
+        h8_deg = by_key.get((dataset, threshold, 8, "Deg"))
 
         h4_reuse = h4_full["reuse"] if h4_full else math.nan
         h8_reuse = h8_full["reuse"] if h8_full else math.nan
@@ -146,7 +160,7 @@ def write_pivot(rows, out_dir):
 
 def write_best(rows, out_dir):
     lines = []
-    lines.append("Best deployable DegreeDepthBudget points by dataset/head")
+    lines.append("Best deployable Deg points by dataset/head")
     lines.append("Sorted by FullP8 drop first, then Degree drop, then cost.")
     lines.append("")
     header = (
@@ -160,7 +174,7 @@ def write_best(rows, out_dir):
     for dataset, heads in keys:
         subset = [r for r in rows if r["dataset"] == dataset and r["heads"] == heads]
         full_by_t = {r["threshold"]: r for r in subset if r["config"] == "FullP8"}
-        degree = [r for r in subset if r["config"] == "DegreeDepthBudget"]
+        degree = [r for r in subset if r["config"] == "Deg"]
         candidates = []
         for row in degree:
             full = full_by_t.get(row["threshold"])

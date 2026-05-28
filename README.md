@@ -8,47 +8,29 @@
 
 ## 文档结构
 
-当前 root 目录只保留 `README.md`，其他项目文档统一放在 `docs/`：
+当前 root 目录只保留 `README.md`，其他项目文档统一放在 `docs/`。文档入口见 [docs/README.md](docs/README.md)。
 
 ```text
 README.md
     项目入口、常用命令、文档索引。
 
-docs/SCORE_DEFINITIONS.md
-    TSER reuse gate 的分数定义，以及量化路由中 Degree/TSER 的边界说明。
+docs/core/
+    SimHash/CAM、TSER score、residual reuse、AWQ embedding 生成。
 
-docs/AWQ_W4A8_W4A4_GENERATION.md
-    当前 AWQ-based W4A16/W4A8/W4A4 embedding pool 生成方式。
+docs/npu/
+    Graph-Bit NPU、hierarchical encoder、FFN gating 和硬件实验路线。
 
-docs/RESIDUAL_CORRECTED_REUSE.md
-    fuzzy hash hit 上的 low-rank residual correction 机制与实验结果。
+docs/results/
+    主线结果汇总，避免在 README 里堆长表。
 
-docs/FFN_CHANNEL_GATING.md
-    面向 W4A8 encoder NPU 的 FFN channel gating 原型，当前作为 Graph-Bit 之外的辅助消融。
+docs/survey/
+    Encoder / 通用 Transformer / Decoder 加速器综述。
 
-docs/HIERARCHICAL_ENCODER_NPU_DESIGN.md
-    当前完整系统思路：P0/P1/P2/P3 分层 encoder 执行路径、硬件落点和端到端结果。
+docs/tools/
+    ONNXim 说明和常用实验命令。
 
-docs/GRAPH_BIT_NPU_DESIGN.md
-    Graph-Bit NPU 主线设计：datapath、scheduler、buffer、cost model 和验证边界。
-
-docs/GRAPH_AWARE_ENCODER_NPU_PROPOSAL.md
-    基于当前实验和加速器综述提炼的 Graph-aware encoder NPU 方案建议。
-
-docs/GRAPH_BIT_VALIDATION_SUMMARY.md
-    Graph-Bit 在 Cora/PubMed/Arxiv + LLaMA-7B 上的 precision-depth 验证结果。
-
-docs/NPU_ADAPTIVE_ENCODER_EXPERIMENTS.md
-    面向 graph-aware encoder NPU 的实验设计与验证路线。
-
-docs/LLM_ACCELERATOR_SURVEY.md
-    Encoder / 通用 Transformer / NPU 加速器综述。
-
-docs/LLM_DECODER_ACCELERATOR_SURVEY.md
-    Decoder / serving / KV-cache 相关加速器综述。
-
-docs/量化+哈希命令.md
-    reuse_real_quant 联合实验命令与结果解释。
+docs/figures/
+    文档图。
 ```
 
 旧的 `REAL_QUANT.md`、`PTQ_EMBEDDING_QUANT.md`、`量化配置.md` 已经合并到上面几个文档中，避免重复和过时说明。
@@ -109,10 +91,10 @@ P3: full W4A8 encoder
 对应完整说明见：
 
 ```text
-docs/HIERARCHICAL_ENCODER_NPU_DESIGN.md
-docs/GRAPH_BIT_NPU_DESIGN.md
-docs/RESIDUAL_CORRECTED_REUSE.md
-docs/GRAPH_BIT_VALIDATION_SUMMARY.md
+docs/npu/HIERARCHICAL_ENCODER_NPU_DESIGN.md
+docs/npu/GRAPH_BIT_NPU_DESIGN.md
+docs/core/RESIDUAL_CORRECTED_REUSE.md
+docs/results/GRAPH_BIT_VALIDATION_SUMMARY.md
 ```
 
 ## 1. 生成 AWQ Embedding Pool

@@ -1719,17 +1719,17 @@ def build_precision_depth_policy_configs(args, bits):
         configs.append((f"AllP{bit}", {"kind": "all_depth", "bit": int(bit)}))
     configs.extend(
         [
-            ("RandomDepthBudget", {"kind": "budget", "priority": "random"}),
-            ("DegreeDepthBudget", {"kind": "budget", "priority": "degree"}),
-            ("TSERDepthBudget", {"kind": "budget", "priority": "tser"}),
-            ("ContextDepthBudget", {"kind": "budget", "priority": "context"}),
-            ("LowUniqueDepthBudget", {"kind": "budget", "priority": "low_unique"}),
+            ("Rand", {"kind": "budget", "priority": "random"}),
+            ("Deg", {"kind": "budget", "priority": "degree"}),
+            ("TSER", {"kind": "budget", "priority": "tser"}),
+            ("Ctx", {"kind": "budget", "priority": "context"}),
+            ("Uniq", {"kind": "budget", "priority": "low_unique"}),
         ]
     )
     if bool(getattr(args, "precision_depth_include_predictor", False)):
-        configs.append(("PredictorDepthBudget", {"kind": "budget", "priority": "predictor"}))
+        configs.append(("Pred", {"kind": "budget", "priority": "predictor"}))
     if bool(getattr(args, "precision_depth_include_oracle", False)):
-        configs.append(("OracleDamageBudget", {"kind": "budget", "priority": "oracle_damage"}))
+        configs.append(("Oracle", {"kind": "budget", "priority": "oracle_damage"}))
     return configs
 
 
@@ -2754,13 +2754,13 @@ def run_residual_precision_depth_experiment(args):
             log_important(f"{'=' * 72}")
             base_mean = float(np.mean(results["baseline"]))
             log_important(f"Baseline Acc: {base_mean:.4f}")
-            log_important("-" * 188)
+            log_important("-" * 134)
             log_important(
-                f"{'Config':<24} | {'Reuse %':<9} | {'Direct %':<9} | {'Residual %':<10} | "
-                + " | ".join(f"P{bit} %".ljust(8) for bit in depth_order)
-                + f" | {'Cost':<8} | {'Acc':<10} | {'Drop %':<10} | {'FinalErr':<10} | {'Train':<8} | {'Alpha':<7}"
+                f"{'Cfg':<8} | {'Reuse':<7} | {'Dir':<7} | {'Res':<7} | "
+                + " | ".join(f"P{bit}".ljust(6) for bit in depth_order)
+                + f" | {'Cost':<6} | {'Acc':<7} | {'Drop':<7} | {'Err':<8} | {'Tr':<6} | {'A':<5}"
             )
-            log_important("-" * 188)
+            log_important("-" * 134)
             for name, _policy in configs:
                 reuse = float(np.mean(results[name]["reuse"]))
                 direct = float(np.mean(results[name]["direct"]))
@@ -2776,10 +2776,10 @@ def run_residual_precision_depth_experiment(args):
                 train_pairs = float(np.mean(results[name]["train_pairs"]))
                 alpha = float(np.mean(results[name]["alpha"]))
                 log_important(
-                    f"{name:<24} | {reuse:<9.1%} | {direct:<9.1%} | {residual:<10.1%} | "
-                    + " | ".join(f"{rate:<8.1%}" for rate in rate_values)
-                    + f" | {cost:<8.3f} | {acc:<10.4f} | {drop:<10.2%} | "
-                    f"{final_err:<10.5f} | {train_pairs:<8.1f} | {alpha:<7.3f}"
+                    f"{name:<8} | {reuse:<7.1%} | {direct:<7.1%} | {residual:<7.1%} | "
+                    + " | ".join(f"{rate:<6.1%}" for rate in rate_values)
+                    + f" | {cost:<6.3f} | {acc:<7.4f} | {drop:<7.2%} | "
+                    f"{final_err:<8.5f} | {train_pairs:<6.1f} | {alpha:<5.3f}"
                 )
             log_important(f"{'=' * 72}\n")
 
