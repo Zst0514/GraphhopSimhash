@@ -260,6 +260,97 @@ It is preferred over `h8_64_T40` because both have the same reuse, but routing s
 
 The `FullP8` row below still includes reuse. It means "reuse hits use direct/residual, all misses use P8". It is the correct baseline for measuring how much extra error Graph-Bit adds on top of the reuse subsystem.
 
+### Cora / LLaMA-7B, fixed `h8_54_T40`, three-depth Graph-Bit
+
+This is the current Cora full-stack main table.  It fixes the residual reuse front-end to the common robust setting:
+
+```text
+R = 2
+heads = 8 x 16-bit
+score threshold T = 40
+hard direct reuse: support >= 5
+residual correction: support == 4
+compute / Graph-Bit: support < 4
+```
+
+For the miss nodes, this run uses a hardware-friendly three-depth Graph-Bit budget:
+
+```text
+P8: 20% of miss nodes
+P6: 50% of miss nodes
+P4: 30% of miss nodes
+```
+
+Reproduction command:
+
+```bash
+python -m GraphhopSimhash \
+  --datasets cora \
+  --runs 10 \
+  --experiment_suite residual_precision_depth \
+  --real_quant_model_name llama2_7b \
+  --precision_depth_reference_tag W4A8 \
+  --precision_depth_tags W4A6 W4A4 \
+  --precision_depth_bits 6 4 \
+  --precision_depth_reference_bits 8 \
+  --precision_depth_high_ratio 0.20 \
+  --precision_depth_mid_ratio 0.50 \
+  --precision_depth_low_ratio 0.30 \
+  --precision_depth_cost_scale 0.50 \
+  --precision_depth_fixed_cost 0.15 \
+  --radius 2 \
+  --hash_heads_per_route 8 \
+  --main_hash_head_bits 16 16 16 16 16 16 16 16 \
+  --learned_hash_epochs 10 \
+  --learned_hash_dim 128 \
+  --hamming_only_acceptor \
+  --enable_score_gate \
+  --allow_rare_fuzzy \
+  --score_reuse_threshold 40 \
+  --score_propagation_weight 3 \
+  --score_graph_context_weight 1 \
+  --score_low_unique_weight 1 \
+  --residual_fit_profile llama \
+  --residual_rank 64 \
+  --residual_epochs 120 \
+  --residual_max_train_pairs 4096 \
+  --residual_hard_min_support_hits 5 \
+  --residual_soft_min_support_hits 4 \
+  --residual_alpha_grid 0 0.125 0.25 0.5 \
+  --residual_min_dist 1.0
+```
+
+Log:
+
+```text
+output/residual_graphbit_main/cora_h8_54_T40/cora_h8_54_T40_runs10.log
+```
+
+Result:
+
+| Config | Reuse | Direct | Residual | P8 | P6 | P4 | Cost | Acc | Drop | FinalErr |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| FullP8 | 40.0% | 21.9% | 18.0% | 60.0% | 0.0% | 0.0% | 0.301 | 0.7015 | 1.53% | 0.06888 |
+| AllP6 | 40.0% | 21.9% | 18.0% | 0.0% | 60.0% | 0.0% | 0.237 | 0.6965 | 2.03% | 0.07283 |
+| AllP4 | 40.0% | 21.9% | 18.0% | 0.0% | 0.0% | 60.0% | 0.173 | 0.6653 | 5.14% | 0.09536 |
+| Random | 40.0% | 21.9% | 18.0% | 12.0% | 30.0% | 18.0% | 0.231 | 0.6888 | 2.79% | 0.07892 |
+| Degree | 40.0% | 21.9% | 18.0% | 12.0% | 30.0% | 18.0% | 0.231 | 0.6928 | 2.39% | 0.07836 |
+| TSER | 40.0% | 21.9% | 18.0% | 12.0% | 30.0% | 18.0% | 0.231 | 0.6891 | 2.77% | 0.07847 |
+| Context | 40.0% | 21.9% | 18.0% | 12.0% | 30.0% | 18.0% | 0.231 | 0.6898 | 2.69% | 0.07837 |
+| LowUnique | 40.0% | 21.9% | 18.0% | 12.0% | 30.0% | 18.0% | 0.231 | 0.6897 | 2.71% | 0.07909 |
+
+Observation:
+
+```text
+FullP8 miss baseline:
+    cost = 0.301, drop = 1.53%
+
+Degree Graph-Bit:
+    cost = 0.231, drop = 2.39%
+```
+
+At the same reuse set, Degree-based Graph-Bit is better than Random (`2.39%` vs `2.79%` drop) and gives about `23%` extra cost reduction relative to FullP8-miss (`0.301 -> 0.231`).  This supports the current design direction: reuse controls whether a node executes the encoder, and graph-risk-controlled bit-depth reduces NPU arithmetic effort for the remaining miss nodes.
+
 ### LLaMA-7B, T = 20
 
 | Dataset | Reuse | Direct | Residual | FullP8 Cost | FullP8 Drop | Graph-Bit Cost | Random | Degree | TSER | Context | LowUnique |
