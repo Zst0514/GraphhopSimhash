@@ -45,8 +45,10 @@ void SystolicWS::cycle() {
     }
     if (front->opcode == Opcode::GEMM || front->opcode == Opcode::GEMM_PRELOAD) {
       if (!_compute_pipeline.empty()) {
-        /* Preload can be hided */
-        uint32_t offset = _compute_pipeline.back()->compute_size;
+        /* Preload can be hided. For Graph-Bit bit-serial execution, the
+         * array can accept the next GEMM after the actually executed bit-plane
+         * depth, not after the original full-depth compute_size. */
+        cycle_type offset = get_inst_issue_spacing(_compute_pipeline.back());
         offset = MAX(offset, 4);
         if (front->opcode == Opcode::GEMM_PRELOAD) {
           // State mul-pre
@@ -152,6 +154,21 @@ cycle_type SystolicWS::get_inst_compute_cycles(std::unique_ptr<Instruction>& ins
                 static_cast<double>(effective_depth) /
                 static_cast<double>(full_depth)));
   return std::max<cycle_type>(1, scaled_cycles);
+}
+
+cycle_type SystolicWS::get_inst_issue_spacing(std::unique_ptr<Instruction>& inst) {
+  cycle_type raw_spacing = inst->compute_size;
+  if (!inst->graphbit_enabled) {
+    return raw_spacing;
+  }
+  uint32_t full_depth = std::max(1u, inst->graphbit_full_depth);
+  uint32_t effective_depth =
+      std::max(1u, std::min(inst->graphbit_effective_depth, full_depth));
+  cycle_type scaled_spacing = static_cast<cycle_type>(
+      std::ceil(static_cast<double>(raw_spacing) *
+                static_cast<double>(effective_depth) /
+                static_cast<double>(full_depth)));
+  return std::max<cycle_type>(1, scaled_spacing);
 }
 
 cycle_type SystolicWS::get_vector_compute_cycles(std::unique_ptr<Instruction>& inst) {

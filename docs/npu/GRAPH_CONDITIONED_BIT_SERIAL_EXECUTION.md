@@ -129,13 +129,38 @@ P4:
     execute b7..b4
 ```
 
-注意：`P6` 不一定是独立硬件 datatype。它可以只是 bit-serial PE 少执行两个低位 plane。
+注意：`P6/P4` 不一定是独立硬件 datatype。它可以只是 bit-serial PE 少执行若干低位 plane。
 
 推荐论文表述：
 
 ```text
 P8/P6/P4 are precision-depth levels, not necessarily fixed ISA datatypes.
 ```
+
+在 predictor-free early-stop 版本里，`P6/P4` 进一步退化为安全下限，而不是固定终点：
+
+```text
+high-risk:
+    start from max_depth=8, min_depth=8
+
+mid-risk:
+    start from max_depth=8, min_depth=6
+    if bound is still large, continue below/above the nominal boundary as needed
+
+low-risk:
+    start from max_depth=8, min_depth=4
+    stop once the bit-level bound is small enough
+```
+
+因此真正的硬件机制是动态执行深度：
+
+```text
+always start from high bit-plane;
+execute at least min_depth;
+then stop by predictor-free bound.
+```
+
+`P6/P4` 在论文中应表述为 validation anchors / minimum-depth floors，而不是必须永久固定成 6-bit 或 4-bit datatype。
 
 ## 4. Risk Definition
 
@@ -572,6 +597,79 @@ saved bit-planes
 PE utilization proxy
 energy proxy
 ```
+
+### 8.3.1 Current Cora early-stop validation
+
+固定 full-stack 前端：
+
+```text
+Dataset: Cora
+Reuse front-end: h8_54_T40
+    8 heads x 16-bit
+    R = 2
+    T = 40
+    support >= 5 -> direct reuse
+    support == 4 -> residual correction
+    support < 4  -> Graph-Bit / full encoder
+
+Graph-Bit risk: Degree
+Miss-node budget proxy: P8/P6/P4 = 20/50/30
+ONNXim sequence length: 64
+```
+
+命令：
+
+```bash
+FORCE_ONNXIM=1 bash GraphhopSimhash/scripts/run_cora_graphbit_earlystop_sweep.sh
+```
+
+结果文件：
+
+```text
+output/graphbit_predictor_free/cora_h8_54_T40/earlystop_sweep/earlystop_sweep.txt
+```
+
+当前结果：
+
+| Method | Reuse | AvgD | Saved | Stop | Cycles | Traffic | Energy | Drop |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| FullP8-miss | 40.0% | 8.00 | 0.00 | 0.0% | 0.601 | 0.602 | 0.602 | 1.53% |
+| Static Degree P8/P6/P4 | 40.0% | 5.80 | 2.20 | 0.0% | 0.575 | 0.581 | 0.578 | 2.39% |
+| EarlyStop conservative | 40.0% | 6.90 | 1.10 | 100.0% | 0.588 | 0.591 | 0.589 | 2.39% |
+| EarlyStop balanced | 40.0% | 6.10 | 1.90 | 100.0% | 0.576 | 0.583 | 0.580 | 2.39% |
+| EarlyStop aggressive | 40.0% | 5.80 | 2.20 | 100.0% | 0.575 | 0.581 | 0.578 | 2.39% |
+
+解释：
+
+```text
+FullP8-miss:
+    miss nodes 全部完整执行 A8 bit-plane。
+
+Static Degree P8/P6/P4:
+    旧的固定深度 proxy，用来估计精度 drop。
+
+EarlyStop:
+    所有 miss nodes 都从 max_depth=8 开始；
+    degree risk 只控制 min_depth 和 tolerance；
+    ONNXim 在 GEMM 内部按 bit-bound 早停。
+```
+
+这个结果说明：
+
+```text
+1. P6/P4 不再必须作为固定最终位宽。
+2. Balanced early-stop 的 AvgD=6.10，已经接近静态 Degree proxy 的 AvgD=5.80。
+3. Cycles/Traffic/Energy 也接近静态 proxy，说明 predictor-free early-stop 在 NPU datapath 中有真实节省潜力。
+4. Drop 当前仍沿用静态 Degree proxy 的 embedding 结果；它用于精度保守估计。若要精确评估动态 AvgD=6.10，需要后续生成动态深度 embedding 或用 nearest-depth conservative mapping。
+```
+
+三组 early-stop 参数：
+
+| Name | Mid-risk | Low-risk |
+|---|---|---|
+| conservative | `min_depth=6, tau=0.006` | `min_depth=4, tau=0.02` |
+| balanced | `min_depth=6, tau=0.02` | `min_depth=4, tau=0.04` |
+| aggressive | `min_depth=6, tau=0.06` | `min_depth=4, tau=0.06` |
 
 ### 8.4 Stage D: full-stack cost integration
 

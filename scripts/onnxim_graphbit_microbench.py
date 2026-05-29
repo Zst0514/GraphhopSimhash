@@ -256,11 +256,41 @@ def write_summary(specs: list[GemmSpec], workspace: Path, layers: int) -> dict[s
             "gb": weighted("gb"),
             "dram_read_requests": weighted("dram_read_requests"),
             "dram_write_requests": weighted("dram_write_requests"),
+            "graphbit_inst": weighted("graphbit_inst"),
+            "graphbit_bound_stops": weighted("graphbit_bound_stops"),
         },
     }
+    graphbit_inst = aggregate["per_layer"]["graphbit_inst"]
+    if graphbit_inst:
+        aggregate["per_layer"]["graphbit_avg_depth"] = (
+            sum(
+                (row["graphbit_avg_depth"] or 0.0)
+                * row["graphbit_inst"]
+                * row["count_per_layer"]
+                for row in rows
+            )
+            / graphbit_inst
+        )
+        aggregate["per_layer"]["graphbit_avg_saved_bitplanes"] = (
+            sum(
+                (row["graphbit_avg_saved_bitplanes"] or 0.0)
+                * row["graphbit_inst"]
+                * row["count_per_layer"]
+                for row in rows
+            )
+            / graphbit_inst
+        )
+    else:
+        aggregate["per_layer"]["graphbit_avg_depth"] = None
+        aggregate["per_layer"]["graphbit_avg_saved_bitplanes"] = None
     aggregate["encoder"] = {
         key: value * layers for key, value in aggregate["per_layer"].items()
+        if isinstance(value, (int, float))
     }
+    aggregate["encoder"]["graphbit_avg_depth"] = aggregate["per_layer"]["graphbit_avg_depth"]
+    aggregate["encoder"]["graphbit_avg_saved_bitplanes"] = aggregate["per_layer"][
+        "graphbit_avg_saved_bitplanes"
+    ]
 
     aggregate_path = workspace / "aggregate.json"
     with aggregate_path.open("w") as handle:

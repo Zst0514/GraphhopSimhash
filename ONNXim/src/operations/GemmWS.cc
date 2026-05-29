@@ -319,9 +319,11 @@ void GemmWS::initialize_instructions(Tile *tile, Mapping mapping)
                   first_addr + make_address(index, _input_shape));
             }
           }
+          uint32_t graphbit_tile_k = static_cast<uint32_t>(
+              std::min(static_cast<uint32_t>(c_in_loop),
+                       _config.core_config[target_core].core_height));
           uint32_t effective_depth =
-              select_graphbit_effective_depth(static_cast<uint32_t>(c_in_loop),
-                                              _config);
+              select_graphbit_effective_depth(graphbit_tile_k, _config);
           std::vector<addr_type> input_addrs =
               make_graphbit_src_addrs(input_set, effective_depth, _config);
           Instruction inst = Instruction{
@@ -330,10 +332,10 @@ void GemmWS::initialize_instructions(Tile *tile, Mapping mapping)
               .size = (uint32_t)input_addrs.size(),
               .src_addrs = input_addrs,
               .operand_id = _INPUT_OPERAND,
-              .tile_k = static_cast<unsigned int>(c_in_loop),
+              .tile_k = graphbit_tile_k,
               .tile_n = static_cast<unsigned int>(n_loop),
               .graphbit_original_size = (uint32_t)input_set.size()};
-          annotate_graphbit(inst, static_cast<uint32_t>(c_in_loop), _config);
+          annotate_graphbit(inst, graphbit_tile_k, _config);
           tile->instructions.push_back(std::make_unique<Instruction>(Instruction{
               inst}));
         }

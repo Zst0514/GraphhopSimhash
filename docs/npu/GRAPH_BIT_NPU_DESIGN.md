@@ -7,7 +7,21 @@
 图任务风险控制 NPU 内部 activation bit-plane 的执行深度。
 ```
 
-Graph-Bit 不是普通的 W4A8/W4A4 路由，也不是 FFN channel gating。它深入到 GEMM datapath：同一个 W4 weight encoder path 下，activation 逻辑上仍是 A8，但硬件可以只执行 P8/P6/P5/P4 中的一种 precision depth。
+Graph-Bit 不是普通的 W4A8/W4A4 路由，也不是 FFN channel gating。它深入到 GEMM datapath：同一个 W4 weight encoder path 下，activation 逻辑上仍是 A8，但硬件可以减少低位 activation bit-plane 的执行。
+
+当前有两种验证层次：
+
+```text
+Static precision-depth proxy:
+    P8/P6/P5/P4 作为固定执行深度，用离线 embedding pool 评估精度。
+
+Predictor-free early-stop:
+    所有节点从 P8 高位开始执行；
+    P6/P4 只是 min_depth 安全下限；
+    是否继续执行低位由 bit-level bound 和 graph tolerance 决定。
+```
+
+因此最终硬件主线不是“必须设计 6-bit/4-bit datatype”，而是“bit-serial datapath 支持 graph-conditioned early termination”。
 
 更细的 predictor-free bit-serial 实现、degree/propagation risk 阈值管理和 ONNXim 验证接口见：
 
@@ -84,13 +98,26 @@ P4:
     execute b7..b4
 ```
 
-P6/P5/P4 可以理解成提前终止低位 activation bit-plane。当前实验用离线 embedding pools 近似这个过程：
+P6/P5/P4 可以理解成提前终止低位 activation bit-plane。当前精度实验用离线 embedding pools 近似这个过程：
 
 ```text
 P8 = W4A8
 P6 = W4A6
 P5 = W4A5
 P4 = W4A4
+```
+
+在 ONNXim predictor-free early-stop 实现里，`P6/P4` 不再是固定终点，而是：
+
+```text
+min_depth:
+    至少执行到这个深度，保证风险桶的安全下限。
+
+tolerance:
+    如果剩余低位 bit-plane 的 bound 已经足够小，就停止。
+
+actual_depth:
+    由运行时 bound 决定，可落在 P8 和 min_depth 之间。
 ```
 
 ### 3.2 PE Array

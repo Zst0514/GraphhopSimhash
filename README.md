@@ -1,105 +1,240 @@
 # GraphHop SimHash
 
-`GraphhopSimhash` 当前主线做三件事：
+GraphhopSimhash is a graph-aware LLM encoder acceleration prototype for text-attributed graph workloads such as Cora, PubMed, and OGBN-Arxiv.
 
-1. **GraphHop SimHash reuse**：用图上下文 hash 找可复用节点，减少 embedding 计算。
-2. **TSER score gate**：用图风险分数过滤危险复用，降低复用带来的精度掉点。
-3. **Graph-Bit NPU execution**：把必须执行 encoder 的节点路由到 P8/P6/P5/P4 precision-depth datapath，用图风险控制 NPU 内部 bit-plane 计算深度。
-
-## 文档结构
-
-当前 root 目录只保留 `README.md`，其他项目文档统一放在 `docs/`。文档入口见 [docs/README.md](docs/README.md)。
+The current mainline is no longer just "SimHash reuse" or "degree-based quantization". The project now studies a full encoder execution hierarchy:
 
 ```text
-README.md
-    项目入口、常用命令、文档索引。
+P0: Exact hash reuse
+    Reuse a cached embedding directly.
 
-docs/core/
-    SimHash/CAM、TSER score、residual reuse、AWQ embedding 生成。
-
-docs/npu/
-    Graph-Bit NPU、hierarchical encoder、FFN gating 和硬件实验路线。
-
-docs/results/
-    主线结果汇总，避免在 README 里堆长表。
-
-docs/survey/
-    Encoder / 通用 Transformer / Decoder 加速器综述。
-
-docs/tools/
-    ONNXim 说明和常用实验命令。
-
-docs/figures/
-    文档图。
-```
-
-旧的 `REAL_QUANT.md`、`PTQ_EMBEDDING_QUANT.md`、`量化配置.md` 已经合并到上面几个文档中，避免重复和过时说明。
-
-## 代码结构
-
-```text
-cli.py
-    命令行参数。
-
-runner.py
-    实验流程、baseline 训练、reuse / quant 评估。
-
-controller.py
-    SimHash cache、候选检索、结构检查、score gate。
-
-scoring.py
-    propagation / graph context / low-degree uniqueness 分数。
-
-generate_real_quant_pools.py
-    FP16 / W4A16 / W4A8 / W4A4 embedding pool 生成。
-
-generate_real_quant_pools_ptq_legacy.py
-    保留旧 PTQ_TEST 生成路径，用于复现已验证过的低误差 W4A8 pool。
-
-real_quant.py
-    真实 embedding pool 的固定预算评估和联合实验装配。
-
-activation_outlier_calibration.py
-    activation outlier 统计，可选用于 W4A4 outlier channel 保护。
-
-features.py / projections.py
-    cheap feature、hash feature、多头 learned hash projection。
-
-scripts/
-    所有项目级 `.sh` 入口脚本统一放在这里。运行示例：
-    `bash GraphhopSimhash/scripts/run_cora_tser_reuse_sweep.sh`
-```
-
-## 0. 当前系统总览
-
-当前更推荐把系统讲成 graph-aware hierarchical encoder execution：
-
-```text
-P0: exact hash reuse
-    cost ~= 0
-
-P1: fuzzy hash reuse + residual correction
-    cost ~= tiny adapter
+P1: Fuzzy hash reuse + residual correction
+    Use CAM/SimHash to find an anchor embedding, then apply a lightweight residual adapter.
 
 P2: Graph-Bit precision-depth encoder
-    必须跑 encoder，但图风险决定 P8/P6/P5/P4 bit-plane 深度
+    For nodes that must execute the LLM encoder, graph risk controls activation bit-plane depth inside the NPU.
 
-P3: full W4A8 encoder
-    精度兜底路径
+P3: Full W4A8 encoder
+    High-risk fallback path.
 ```
 
-对应完整说明见：
+The key idea is:
 
 ```text
+Graph structure controls how much LLM encoder work is necessary.
+```
+
+Reuse decides whether a node can skip the encoder. Graph-Bit decides how much bit-serial arithmetic the NPU should spend when the encoder cannot be skipped.
+
+## Main Contributions
+
+### 1. GraphHop SimHash / CAM Reuse
+
+The system builds graph-context-aware hash signatures and uses multi-head SimHash/CAM lookup to find reusable anchor nodes.
+
+Current stable front-end:
+
+```text
+h8_54_T40
+8 heads x 16 bits
+radius R = 2
+score threshold T = 40
+support >= 5 -> direct reuse
+support == 4 -> residual correction
+support < 4  -> encoder / Graph-Bit
+```
+
+This front-end is the default for full-stack experiments because it is the best common point found across Cora and PubMed:
+
+```text
+Cora:   reuse 25.7%, drop 0.45%
+PubMed: reuse 50.3%, drop 2.52%
+```
+
+### 2. TSER Score Gate
+
+TSER means Topology-aware Semantic Error Risk. It scores reuse risk using:
+
+```text
+propagation risk
+graph context risk
+low-degree uniqueness risk
+candidate confidence / support
+```
+
+In the current results, TSER is valuable for reuse filtering and analysis. For Graph-Bit precision-depth routing, degree / propagation risk is the most stable deployable proxy.
+
+### 3. Residual-Corrected Reuse
+
+Fuzzy reuse is not simply "copy the nearest embedding". The residual path uses:
+
+```text
+anchor embedding E_u
+cheap feature delta
+graph/context delta
+low-rank adapter
+```
+
+to estimate a corrected embedding:
+
+```text
+E_v_hat = normalize(E_u + alpha * residual(v, u))
+```
+
+This path is only used for medium-confidence fuzzy hits. Exact/high-support hits use direct reuse, and unsafe hits are rejected into the encoder path.
+
+### 4. AWQ-Based W4A8 / W4A6 / W4A5 / W4A4 Embedding Pools
+
+The current embedding generation path uses the official llm-awq style weight quantization path plus activation fake quantization for multiple activation depths:
+
+```text
+W4A8 -> P8 reference
+W4A6 -> P6 proxy
+W4A5 -> P5 proxy
+W4A4 -> P4 proxy
+```
+
+For LLaMA-7B, these pools are used to validate graph-conditioned precision-depth execution.
+
+### 5. Graph-Bit NPU
+
+Graph-Bit is the hardware-facing contribution. It does not just route nodes to cached W4A8/W4A4 pools. It maps graph risk into the NPU datapath:
+
+```text
+high-risk node:
+    execute more activation bit-planes
+
+low-risk node:
+    allow early termination of low activation bit-planes
+```
+
+The current ONNXim-backed prototype supports:
+
+```text
+static precision-depth proxy:
+    P8/P6/P5/P4 as fixed execution depths
+
+predictor-free early stop:
+    all nodes start from P8 high bits
+    degree risk chooses min_depth and tolerance
+    bit-level bound decides when lower bit-planes can stop
+```
+
+In the predictor-free version, P6/P4 are not fixed datatypes. They are safety floors / validation anchors.
+
+## Repository Layout
+
+```text
+GraphhopSimhash/
+    cli.py
+        command-line argument definitions
+
+    runner.py
+        main experiment suites
+
+    controller.py
+        SimHash/CAM lookup, reuse decision, structure/score checks
+
+    scoring.py
+        propagation, graph context, low-degree uniqueness, TSER components
+
+    residual_reuse.py
+        low-rank residual adapter and residual reuse helpers
+
+    real_quant.py
+        real embedding pool loading and quantization routing utilities
+
+    precision_depth.py
+        Graph-Bit precision-depth pool utilities
+
+    generate_real_quant_pools.py
+        FP/W4A16/W4A8/W4A6/W4A5/W4A4 embedding pool generator
+
+    paths.py
+        repo/model path resolution
+
+    scripts/
+        runnable experiment scripts and summary tools
+
+    ONNXim/
+        integrated ONNXim simulator with Graph-Bit microbenchmark hooks
+
+    docs/
+        organized project documentation
+```
+
+Documentation folders:
+
+```text
+docs/core/
+    AWQ embedding generation, CAM design, score definitions, residual reuse
+
+docs/npu/
+    Graph-Bit NPU design, predictor-free bit-serial execution, proxy experiments
+
+docs/results/
+    main result summaries
+
+docs/survey/
+    LLM / Transformer accelerator survey
+
+docs/tools/
+    ONNXim guide and command notes
+```
+
+Start here:
+
+```text
+docs/README.md
+docs/PROJECT_ROADMAP.md
+docs/core/RESIDUAL_CORRECTED_REUSE.md
 docs/npu/GRAPH_BIT_NPU_DESIGN.md
 docs/npu/GRAPH_CONDITIONED_BIT_SERIAL_EXECUTION.md
-docs/core/RESIDUAL_CORRECTED_REUSE.md
 docs/results/GRAPH_BIT_VALIDATION_SUMMARY.md
 ```
 
-## 1. 生成 AWQ Embedding Pool
+## Running Location
 
-ST / Cora + PubMed：
+Run commands from the OFA repository root:
+
+```bash
+cd /home/zhangshangtong/Transformer/OFA
+```
+
+Then use:
+
+```bash
+python -m GraphhopSimhash ...
+```
+
+If running from another directory, make sure the OFA root is in `PYTHONPATH`.
+
+## Model Paths
+
+Model paths are now repo-relative by default and can be overridden by environment variables.
+
+Default paths:
+
+```text
+llama2_7b -> models/llama-7b/modelscope/Llama-2-7b-ms
+ST        -> models/multi-qa-distilbert-cos-v1
+BERT      -> models/bert-base-uncased
+```
+
+Optional overrides:
+
+```bash
+export GRAPHHOP_MODEL_ROOT=/path/to/models
+export GRAPHHOP_LLAMA2_7B_PATH=/path/to/Llama-2-7b-ms
+export GRAPHHOP_ST_PATH=/path/to/multi-qa-distilbert-cos-v1
+export GRAPHHOP_BERT_PATH=/path/to/bert-base-uncased
+```
+
+This keeps the code portable across machines without hard-coding one user's absolute paths.
+
+## Generate Embedding Pools
+
+### ST / Cora + PubMed
 
 ```bash
 python -m GraphhopSimhash.generate_real_quant_pools \
@@ -112,199 +247,339 @@ python -m GraphhopSimhash.generate_real_quant_pools \
   --overwrite
 ```
 
-LLaMA-7B / Cora：
+### LLaMA-7B / Cora
 
 ```bash
 python -m GraphhopSimhash.generate_real_quant_pools \
   --datasets cora \
   --llm_name llama2_7b \
-  --configs W4A16 W4A8 W4A4 \
+  --configs W4A8 W4A6 W4A5 W4A4 \
   --batch_size 4 \
   --awq_calib_samples 128 \
   --awq_seqlen 512 \
   --overwrite
 ```
 
-输出路径格式：
+Output format:
 
 ```text
 cache_data/{dataset}_{model}_oracle_{tag}.pt
 ```
 
-例如：
+Examples:
 
 ```text
-cache_data/cora_ST_oracle_W4A16.pt
-cache_data/cora_ST_oracle_W4A8.pt
-cache_data/cora_ST_oracle_W4A4.pt
+cache_data/cora_llama2_7b_oracle_W4A8.pt
+cache_data/cora_llama2_7b_oracle_W4A6.pt
+cache_data/cora_llama2_7b_oracle_W4A5.pt
+cache_data/cora_llama2_7b_oracle_W4A4.pt
 ```
 
-## 2. 真实量化固定预算评估
+`cache_data/`, `models/`, and generated `output/` logs are not intended to be committed.
 
-这组实验不做 hash reuse，只看 W4A8/W4A4 路由本身：
+## Core Experiment Suites
 
-```bash
-python -m GraphhopSimhash \
-  --datasets cora \
-  --runs 10 \
-  --experiment_suite real_quant_ablation \
-  --real_quant_policy_suite w4a8_budget \
-  --real_quant_model_name ST \
-  --real_quant_fp_tag W4A16 \
-  --real_quant_int8_tag W4A8 \
-  --real_quant_int4_tag W4A4 \
-  --real_quant_fp_ratio 0.0 \
-  --real_quant_int8_ratio 0.20 \
-  --real_quant_error_norm 1.0
-```
+### 1. Residual Reuse Front-End
 
-主表只保留可部署策略：
-
-```text
-AllFP
-UniformW4A8
-UniformW4A4
-RandomTopK_W4A8
-DegreeTopK_W4A8
-TSERTopK_W4A8
-```
-
-`DegreeErrorTopK` / `TSERErrorTopK` 这类真实误差 oracle 行不作为主线，因为它们需要提前知道每个节点的 FP-vs-W4A4 误差。
-
-当前量化路由结论要和 reuse gate 分开：
-
-```text
-量化掉点主要由两件事决定：
-    1. 节点自身量化误差
-    2. 量化误差沿图传播的范围
-
-第 1 项在线不可得；第 2 项最直接的可部署代理是 degree / propagation risk。
-```
-
-因此固定预算量化路由中，实验结果显示 `DegreeTopK_W4A8` 优于 `TSERTopK_W4A8`。
-`TSERTopK_W4A8` 作为图语义修正消融保留。
-
-## 3. Hash Reuse + TSER Gate
-
-只评估 reuse，不叠加真实量化：
-
-```bash
-python -m GraphhopSimhash \
-  --datasets cora \
-  --runs 10 \
-  --experiment_suite score_ablation \
-  --radius 2 \
-  --hash_heads_per_route 4 \
-  --main_hash_head_bits 16 16 16 16 \
-  --learned_hash_epochs 10 \
-  --learned_hash_dim 128 \
-  --hamming_only_acceptor
-```
-
-输出会比较：
-
-```text
-R2_NoScore
-R2_DegreeOnly
-R2_TSER
-```
-
-含义：
-
-```text
-NoScore:
-    只看 hash/hamming，复用率高但掉点大。
-
-DegreeOnly:
-    只保护高传播节点。
-
-TSER:
-    degree + graph context + low-degree uniqueness。
-```
-
-## 4. Reuse + Real Quant 联合实验
-
-联合实验中：
-
-```text
-reuse hit:
-    直接读 cache，cost = 0。
-
-reuse miss:
-    再进入 W4A8 / W4A4 / FP 路径。
-```
-
-命令：
+This reproduces the current common front-end parameter point:
 
 ```bash
 python -m GraphhopSimhash \
   --datasets cora \
   --runs 3 \
-  --experiment_suite reuse_real_quant \
-  --real_quant_policy_suite w4a8_budget \
-  --real_quant_model_name ST \
-  --real_quant_fp_tag W4A16 \
-  --real_quant_int8_tag W4A8 \
-  --real_quant_int4_tag W4A4 \
-  --real_quant_fp_ratio 0.0 \
-  --real_quant_int8_ratio 0.20 \
-  --real_quant_error_norm 1.0 \
+  --experiment_suite residual_reuse \
+  --radius 2 \
   --learned_hash_epochs 10 \
   --learned_hash_dim 128 \
   --hamming_only_acceptor \
   --enable_score_gate \
+  --score_reuse_threshold 40 \
   --main_hash_head_bits 16 16 16 16 16 16 16 16 \
-  --route_min_support_hits 3
+  --residual_fit_profile llama \
+  --residual_hard_min_support_hits 5 \
+  --residual_soft_min_support_hits 4 \
+  --residual_rank 64 \
+  --residual_epochs 120 \
+  --residual_max_train_pairs 4096 \
+  --residual_min_dist 1.0 \
+  --residual_alpha_grid 0 0.125 0.25 0.5
 ```
 
-## 5. TSER 参数探索
+More details:
 
-Cora：
+```text
+docs/core/RESIDUAL_CORRECTED_REUSE.md
+```
+
+### 2. Pure Graph-Bit Precision-Depth Routing
+
+This isolates the question:
+
+```text
+If every node must execute the encoder, can graph risk decide P8/P6/P5/P4 better than random?
+```
+
+Command:
 
 ```bash
-RUNS=5 bash GraphhopSimhash/scripts/run_cora_tser_reuse_sweep.sh
+python -m GraphhopSimhash \
+  --datasets cora pubmed \
+  --runs 10 \
+  --experiment_suite precision_depth_ablation \
+  --real_quant_model_name llama2_7b \
+  --precision_depth_reference_tag W4A8 \
+  --precision_depth_tags W4A6 W4A5 W4A4 \
+  --precision_depth_bits 6 5 4 \
+  --precision_depth_reference_bits 8 \
+  --precision_depth_high_ratio 0.20 \
+  --precision_depth_mid_ratio 0.30 \
+  --precision_depth_low_ratio 0.30 \
+  --score_propagation_weight 3 \
+  --score_graph_context_weight 1 \
+  --score_low_unique_weight 1
 ```
 
-PubMed：
+Main observation:
+
+```text
+Degree / propagation risk is the most stable deployable precision-depth proxy.
+```
+
+### 3. Residual Reuse + Graph-Bit Full Stack
+
+This is the main full-stack software experiment:
+
+```text
+exact hit      -> direct reuse
+fuzzy hit      -> residual correction
+reject / miss  -> Graph-Bit P8/P6/P5/P4
+```
+
+Recommended Cora smoke run:
 
 ```bash
-RUNS=5 bash GraphhopSimhash/scripts/run_pubmed_tser_reuse_sweep.sh
+python -m GraphhopSimhash \
+  --datasets cora \
+  --runs 1 \
+  --experiment_suite residual_precision_depth \
+  --real_quant_model_name llama2_7b \
+  --precision_depth_reference_tag W4A8 \
+  --precision_depth_tags W4A6 W4A4 \
+  --precision_depth_bits 6 4 \
+  --precision_depth_reference_bits 8 \
+  --precision_depth_high_ratio 0.20 \
+  --precision_depth_mid_ratio 0.50 \
+  --precision_depth_low_ratio 0.30 \
+  --radius 2 \
+  --learned_hash_epochs 10 \
+  --learned_hash_dim 128 \
+  --hamming_only_acceptor \
+  --enable_score_gate \
+  --score_reuse_threshold 40 \
+  --main_hash_head_bits 16 16 16 16 16 16 16 16 \
+  --residual_fit_profile llama \
+  --residual_hard_min_support_hits 5 \
+  --residual_soft_min_support_hits 4 \
+  --residual_rank 64 \
+  --residual_epochs 120 \
+  --residual_max_train_pairs 4096 \
+  --residual_min_dist 1.0 \
+  --residual_alpha_grid 0 0.125 0.25 0.5
 ```
 
-结果目录：
+Current Cora h8_54_T40 10-run result:
 
 ```text
-output/tser_reuse_sweep/cora/
-output/tser_reuse_sweep/pubmed/
+FullP8 miss baseline:
+    cost = 0.301, drop = 1.53%
+
+Degree Graph-Bit:
+    cost = 0.231, drop = 2.39%
 ```
 
-重点看：
+Interpretation:
 
 ```text
-Reuse %
-Acc
-Drop %
-Reuse n/d
+At the same reuse set, Degree Graph-Bit reduces normalized encoder cost
+relative to the FullP8 miss path, with extra accuracy drop.
 ```
 
-## 6. 当前实验口径
+The "cost" here is a normalized software cost proxy, not measured wall-clock time.
 
-论文叙事建议分清边界：
+### 4. ONNXim Predictor-Free Early-Stop Validation
+
+This validates the hardware-facing bit-serial mechanism:
 
 ```text
-SimHash:
-    负责找可复用节点，贡献是减少计算。
-
-TSER score gate:
-    负责过滤危险复用，贡献是在复用率和精度之间做可调折中。
-
-AWQ W4A8/W4A4:
-    负责让低精度 embedding pool 本身可用。
-
-Degree / TSER quant routing:
-    负责在固定 W4A8 预算下选择哪些节点走安全路径。
-    当前实验中 DegreeTopK_W4A8 优于 TSERTopK_W4A8；
-    TSER quant routing 主要作为图语义修正消融。
+All miss nodes start from max_depth=8.
+Graph risk selects min_depth and tolerance.
+The NPU stops low bit-planes when a predictor-free bound is satisfied.
 ```
 
-不能把 oracle error-aware 策略当成可部署系统策略；它们只能作为离线上界或 debug 参考。
+Build ONNXim and run the Cora early-stop sweep:
+
+```bash
+bash GraphhopSimhash/scripts/build_onnxim.sh
+FORCE_ONNXIM=1 bash GraphhopSimhash/scripts/run_cora_graphbit_earlystop_sweep.sh
+```
+
+Result file:
+
+```text
+output/graphbit_predictor_free/cora_h8_54_T40/earlystop_sweep/earlystop_sweep.txt
+```
+
+Current result:
+
+```text
+Method                     Reuse  AvgD  Saved  Stop   Cycles Traffic Energy Drop
+FullP8-miss                 40.0%  8.00   0.00   0.0%   0.601   0.602  0.602  1.53%
+Static Degree P8/P6/P4      40.0%  5.80   2.20   0.0%   0.575   0.581  0.578  2.39%
+EarlyStop balanced          40.0%  6.10   1.90 100.0%   0.576   0.583  0.580  2.39%
+EarlyStop aggressive        40.0%  5.80   2.20 100.0%   0.575   0.581  0.578  2.39%
+```
+
+Important:
+
+```text
+EarlyStop rows are hardware validation rows.
+They no longer mean "fixed P6/P4".
+They mean "start at P8, stop dynamically by bit-bound".
+```
+
+The drop is currently inherited from the static Degree proxy as a conservative accuracy estimate. A stricter next step is to generate dynamic-depth embeddings or nearest-depth conservative mappings for exact dynamic-depth accuracy.
+
+## ONNXim Integration
+
+ONNXim is integrated under:
+
+```text
+GraphhopSimhash/ONNXim/
+```
+
+Graph-Bit modifications currently touch:
+
+```text
+ONNXim/src/SystolicWS.cc
+ONNXim/src/SystolicWS.h
+ONNXim/src/operations/GemmWS.cc
+scripts/onnxim_graphbit_microbench.py
+```
+
+The microbenchmark covers LLaMA-7B-style GEMM shapes:
+
+```text
+projection: 4096 x 4096
+FFN up/gate: 4096 x 11008
+FFN down: 11008 x 4096
+```
+
+Standalone microbenchmark:
+
+```bash
+python GraphhopSimhash/scripts/onnxim_graphbit_microbench.py \
+  --seq-len 64 \
+  --workspace output/onnxim_graphbit/microbench_s64_internal_p6 \
+  --graphbit-depth 6 \
+  --action all \
+  --log-level info
+```
+
+Guide:
+
+```text
+docs/tools/ONNXIM_PROJECT_GUIDE.md
+```
+
+## Main Result Files
+
+Useful output locations:
+
+```text
+output/residual_reuse/common_param_sweep_20260528/
+    residual reuse common parameter sweep
+
+output/residual_graphbit_main/cora_h8_54_T40/
+    Cora residual + Graph-Bit main table
+
+output/graphbit_predictor_free/cora_h8_54_T40/
+    Cora ONNXim-backed predictor-free early-stop flow
+
+output/llama7b_precision_depth_budget_sweep/
+    LLaMA-7B precision-depth budget sweep
+
+output/onnxim_graphbit/
+    ONNXim Graph-Bit microbenchmarks
+```
+
+These output files are generated artifacts and are not part of the git-tracked source.
+
+## Policy Boundaries
+
+Deployable mainline policies:
+
+```text
+SimHash/CAM support
+TSER score gate
+Degree / propagation risk
+Graph context risk
+LowUnique risk
+Predictor-free bit-serial early stop
+```
+
+Debug / upper-bound only:
+
+```text
+PredictorDepthBudget:
+    requires calibration nodes to fit a damage predictor
+
+OracleDamageBudget:
+    requires true FP-vs-low-depth embedding errors
+
+ErrorTopK / TSERErrorTopK:
+    requires knowing real quantization error for every node
+```
+
+Do not present oracle/error-aware policies as deployable architecture mechanisms.
+
+## Current Paper Direction
+
+The cleanest current story is:
+
+```text
+Graph-aware hierarchical LLM encoder execution for text-attributed graphs.
+```
+
+System layers:
+
+```text
+1. CAM/SimHash finds reusable anchors.
+2. TSER filters unsafe reuse.
+3. Residual adapter corrects medium-confidence fuzzy reuse.
+4. Degree-guided Graph-Bit controls encoder bit-plane effort for misses.
+5. ONNXim validates the NPU datapath effect.
+```
+
+Hardware claim boundary:
+
+```text
+Safe to claim:
+    Graph risk controls NPU bit-serial precision depth.
+    ONNXim microbenchmarks estimate cycles / traffic / energy proxy.
+
+Do not claim without further simulator evidence:
+    exact wall-clock speedup
+    exact silicon energy reduction
+```
+
+## Recommended Next Experiments
+
+1. Run PubMed with the fixed `h8_54_T40` front-end and Degree Graph-Bit.
+2. Add dynamic-depth accuracy validation for predictor-free early stop.
+3. Sweep `min_depth/tolerance` for Cora first, then PubMed.
+4. Extend ONNXim reporting with PE utilization / active-lane compaction proxy.
+5. Prepare the final paper figures:
+   - reuse vs drop curve
+   - Graph-Bit cost/drop curve
+   - ONNXim cycles/traffic/energy table
+   - full-stack path breakdown
