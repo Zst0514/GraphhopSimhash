@@ -121,6 +121,8 @@ def run_simulator(spec: GemmSpec, workspace: Path, onnxim_home: Path, config: Pa
     # ONNXim resolves DRAM/NoC configs as $ONNXIM_HOME/configs/<path>.
     # Keep generated models in the workspace while reusing the official configs.
     workspace_configs = workspace / "configs"
+    if workspace_configs.is_symlink():
+        workspace_configs.unlink()
     if not workspace_configs.exists():
         try:
             workspace_configs.symlink_to(onnxim_home / "configs", target_is_directory=True)

@@ -8,6 +8,7 @@
 
 #include <cassert>
 #include <cmath>
+#include <cstdint>
 #include <cstdlib>
 
 namespace ram {

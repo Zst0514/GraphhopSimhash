@@ -25,7 +25,10 @@ if [[ ! -f "${BUILD_DIR}/conanbuildinfo.cmake" ]]; then
 fi
 
 echo "[ONNXimBuild] configuring ${ONNXIM_DIR}"
-cmake -S "${ONNXIM_DIR}" -B "${BUILD_DIR}" -DCMAKE_BUILD_TYPE=Release
+cmake -S "${ONNXIM_DIR}" -B "${BUILD_DIR}" \
+  -DCMAKE_BUILD_TYPE=Release \
+  -DCONAN_DISABLE_CHECK_COMPILER=ON \
+  -Dprotobuf_BUILD_TESTS=OFF
 
 echo "[ONNXimBuild] building Simulator with ${JOBS} jobs"
 cmake --build "${BUILD_DIR}" --target Simulator -j "${JOBS}"
