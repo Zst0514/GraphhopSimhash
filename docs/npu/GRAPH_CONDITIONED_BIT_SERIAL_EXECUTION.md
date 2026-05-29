@@ -686,6 +686,37 @@ low-risk:
 | 8/6/4 | 0/0.02/0.05 | balanced bound |
 | 8/6/4 | 0/0.04/0.08 | aggressive bound |
 
+当前优先执行的 Cora 快速闭环已经脚本化：
+
+```bash
+RUN_ALGO=0 RUN_ONNXIM=0 bash GraphhopSimhash/scripts/run_cora_graphbit_predictor_free_flow.sh
+```
+
+它完成三件事：
+
+```text
+1. 固定 h8_54_T40 前端，读取或重跑 Cora residual + Graph-Bit 软件结果。
+2. 读取或重跑 LLaMA-7B QKV/O/FFN GEMM ONNXim microbenchmark。
+3. 生成 FullP8-miss / Random static / Degree static / Degree predictor-free EarlyStop 主表。
+```
+
+这个脚本是后续调 `min_depth/tolerance` 的默认入口。调参时只需要改：
+
+```bash
+--bounded-save-p6
+--bounded-save-p4
+```
+
+或者进一步把 ONNXim config 中的：
+
+```text
+graphbit_min_depth
+graphbit_bound_tolerance
+graphbit_bound_scale
+```
+
+暴露成环境变量即可。
+
 ## 11. Paper Claim Boundary
 
 能安全声称：
@@ -731,4 +762,3 @@ Budget:
 Hardware next step:
     implement bounded early termination in ONNXim GemmWS
 ```
-

@@ -399,6 +399,78 @@ output/onnxim_graphbit/summary/three_depth_deg_profiles_hardware.tsv
 output/onnxim_graphbit/summary/three_depth_deg_profiles_compact.txt
 ```
 
+### 9.1.1 Fixed Cora h8_54_T40 predictor-free flow
+
+为了把当前主线参数固定下来，新增了 Cora 快速硬件验证脚本：
+
+```bash
+RUN_ALGO=0 RUN_ONNXIM=0 bash GraphhopSimhash/scripts/run_cora_graphbit_predictor_free_flow.sh
+```
+
+默认设置：
+
+```text
+frontend:
+    h8_54_T40
+    R = 2
+    hard direct: support >= 5
+    residual: support == 4
+
+Graph-Bit:
+    risk = Degree
+    budget = P8/P6/P4 = 20/50/30 on miss nodes
+```
+
+常用开关：
+
+```bash
+# 重新跑 Cora residual + Graph-Bit 软件实验
+RUN_ALGO=1 bash GraphhopSimhash/scripts/run_cora_graphbit_predictor_free_flow.sh
+
+# 重新跑 ONNXim GEMM microbenchmark
+RUN_ONNXIM=1 bash GraphhopSimhash/scripts/run_cora_graphbit_predictor_free_flow.sh
+
+# 如果 ONNXim 尚未构建，先尝试构建再跑
+BUILD_ONNXIM=1 RUN_ONNXIM=1 bash GraphhopSimhash/scripts/run_cora_graphbit_predictor_free_flow.sh
+```
+
+输出：
+
+```text
+output/graphbit_predictor_free/cora_h8_54_T40/summary.tsv
+output/graphbit_predictor_free/cora_h8_54_T40/predictor_free_main.tsv
+output/graphbit_predictor_free/cora_h8_54_T40/predictor_free_main.txt
+output/graphbit_predictor_free/cora_h8_54_T40/predictor_free_workload.json
+```
+
+当前 Cora 主表：
+
+```text
+Method                         Reuse   P8     P6     P4     AvgBit Saved  Cycles Traffic Energy Drop
+FullP8-miss                     40.0%  60.0%   0.0%   0.0%   8.00  0.00   0.601   0.602  0.602  1.53%
+Random static P8/P6/P4          40.0%  12.0%  30.0%  18.0%   5.80  2.20   0.436   0.544  0.485  2.79%
+Degree static P8/P6/P4          40.0%  12.0%  30.0%  18.0%   5.80  2.20   0.436   0.544  0.485  2.39%
+Degree predictor-free EarlyStop 40.0%  12.0%  30.0%  18.0%   5.47  2.53   0.412   0.536  0.468  2.39%
+```
+
+解释：
+
+```text
+FullP8-miss:
+    accepted reuse/residual hits 走 P0/P1；
+    miss nodes 全部完整执行 P8。
+
+Degree static P8/P6/P4:
+    same reuse set；
+    miss nodes 按 degree risk 静态分配到 P8/P6/P4。
+
+Degree predictor-free EarlyStop:
+    same software assignment；
+    NPU 内部用 bounded bit-plane early stop 估计额外低位省算。
+```
+
+这里的 `Cycles/Traffic/Energy` 是相对全图 Full-P8 encoder 的归一化硬件 proxy。`Drop` 仍来自静态 embedding proxy；bounded early-stop 的真实数值精度需要后续 bit-serial numerical kernel 或更细的 ONNXim numerical model 支撑。
+
 ### 9.2 Internal GemmWS Bit-Plane Execution
 
 ONNXim 内部已经加入 Graph-Bit knobs：
