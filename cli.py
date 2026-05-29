@@ -323,6 +323,73 @@ def build_parser():
         ),
     )
     parser.add_argument(
+        "--residual_adapter_type",
+        type=str,
+        default="mlp",
+        choices=["low_rank", "mlp"],
+        help="Residual correction model. mlp is a stronger nonlinear adapter; low_rank keeps the original lightweight head.",
+    )
+    parser.add_argument(
+        "--residual_hidden_dim",
+        type=int,
+        default=0,
+        help="Hidden width for the MLP residual adapter. Use 0 for auto=max(128, 4*rank).",
+    )
+    parser.add_argument(
+        "--residual_hidden_layers",
+        type=int,
+        default=2,
+        help="Number of hidden layers in the MLP residual adapter.",
+    )
+    parser.add_argument(
+        "--residual_dropout",
+        type=float,
+        default=0.1,
+        help="Dropout used by the MLP residual adapter.",
+    )
+    parser.add_argument(
+        "--residual_loss_cosine_weight",
+        type=float,
+        default=1.0,
+        help="Weight of cosine loss on corrected embeddings during residual training.",
+    )
+    parser.add_argument(
+        "--residual_loss_mse_weight",
+        type=float,
+        default=0.25,
+        help="Weight of raw corrected-feature SmoothL1 loss during residual training.",
+    )
+    parser.add_argument(
+        "--residual_loss_delta_weight",
+        type=float,
+        default=0.5,
+        help="Weight of residual-delta SmoothL1 loss during residual training.",
+    )
+    parser.add_argument(
+        "--residual_gate_loss_weight",
+        type=float,
+        default=0.25,
+        help="Weight of per-sample correction gate supervision during residual training.",
+    )
+    parser.add_argument(
+        "--residual_gate_error_scale",
+        type=float,
+        default=0.25,
+        help="Cosine-error scale used to derive gate targets from anchor-target mismatch.",
+    )
+    parser.add_argument(
+        "--residual_gate_error_max",
+        type=float,
+        default=0.45,
+        help="Above this cosine-error level, correction gate targets taper back down to suppress non-local, hard-to-fix anchors.",
+    )
+    parser.add_argument(
+        "--residual_gate_sparsity_weight",
+        type=float,
+        default=0.01,
+        help="Regularize low-error samples toward zero correction by shrinking their gate and raw delta.",
+    )
+    parser.add_argument(
         "--residual_embedding_source",
         type=str,
         default="data_x",
@@ -392,6 +459,48 @@ def build_parser():
         help="If >0, collect hits with at least this many head/table hits; hits below hard threshold use residual correction.",
     )
     parser.add_argument("--residual_max_train_pairs", type=int, default=4096)
+    parser.add_argument(
+        "--residual_offline_extra_anchors_per_node",
+        type=int,
+        default=0,
+        help="Offline-only: augment each residual training node with up to this many extra train/train_val anchors.",
+    )
+    parser.add_argument(
+        "--residual_offline_extra_query_nodes",
+        type=int,
+        default=0,
+        help="Offline-only: sample additional train/train_val target nodes to harvest residual training pairs from final CAM/hash candidates.",
+    )
+    parser.add_argument(
+        "--residual_offline_negative_anchors_per_node",
+        type=int,
+        default=0,
+        help="Offline-only: harvest clearly bad train/train_val anchors and supervise the residual gate toward zero correction.",
+    )
+    parser.add_argument(
+        "--residual_negative_error_min",
+        type=float,
+        default=0.45,
+        help="Minimum oracle cosine error for an offline anchor to be treated as a negative no-correction sample.",
+    )
+    parser.add_argument(
+        "--residual_negative_gate_weight",
+        type=float,
+        default=1.0,
+        help="Relative weight of offline negative gate samples during residual training.",
+    )
+    parser.add_argument(
+        "--residual_support_aware_alpha",
+        action="store_true",
+        help="Select residual alpha separately for each support bucket on the validation set.",
+    )
+    parser.add_argument(
+        "--residual_bucket_mode",
+        type=str,
+        default="support_dist",
+        choices=["support", "support_dist"],
+        help="Bucket residual adapters/alpha by support only or by support plus Hamming-distance bin.",
+    )
     parser.add_argument(
         "--residual_train_split",
         type=str,
@@ -966,6 +1075,12 @@ def validate_args(parser, args):
         parser.error("--quant_error_bias must be non-negative")
     if args.residual_rank <= 0:
         parser.error("--residual_rank must be positive")
+    if args.residual_hidden_dim < 0:
+        parser.error("--residual_hidden_dim must be non-negative")
+    if args.residual_hidden_layers <= 0:
+        parser.error("--residual_hidden_layers must be positive")
+    if not (0.0 <= args.residual_dropout < 1.0):
+        parser.error("--residual_dropout must be in [0, 1)")
     if args.residual_epochs < 0:
         parser.error("--residual_epochs must be non-negative")
     if args.residual_lr <= 0:
@@ -974,6 +1089,8 @@ def validate_args(parser, args):
         parser.error("--residual_weight_decay must be non-negative")
     if args.residual_l2 < 0:
         parser.error("--residual_l2 must be non-negative")
+    if args.residual_loss_cosine_weight < 0 or args.residual_loss_mse_weight < 0 or args.residual_loss_delta_weight < 0:
+        parser.error("--residual_loss_* weights must be non-negative")
     if not args.residual_alpha_grid:
         parser.error("--residual_alpha_grid must contain at least one value")
     if any(alpha < 0 for alpha in args.residual_alpha_grid):

@@ -8,13 +8,104 @@ from .features import _compute_neighbor_mean
 class LowRankResidualAdapter(nn.Module):
     def __init__(self, input_dim, output_dim, rank=32):
         super().__init__()
+        self.supports_gate = False
         self.down = nn.Linear(int(input_dim), int(rank))
         self.up = nn.Linear(int(rank), int(output_dim))
         nn.init.normal_(self.up.weight, mean=0.0, std=1e-3)
         nn.init.zeros_(self.up.bias)
 
+    def forward_with_gate(self, x):
+        delta = self.up(F.gelu(self.down(x)))
+        gate = torch.ones(delta.size(0), 1, dtype=delta.dtype, device=delta.device)
+        return delta, gate
+
     def forward(self, x):
-        return self.up(F.gelu(self.down(x)))
+        delta, gate = self.forward_with_gate(x)
+        return delta * gate
+
+
+class ResidualMLPAdapter(nn.Module):
+    def __init__(self, input_dim, output_dim, rank=32, hidden_dim=0, hidden_layers=2, dropout=0.1):
+        super().__init__()
+        self.supports_gate = True
+        input_dim = int(input_dim)
+        output_dim = int(output_dim)
+        rank = int(rank)
+        hidden_layers = max(1, int(hidden_layers))
+        hidden_dim = int(hidden_dim) if int(hidden_dim) > 0 else max(128, rank * 4)
+
+        self.input_norm = nn.LayerNorm(input_dim)
+        layers = []
+        dim = input_dim
+        for _ in range(hidden_layers):
+            layers.append(nn.Linear(dim, hidden_dim))
+            layers.append(nn.LayerNorm(hidden_dim))
+            layers.append(nn.GELU())
+            if float(dropout) > 0.0:
+                layers.append(nn.Dropout(float(dropout)))
+            dim = hidden_dim
+        self.trunk = nn.Sequential(*layers)
+        self.latent = nn.Linear(dim, rank)
+        self.out = nn.Linear(rank, output_dim)
+        self.scale = nn.Linear(dim, 1)
+
+        nn.init.normal_(self.out.weight, mean=0.0, std=1e-3)
+        nn.init.zeros_(self.out.bias)
+        nn.init.zeros_(self.scale.weight)
+        nn.init.constant_(self.scale.bias, -1.0)
+
+    def forward_with_gate(self, x):
+        h = self.trunk(self.input_norm(x))
+        z = F.gelu(self.latent(h))
+        delta = self.out(z)
+        gain = torch.sigmoid(self.scale(h))
+        return delta, gain
+
+    def forward(self, x):
+        delta, gain = self.forward_with_gate(x)
+        return delta * gain
+
+
+class SupportAwareResidualAdapter:
+    def __init__(self, global_adapter, adapters_by_support=None, bucket_mode="support"):
+        self.global_adapter = global_adapter
+        self.adapters_by_support = dict(adapters_by_support or {})
+        self.bucket_mode = str(bucket_mode)
+
+
+def _as_float_dict(mapping):
+    return {int(key): float(value) for key, value in dict(mapping or {}).items()}
+
+
+def compute_bucket_values_from_tensors(support_hits, best_dists, bucket_mode="support"):
+    support_hits = support_hits.to(dtype=torch.long)
+    best_dists = best_dists.to(dtype=torch.long).clamp(min=0, max=3)
+    if str(bucket_mode) == "support":
+        return support_hits
+    if str(bucket_mode) == "support_dist":
+        return support_hits * 10 + best_dists
+    raise ValueError(f"Unknown residual bucket mode: {bucket_mode}")
+
+
+def compute_bucket_values_from_trace(trace, node_indices, bucket_mode="support", device=None):
+    node_indices = node_indices.to(dtype=torch.long, device=trace["winning_base_table_hit_counts"].device)
+    support_hits = trace["winning_base_table_hit_counts"][node_indices]
+    best_dists = trace["best_dists"][node_indices]
+    bucket_values = compute_bucket_values_from_tensors(support_hits, best_dists, bucket_mode=bucket_mode)
+    if device is not None:
+        bucket_values = bucket_values.to(device=device)
+    return bucket_values
+
+
+def format_bucket_label(bucket_value, bucket_mode="support"):
+    bucket_value = int(bucket_value)
+    if str(bucket_mode) == "support":
+        return f"{bucket_value}h"
+    if str(bucket_mode) == "support_dist":
+        support = bucket_value // 10
+        dist = bucket_value % 10
+        return f"{support}h_d{dist}"
+    return str(bucket_value)
 
 
 def compute_total_degree(edge_index, num_nodes, device):
@@ -30,22 +121,51 @@ def build_context_signature(verify_features, edge_index):
     return F.normalize(0.5 * verify_features + 0.5 * neighbor_mean, p=2, dim=1)
 
 
-def build_residual_pair_inputs(verify_features, edge_index, trace, node_indices, risk_scores=None):
+def build_residual_pair_inputs(
+    verify_features,
+    edge_index,
+    trace,
+    node_indices,
+    risk_scores=None,
+    source_ids=None,
+    best_dists=None,
+    route_hit_counts=None,
+    base_route_hit_counts=None,
+    winning_base_table_hit_counts=None,
+    best_cosines=None,
+):
     device = verify_features.device
     node_indices = node_indices.to(device=device, dtype=torch.long)
-    source_ids = trace["source_ids"][node_indices].to(device=device, dtype=torch.long)
+    if source_ids is None:
+        source_ids = trace["source_ids"][node_indices]
+    source_ids = source_ids.to(device=device, dtype=torch.long)
 
     context = build_context_signature(verify_features, edge_index)
     degree = compute_total_degree(edge_index, verify_features.size(0), device)
 
+    query_verify = verify_features[node_indices]
+    anchor_verify = verify_features[source_ids]
+    query_context = context[node_indices]
+    anchor_context = context[source_ids]
     cheap_delta = verify_features[node_indices] - verify_features[source_ids]
     context_delta = context[node_indices] - context[source_ids]
 
-    dist = trace["best_dists"][node_indices].to(device=device, dtype=torch.float32).clamp(min=0.0)
-    route_hits = trace["route_hit_counts"][node_indices].to(device=device, dtype=torch.float32).clamp(min=0.0)
-    base_hits = trace["base_route_hit_counts"][node_indices].to(device=device, dtype=torch.float32).clamp(min=0.0)
-    base_table_hits = trace["winning_base_table_hit_counts"][node_indices].to(device=device, dtype=torch.float32).clamp(min=0.0)
-    best_cos = trace["best_cosines"][node_indices].to(device=device, dtype=torch.float32)
+    if best_dists is None:
+        best_dists = trace["best_dists"][node_indices]
+    if route_hit_counts is None:
+        route_hit_counts = trace["route_hit_counts"][node_indices]
+    if base_route_hit_counts is None:
+        base_route_hit_counts = trace["base_route_hit_counts"][node_indices]
+    if winning_base_table_hit_counts is None:
+        winning_base_table_hit_counts = trace["winning_base_table_hit_counts"][node_indices]
+    if best_cosines is None:
+        best_cosines = trace["best_cosines"][node_indices]
+
+    dist = best_dists.to(device=device, dtype=torch.float32).clamp(min=0.0)
+    route_hits = route_hit_counts.to(device=device, dtype=torch.float32).clamp(min=0.0)
+    base_hits = base_route_hit_counts.to(device=device, dtype=torch.float32).clamp(min=0.0)
+    base_table_hits = winning_base_table_hit_counts.to(device=device, dtype=torch.float32).clamp(min=0.0)
+    best_cos = best_cosines.to(device=device, dtype=torch.float32)
 
     deg_v = degree[node_indices]
     deg_u = degree[source_ids]
@@ -72,7 +192,520 @@ def build_residual_pair_inputs(verify_features, edge_index, trace, node_indices,
         ],
         dim=1,
     )
-    return torch.cat([cheap_delta, context_delta, scalars], dim=1)
+    return torch.cat(
+        [
+            query_verify,
+            anchor_verify,
+            query_context,
+            anchor_context,
+            cheap_delta,
+            context_delta,
+            scalars,
+        ],
+        dim=1,
+    )
+
+
+def _build_stratified_buckets(trace, indices):
+    if indices.numel() == 0:
+        return {}
+    support = trace["winning_base_table_hit_counts"][indices].to(dtype=torch.long, device="cpu")
+    dist = trace["best_dists"][indices].to(dtype=torch.long, device="cpu").clamp(min=0)
+    dist = torch.clamp(dist, max=3)
+    buckets = {}
+    for pos in range(indices.numel()):
+        key = (int(support[pos].item()), int(dist[pos].item()))
+        buckets.setdefault(key, []).append(int(indices[pos].item()))
+    return buckets
+
+
+def _stratified_subsample(trace, indices, max_pairs):
+    if int(max_pairs) <= 0 or indices.numel() <= int(max_pairs):
+        return indices
+
+    buckets = _build_stratified_buckets(trace, indices)
+    if not buckets:
+        return indices
+
+    generator = torch.Generator(device="cpu")
+    generator.manual_seed(0)
+
+    ordered_keys = sorted(buckets.keys())
+    per_bucket_quota = max(1, int(max_pairs) // max(1, len(ordered_keys)))
+    selected = []
+    leftovers = []
+
+    for key in ordered_keys:
+        bucket = torch.as_tensor(buckets[key], dtype=torch.long)
+        perm = torch.randperm(bucket.numel(), generator=generator)
+        bucket = bucket[perm]
+        take = min(bucket.numel(), per_bucket_quota)
+        if take > 0:
+            selected.append(bucket[:take])
+        if take < bucket.numel():
+            leftovers.append(bucket[take:])
+
+    selected_count = int(sum(chunk.numel() for chunk in selected))
+    remaining = int(max_pairs) - selected_count
+    if remaining > 0 and leftovers:
+        pool = torch.cat(leftovers, dim=0)
+        perm = torch.randperm(pool.numel(), generator=generator)
+        pool = pool[perm]
+        selected.append(pool[:remaining])
+
+    sampled = torch.cat(selected, dim=0)
+    return sampled.to(device=indices.device, dtype=torch.long)
+
+
+def _build_residual_adapter(
+    input_dim,
+    output_dim,
+    rank,
+    adapter_type="low_rank",
+    hidden_dim=0,
+    hidden_layers=2,
+    dropout=0.1,
+):
+    adapter_type = str(adapter_type).lower()
+    if adapter_type == "low_rank":
+        return LowRankResidualAdapter(input_dim, output_dim, rank=rank)
+    if adapter_type == "mlp":
+        return ResidualMLPAdapter(
+            input_dim,
+            output_dim,
+            rank=rank,
+            hidden_dim=hidden_dim,
+            hidden_layers=hidden_layers,
+            dropout=dropout,
+        )
+    raise ValueError(f"Unknown residual adapter type: {adapter_type}")
+
+
+def _adapter_forward(adapter, x):
+    if hasattr(adapter, "forward_with_gate"):
+        raw_delta, gate = adapter.forward_with_gate(x)
+    else:
+        raw_delta = adapter(x)
+        gate = torch.ones(raw_delta.size(0), 1, dtype=raw_delta.dtype, device=raw_delta.device)
+    if not bool(getattr(adapter, "supports_gate", False)):
+        gate = None
+        gated_residual = raw_delta
+    else:
+        gated_residual = raw_delta * gate
+    return gated_residual, raw_delta, gate
+
+
+def _compute_residual_loss(
+    residual,
+    anchors,
+    targets,
+    cosine_weight,
+    mse_weight,
+    delta_weight,
+    residual_l2,
+    raw_delta=None,
+    gate=None,
+    gate_loss_weight=0.0,
+    gate_error_scale=0.25,
+    gate_error_max=0.45,
+    gate_sparsity_weight=0.0,
+):
+    pred_raw = anchors + residual
+    pred_norm = F.normalize(pred_raw, p=2, dim=1)
+    target_norm = F.normalize(targets, p=2, dim=1)
+    target_delta = targets - anchors
+
+    loss = pred_raw.new_tensor(0.0)
+    if float(cosine_weight) > 0.0:
+        loss = loss + float(cosine_weight) * (1.0 - F.cosine_similarity(pred_norm, target_norm, dim=1)).mean()
+    if float(mse_weight) > 0.0:
+        loss = loss + float(mse_weight) * F.smooth_l1_loss(pred_raw, targets)
+    if float(delta_weight) > 0.0:
+        loss = loss + float(delta_weight) * F.smooth_l1_loss(residual, target_delta)
+    if float(residual_l2) > 0.0:
+        loss = loss + float(residual_l2) * residual.pow(2).mean()
+    if gate is not None:
+        anchor_norm = F.normalize(anchors, p=2, dim=1)
+        anchor_error = (1.0 - F.cosine_similarity(anchor_norm, target_norm, dim=1)).clamp(min=0.0)
+        error_scale = max(1e-6, float(gate_error_scale))
+        error_max = max(error_scale + 1e-6, float(gate_error_max))
+        rise = torch.clamp(anchor_error / error_scale, min=0.0, max=1.0)
+        fall = torch.clamp((error_max - anchor_error) / max(1e-6, error_max - error_scale), min=0.0, max=1.0)
+        gate_target = (rise * fall).unsqueeze(1)
+        if float(gate_loss_weight) > 0.0:
+            loss = loss + float(gate_loss_weight) * F.smooth_l1_loss(gate, gate_target)
+        if float(gate_sparsity_weight) > 0.0:
+            low_error_weight = (1.0 - gate_target).detach()
+            loss = loss + float(gate_sparsity_weight) * (gate * low_error_weight).mean()
+            if raw_delta is not None:
+                delta_norm = raw_delta.pow(2).mean(dim=1, keepdim=True)
+                loss = loss + float(gate_sparsity_weight) * 0.5 * (delta_norm * low_error_weight).mean()
+    return loss
+
+
+def _fit_residual_adapter(
+    x_train,
+    anchors,
+    targets,
+    rank,
+    epochs,
+    lr,
+    weight_decay,
+    residual_l2,
+    adapter_type="low_rank",
+    hidden_dim=0,
+    hidden_layers=2,
+    dropout=0.1,
+    cosine_weight=1.0,
+    mse_weight=0.25,
+    delta_weight=0.5,
+    gate_loss_weight=0.0,
+    gate_error_scale=0.25,
+    gate_error_max=0.45,
+    gate_sparsity_weight=0.0,
+    x_neg=None,
+    negative_gate_weight=1.0,
+):
+    device = anchors.device
+    adapter = _build_residual_adapter(
+        x_train.size(1),
+        targets.size(1),
+        rank=rank,
+        adapter_type=adapter_type,
+        hidden_dim=hidden_dim,
+        hidden_layers=hidden_layers,
+        dropout=dropout,
+    ).to(device)
+    optimizer = torch.optim.AdamW(adapter.parameters(), lr=float(lr), weight_decay=float(weight_decay))
+
+    last_loss = 0.0
+    gate_mean = 1.0
+    for _epoch in range(int(epochs)):
+        adapter.train()
+        optimizer.zero_grad()
+        residual, raw_delta, gate = _adapter_forward(adapter, x_train)
+        loss = _compute_residual_loss(
+            residual,
+            anchors,
+            targets,
+            cosine_weight=cosine_weight,
+            mse_weight=mse_weight,
+            delta_weight=delta_weight,
+            residual_l2=residual_l2,
+            raw_delta=raw_delta,
+            gate=gate,
+            gate_loss_weight=gate_loss_weight,
+            gate_error_scale=gate_error_scale,
+            gate_error_max=gate_error_max,
+            gate_sparsity_weight=gate_sparsity_weight,
+        )
+        if x_neg is not None and int(x_neg.size(0)) > 0:
+            neg_residual, neg_raw_delta, neg_gate = _adapter_forward(adapter, x_neg)
+            neg_loss = neg_residual.new_tensor(0.0)
+            if neg_gate is not None:
+                zeros = torch.zeros_like(neg_gate)
+                if float(gate_loss_weight) > 0.0:
+                    neg_loss = neg_loss + float(gate_loss_weight) * F.smooth_l1_loss(neg_gate, zeros)
+                if float(gate_sparsity_weight) > 0.0:
+                    neg_loss = neg_loss + float(gate_sparsity_weight) * neg_gate.mean()
+            if float(gate_sparsity_weight) > 0.0:
+                neg_loss = neg_loss + float(gate_sparsity_weight) * neg_raw_delta.pow(2).mean()
+            loss = loss + float(negative_gate_weight) * neg_loss
+        loss.backward()
+        optimizer.step()
+        last_loss = float(loss.detach().item())
+        gate_mean = 1.0 if gate is None else float(gate.detach().mean().item())
+    return adapter, last_loss, gate_mean
+
+
+def _split_mask_for_train_pairs(data, split, device):
+    if split == "train":
+        return data.train_mask.to(device=device, dtype=torch.bool)
+    if split == "train_val":
+        return (data.train_mask | data.val_mask).to(device=device, dtype=torch.bool)
+    if split == "all_hits":
+        return torch.ones(int(data.num_nodes), dtype=torch.bool, device=device)
+    raise ValueError(f"Unknown residual train split: {split}")
+
+
+def _build_training_pair_tensors(trace, train_nodes, device):
+    train_nodes = train_nodes.to(device=device, dtype=torch.long)
+    return {
+        "node_indices": train_nodes,
+        "source_ids": trace["source_ids"][train_nodes].to(device=device, dtype=torch.long),
+        "best_dists": trace["best_dists"][train_nodes].to(device=device, dtype=torch.long),
+        "route_hit_counts": trace["route_hit_counts"][train_nodes].to(device=device, dtype=torch.long),
+        "base_route_hit_counts": trace["base_route_hit_counts"][train_nodes].to(device=device, dtype=torch.long),
+        "winning_base_table_hit_counts": trace["winning_base_table_hit_counts"][train_nodes].to(
+            device=device, dtype=torch.long
+        ),
+        "best_cosines": trace["best_cosines"][train_nodes].to(device=device, dtype=torch.float32),
+    }
+
+
+def _append_training_pairs(pair_tensors, extra_pairs):
+    if extra_pairs is None or extra_pairs["node_indices"].numel() == 0:
+        return pair_tensors
+    merged = {}
+    for key in pair_tensors.keys():
+        merged[key] = torch.cat([pair_tensors[key], extra_pairs[key].to(device=pair_tensors[key].device)], dim=0)
+    return merged
+
+
+def _harvest_extra_anchor_pairs(
+    controller,
+    hash_route_features,
+    verify_features,
+    trace,
+    data,
+    train_nodes,
+    split,
+    min_dist,
+    extra_anchors_per_node,
+    extra_query_nodes,
+    max_extra_pairs,
+):
+    if (
+        controller is None
+        or hash_route_features is None
+        or int(extra_anchors_per_node) <= 0
+        or int(max_extra_pairs) <= 0
+        or train_nodes.numel() == 0
+    ):
+        return None
+
+    device = verify_features.device
+    allowed_mask = _split_mask_for_train_pairs(data, split, device)
+    allowed_ids = set(int(idx) for idx in allowed_mask.nonzero(as_tuple=False).view(-1).detach().cpu().tolist())
+    if not allowed_ids:
+        return None
+
+    candidate_support_values = set(
+        int(value)
+        for value in trace["winning_base_table_hit_counts"][train_nodes].detach().cpu().tolist()
+    )
+
+    train_node_set = set(int(idx) for idx in train_nodes.detach().cpu().tolist())
+    query_nodes = list(train_node_set)
+    if int(extra_query_nodes) > 0:
+        extra_candidates = allowed_mask.nonzero(as_tuple=False).view(-1).detach().cpu().tolist()
+        extra_candidates = [int(idx) for idx in extra_candidates if int(idx) not in train_node_set]
+        if extra_candidates:
+            generator = torch.Generator(device="cpu")
+            generator.manual_seed(0)
+            perm = torch.randperm(len(extra_candidates), generator=generator).tolist()
+            sample_count = min(int(extra_query_nodes), len(extra_candidates))
+            query_nodes.extend(extra_candidates[idx] for idx in perm[:sample_count])
+
+    hash_feature_routes = controller._normalize_hash_feature_routes(hash_route_features)
+    all_hashes = [
+        controller._compute_route_fingerprint(route_features, route_idx)
+        for route_idx, route_features in enumerate(hash_feature_routes)
+    ]
+
+    extra_node_indices = []
+    extra_source_ids = []
+    extra_best_dists = []
+    extra_route_hits = []
+    extra_base_hits = []
+    extra_support_hits = []
+    extra_best_cos = []
+
+    for node_idx in query_nodes:
+        if len(extra_node_indices) >= int(max_extra_pairs):
+            break
+        query_hashes = [route_hashes[int(node_idx)] for route_hashes in all_hashes]
+        exact_refs = controller._find_exact_candidate_refs(query_hashes)
+        fuzzy_refs = controller._collect_union_candidate_refs(query_hashes, int(controller.node_policies[int(node_idx)].item()))
+        seen_pairs = set()
+        candidate_refs = []
+        for ref in exact_refs + fuzzy_refs:
+            key = (int(ref["route_idx"]), int(ref["hash"]))
+            if key in seen_pairs:
+                continue
+            seen_pairs.add(key)
+            candidate_refs.append(ref)
+        scored = controller._collect_scored_candidates(
+            candidate_refs,
+            verify_features[int(node_idx)],
+            exclude_node_id=int(node_idx),
+            allowed_node_ids=allowed_ids,
+        )
+        primary_source = int(trace["source_ids"][int(node_idx)].item())
+        seen_sources = {primary_source} if primary_source >= 0 else set()
+        taken = 0
+        for item in scored:
+            if len(extra_node_indices) >= int(max_extra_pairs):
+                break
+            src = int(item["entry"]["node_id"])
+            support_hits = int(item.get("winning_base_table_hit_count", 1))
+            dist = int(item.get("dist", 0))
+            if src in seen_sources:
+                continue
+            if float(dist) < float(min_dist):
+                continue
+            if candidate_support_values and support_hits not in candidate_support_values:
+                continue
+            seen_sources.add(src)
+            extra_node_indices.append(int(node_idx))
+            extra_source_ids.append(src)
+            extra_best_dists.append(dist)
+            extra_route_hits.append(int(item.get("route_hit_count", 1)))
+            extra_base_hits.append(int(item.get("base_route_hit_count", 1)))
+            extra_support_hits.append(support_hits)
+            extra_best_cos.append(float(item.get("cos", 0.0)))
+            taken += 1
+            if taken >= int(extra_anchors_per_node):
+                break
+
+    if not extra_node_indices:
+        return None
+
+    return {
+        "node_indices": torch.as_tensor(extra_node_indices, dtype=torch.long, device=device),
+        "source_ids": torch.as_tensor(extra_source_ids, dtype=torch.long, device=device),
+        "best_dists": torch.as_tensor(extra_best_dists, dtype=torch.long, device=device),
+        "route_hit_counts": torch.as_tensor(extra_route_hits, dtype=torch.long, device=device),
+        "base_route_hit_counts": torch.as_tensor(extra_base_hits, dtype=torch.long, device=device),
+        "winning_base_table_hit_counts": torch.as_tensor(extra_support_hits, dtype=torch.long, device=device),
+        "best_cosines": torch.as_tensor(extra_best_cos, dtype=torch.float32, device=device),
+    }
+
+
+def _harvest_negative_anchor_pairs(
+    controller,
+    hash_route_features,
+    verify_features,
+    target_embeddings,
+    trace,
+    data,
+    train_nodes,
+    split,
+    extra_anchors_per_node,
+    extra_query_nodes,
+    max_extra_pairs,
+    negative_error_min,
+):
+    if (
+        controller is None
+        or hash_route_features is None
+        or int(extra_anchors_per_node) <= 0
+        or int(max_extra_pairs) <= 0
+        or train_nodes.numel() == 0
+    ):
+        return None
+
+    device = verify_features.device
+    allowed_mask = _split_mask_for_train_pairs(data, split, device)
+    allowed_ids = set(int(idx) for idx in allowed_mask.nonzero(as_tuple=False).view(-1).detach().cpu().tolist())
+    if not allowed_ids:
+        return None
+
+    candidate_support_values = set(
+        int(value)
+        for value in trace["winning_base_table_hit_counts"][train_nodes].detach().cpu().tolist()
+    )
+
+    train_node_set = set(int(idx) for idx in train_nodes.detach().cpu().tolist())
+    query_nodes = list(train_node_set)
+    if int(extra_query_nodes) > 0:
+        extra_candidates = allowed_mask.nonzero(as_tuple=False).view(-1).detach().cpu().tolist()
+        extra_candidates = [int(idx) for idx in extra_candidates if int(idx) not in train_node_set]
+        if extra_candidates:
+            generator = torch.Generator(device="cpu")
+            generator.manual_seed(1)
+            perm = torch.randperm(len(extra_candidates), generator=generator).tolist()
+            sample_count = min(int(extra_query_nodes), len(extra_candidates))
+            query_nodes.extend(extra_candidates[idx] for idx in perm[:sample_count])
+
+    hash_feature_routes = controller._normalize_hash_feature_routes(hash_route_features)
+    all_hashes = [
+        controller._compute_route_fingerprint(route_features, route_idx)
+        for route_idx, route_features in enumerate(hash_feature_routes)
+    ]
+
+    target_embeddings_cpu = target_embeddings.detach().cpu()
+    negative_node_indices = []
+    negative_source_ids = []
+    negative_best_dists = []
+    negative_route_hits = []
+    negative_base_hits = []
+    negative_support_hits = []
+    negative_best_cos = []
+
+    for node_idx in query_nodes:
+        if len(negative_node_indices) >= int(max_extra_pairs):
+            break
+        query_hashes = [route_hashes[int(node_idx)] for route_hashes in all_hashes]
+        exact_refs = controller._find_exact_candidate_refs(query_hashes)
+        fuzzy_refs = controller._collect_union_candidate_refs(
+            query_hashes, int(controller.node_policies[int(node_idx)].item())
+        )
+        seen_pairs = set()
+        candidate_refs = []
+        for ref in exact_refs + fuzzy_refs:
+            key = (int(ref["route_idx"]), int(ref["hash"]))
+            if key in seen_pairs:
+                continue
+            seen_pairs.add(key)
+            candidate_refs.append(ref)
+
+        scored = controller._collect_scored_candidates(
+            candidate_refs,
+            verify_features[int(node_idx)],
+            exclude_node_id=int(node_idx),
+            allowed_node_ids=allowed_ids,
+        )
+
+        primary_source = int(trace["source_ids"][int(node_idx)].item())
+        seen_sources = {primary_source} if primary_source >= 0 else set()
+        query_target = target_embeddings_cpu[int(node_idx)]
+        taken = 0
+        for item in reversed(scored):
+            if len(negative_node_indices) >= int(max_extra_pairs):
+                break
+            src = int(item["entry"]["node_id"])
+            support_hits = int(item.get("winning_base_table_hit_count", 1))
+            if src in seen_sources:
+                continue
+            if candidate_support_values and support_hits not in candidate_support_values:
+                continue
+            anchor_error = float(
+                (
+                    1.0
+                    - F.cosine_similarity(
+                        query_target.unsqueeze(0),
+                        target_embeddings_cpu[src].unsqueeze(0),
+                        dim=1,
+                    )
+                ).item()
+            )
+            if anchor_error < float(negative_error_min):
+                continue
+            seen_sources.add(src)
+            negative_node_indices.append(int(node_idx))
+            negative_source_ids.append(src)
+            negative_best_dists.append(int(item.get("dist", 0)))
+            negative_route_hits.append(int(item.get("route_hit_count", 1)))
+            negative_base_hits.append(int(item.get("base_route_hit_count", 1)))
+            negative_support_hits.append(support_hits)
+            negative_best_cos.append(float(item.get("cos", 0.0)))
+            taken += 1
+            if taken >= int(extra_anchors_per_node):
+                break
+
+    if not negative_node_indices:
+        return None
+
+    return {
+        "node_indices": torch.as_tensor(negative_node_indices, dtype=torch.long, device=device),
+        "source_ids": torch.as_tensor(negative_source_ids, dtype=torch.long, device=device),
+        "best_dists": torch.as_tensor(negative_best_dists, dtype=torch.long, device=device),
+        "route_hit_counts": torch.as_tensor(negative_route_hits, dtype=torch.long, device=device),
+        "base_route_hit_counts": torch.as_tensor(negative_base_hits, dtype=torch.long, device=device),
+        "winning_base_table_hit_counts": torch.as_tensor(negative_support_hits, dtype=torch.long, device=device),
+        "best_cosines": torch.as_tensor(negative_best_cos, dtype=torch.float32, device=device),
+    }
 
 
 def select_residual_train_nodes(
@@ -100,11 +733,7 @@ def select_residual_train_nodes(
         raise ValueError(f"Unknown residual train split: {split}")
 
     indices = mask.nonzero(as_tuple=False).view(-1)
-    if int(max_pairs) > 0 and indices.numel() > int(max_pairs):
-        generator = torch.Generator(device="cpu")
-        generator.manual_seed(0)
-        perm = torch.randperm(indices.numel(), generator=generator, device="cpu")[: int(max_pairs)]
-        indices = indices[perm.to(indices.device)]
+    indices = _stratified_subsample(trace, indices, max_pairs)
     return indices
 
 
@@ -124,6 +753,25 @@ def train_residual_adapter(
     max_pairs=4096,
     correction_mask=None,
     min_dist=0.0,
+    controller=None,
+    hash_route_features=None,
+    extra_anchors_per_node=0,
+    extra_query_nodes=0,
+    adapter_type="low_rank",
+    hidden_dim=0,
+    hidden_layers=2,
+    dropout=0.1,
+    cosine_weight=1.0,
+    mse_weight=0.25,
+    delta_weight=0.5,
+    bucket_mode="support",
+    gate_loss_weight=0.0,
+    gate_error_scale=0.25,
+    gate_error_max=0.45,
+    gate_sparsity_weight=0.0,
+    extra_negative_anchors_per_node=0,
+    negative_error_min=0.45,
+    negative_gate_weight=1.0,
 ):
     device = target_embeddings.device
     train_nodes = select_residual_train_nodes(
@@ -137,29 +785,169 @@ def train_residual_adapter(
     if train_nodes.numel() == 0:
         return None, {"train_pairs": 0, "loss": 0.0}
 
-    x_train = build_residual_pair_inputs(verify_features, edge_index, trace, train_nodes, risk_scores=risk_scores)
-    source_ids = trace["source_ids"][train_nodes].to(device=device, dtype=torch.long)
+    pair_tensors = _build_training_pair_tensors(trace, train_nodes, device)
+    extra_pairs = _harvest_extra_anchor_pairs(
+        controller,
+        hash_route_features,
+        verify_features,
+        trace,
+        data,
+        train_nodes,
+        train_split,
+        min_dist,
+        extra_anchors_per_node,
+        extra_query_nodes,
+        max(0, int(max_pairs) - int(train_nodes.numel())),
+    )
+    pair_tensors = _append_training_pairs(pair_tensors, extra_pairs)
+    negative_pairs = _harvest_negative_anchor_pairs(
+        controller,
+        hash_route_features,
+        verify_features,
+        target_embeddings,
+        trace,
+        data,
+        train_nodes,
+        train_split,
+        extra_negative_anchors_per_node,
+        extra_query_nodes,
+        max(0, int(max_pairs)),
+        negative_error_min,
+    )
+
+    x_train = build_residual_pair_inputs(
+        verify_features,
+        edge_index,
+        trace,
+        pair_tensors["node_indices"],
+        risk_scores=risk_scores,
+        source_ids=pair_tensors["source_ids"],
+        best_dists=pair_tensors["best_dists"],
+        route_hit_counts=pair_tensors["route_hit_counts"],
+        base_route_hit_counts=pair_tensors["base_route_hit_counts"],
+        winning_base_table_hit_counts=pair_tensors["winning_base_table_hit_counts"],
+        best_cosines=pair_tensors["best_cosines"],
+    )
+    source_ids = pair_tensors["source_ids"]
     anchors = target_embeddings[source_ids]
-    targets = target_embeddings[train_nodes]
+    targets = target_embeddings[pair_tensors["node_indices"]]
+    x_train_neg = None
+    if negative_pairs is not None:
+        x_train_neg = build_residual_pair_inputs(
+            verify_features,
+            edge_index,
+            trace,
+            negative_pairs["node_indices"],
+            risk_scores=risk_scores,
+            source_ids=negative_pairs["source_ids"],
+            best_dists=negative_pairs["best_dists"],
+            route_hit_counts=negative_pairs["route_hit_counts"],
+            base_route_hit_counts=negative_pairs["base_route_hit_counts"],
+            winning_base_table_hit_counts=negative_pairs["winning_base_table_hit_counts"],
+            best_cosines=negative_pairs["best_cosines"],
+        )
+    global_adapter, global_loss, global_gate_mean = _fit_residual_adapter(
+        x_train,
+        anchors,
+        targets,
+        rank=rank,
+        epochs=epochs,
+        lr=lr,
+        weight_decay=weight_decay,
+        residual_l2=residual_l2,
+        adapter_type=adapter_type,
+        hidden_dim=hidden_dim,
+        hidden_layers=hidden_layers,
+        dropout=dropout,
+        cosine_weight=cosine_weight,
+        mse_weight=mse_weight,
+        delta_weight=delta_weight,
+        gate_loss_weight=gate_loss_weight,
+        gate_error_scale=gate_error_scale,
+        gate_error_max=gate_error_max,
+        gate_sparsity_weight=gate_sparsity_weight,
+        x_neg=x_train_neg,
+        negative_gate_weight=negative_gate_weight,
+    )
 
-    adapter = LowRankResidualAdapter(x_train.size(1), target_embeddings.size(1), rank=rank).to(device)
-    optimizer = torch.optim.AdamW(adapter.parameters(), lr=float(lr), weight_decay=float(weight_decay))
+    support_hits = pair_tensors["winning_base_table_hit_counts"].to(device=device, dtype=torch.long)
+    best_dists = pair_tensors["best_dists"].to(device=device, dtype=torch.long)
+    bucket_values = compute_bucket_values_from_tensors(support_hits, best_dists, bucket_mode=bucket_mode).to(
+        device=device, dtype=torch.long
+    )
+    if negative_pairs is not None:
+        neg_bucket_values = compute_bucket_values_from_tensors(
+            negative_pairs["winning_base_table_hit_counts"].to(device=device, dtype=torch.long),
+            negative_pairs["best_dists"].to(device=device, dtype=torch.long),
+            bucket_mode=bucket_mode,
+        ).to(device=device, dtype=torch.long)
+    else:
+        neg_bucket_values = None
+    adapters_by_support = {}
+    support_pair_counts = {}
+    support_losses = {}
+    support_gate_means = {}
+    min_bucket_pairs = max(32, int(rank))
 
-    last_loss = 0.0
-    for _epoch in range(int(epochs)):
-        adapter.train()
-        optimizer.zero_grad()
-        residual = adapter(x_train)
-        pred = F.normalize(anchors + residual, p=2, dim=1)
-        target_norm = F.normalize(targets, p=2, dim=1)
-        loss = (1.0 - F.cosine_similarity(pred, target_norm, dim=1)).mean()
-        if float(residual_l2) > 0.0:
-            loss = loss + float(residual_l2) * residual.pow(2).mean()
-        loss.backward()
-        optimizer.step()
-        last_loss = float(loss.detach().item())
+    for support_value in sorted(set(int(v) for v in bucket_values.detach().cpu().tolist())):
+        bucket_mask = bucket_values == int(support_value)
+        bucket_pairs = int(bucket_mask.sum().item())
+        if bucket_pairs < min_bucket_pairs:
+            continue
+        bucket_x = x_train[bucket_mask]
+        bucket_anchors = anchors[bucket_mask]
+        bucket_targets = targets[bucket_mask]
+        bucket_adapter, bucket_loss, bucket_gate_mean = _fit_residual_adapter(
+            bucket_x,
+            bucket_anchors,
+            bucket_targets,
+            rank=rank,
+            epochs=epochs,
+            lr=lr,
+            weight_decay=weight_decay,
+            residual_l2=residual_l2,
+            adapter_type=adapter_type,
+            hidden_dim=hidden_dim,
+            hidden_layers=hidden_layers,
+            dropout=dropout,
+            cosine_weight=cosine_weight,
+            mse_weight=mse_weight,
+            delta_weight=delta_weight,
+            gate_loss_weight=gate_loss_weight,
+            gate_error_scale=gate_error_scale,
+            gate_error_max=gate_error_max,
+            gate_sparsity_weight=gate_sparsity_weight,
+            x_neg=None if x_train_neg is None else x_train_neg[neg_bucket_values == int(support_value)],
+            negative_gate_weight=negative_gate_weight,
+        )
+        adapters_by_support[int(support_value)] = bucket_adapter
+        support_pair_counts[int(support_value)] = bucket_pairs
+        support_losses[int(support_value)] = bucket_loss
+        support_gate_means[int(support_value)] = bucket_gate_mean
 
-    return adapter, {"train_pairs": int(train_nodes.numel()), "loss": last_loss}
+    if adapters_by_support:
+        adapter = SupportAwareResidualAdapter(
+            global_adapter,
+            adapters_by_support=adapters_by_support,
+            bucket_mode=bucket_mode,
+        )
+    else:
+        adapter = global_adapter
+
+    return adapter, {
+        "train_pairs": int(pair_tensors["node_indices"].numel()),
+        "base_train_nodes": int(train_nodes.numel()),
+        "extra_pairs": 0 if extra_pairs is None else int(extra_pairs["node_indices"].numel()),
+        "negative_pairs": 0 if negative_pairs is None else int(negative_pairs["node_indices"].numel()),
+        "loss": global_loss,
+        "gate_mean": global_gate_mean,
+        "support_pairs": support_pair_counts,
+        "support_losses": support_losses,
+        "support_gate_means": support_gate_means,
+        "support_aware": bool(adapters_by_support),
+        "adapter_type": str(adapter_type),
+        "bucket_mode": str(bucket_mode),
+    }
 
 
 def apply_residual_adapter(
@@ -192,15 +980,73 @@ def apply_residual_adapter(
         if hit_nodes.numel() == 0:
             return direct_embeddings, {"corrected": 0, "alpha": float(alpha)}
 
-    adapter.eval()
     corrected = direct_embeddings.clone()
-    with torch.no_grad():
-        x = build_residual_pair_inputs(verify_features, edge_index, trace, hit_nodes, risk_scores=risk_scores)
-        source_ids = trace["source_ids"][hit_nodes].to(device=device, dtype=torch.long)
-        anchors = target_embeddings[source_ids]
-        residual = adapter(x)
-        corrected[hit_nodes] = F.normalize(anchors + float(alpha) * residual, p=2, dim=1)
-    return corrected, {"corrected": int(hit_nodes.numel()), "alpha": float(alpha)}
+    support_hits = trace["winning_base_table_hit_counts"][hit_nodes].to(device=device, dtype=torch.long)
+    best_dists = trace["best_dists"][hit_nodes].to(device=device, dtype=torch.long)
+    alpha_map = None
+    default_alpha = None
+    if isinstance(alpha, dict):
+        alpha_map = _as_float_dict(alpha.get("by_support", alpha))
+        default_alpha = float(alpha.get("default", 0.0))
+    else:
+        default_alpha = float(alpha)
+
+    def _apply_with(local_adapter, node_subset, local_alpha):
+        local_adapter.eval()
+        with torch.no_grad():
+            x = build_residual_pair_inputs(verify_features, edge_index, trace, node_subset, risk_scores=risk_scores)
+            source_ids = trace["source_ids"][node_subset].to(device=device, dtype=torch.long)
+            anchors = target_embeddings[source_ids]
+            residual, _raw_delta, gate = _adapter_forward(local_adapter, x)
+            corrected[node_subset] = F.normalize(anchors + float(local_alpha) * residual, p=2, dim=1)
+        return 1.0 if gate is None else float(gate.mean().item())
+
+    support_alpha_used = {}
+    support_gate_used = {}
+    weighted_alpha = 0.0
+    weighted_count = 0
+    weighted_gate = 0.0
+    if isinstance(adapter, SupportAwareResidualAdapter):
+        bucket_mode = adapter.bucket_mode
+    else:
+        bucket_mode = "support"
+    bucket_values = compute_bucket_values_from_tensors(support_hits, best_dists, bucket_mode=bucket_mode).to(
+        device=device, dtype=torch.long
+    )
+    unique_supports = sorted(set(int(v) for v in bucket_values.detach().cpu().tolist()))
+    use_support_loop = isinstance(adapter, SupportAwareResidualAdapter) or alpha_map is not None
+
+    if use_support_loop:
+        for support_value in unique_supports:
+            node_subset = hit_nodes[bucket_values == int(support_value)]
+            if isinstance(adapter, SupportAwareResidualAdapter):
+                local_adapter = adapter.adapters_by_support.get(int(support_value), adapter.global_adapter)
+                support_adapters = len(adapter.adapters_by_support)
+            else:
+                local_adapter = adapter
+                support_adapters = 0
+            local_alpha = default_alpha if alpha_map is None else float(alpha_map.get(int(support_value), default_alpha))
+            support_alpha_used[int(support_value)] = float(local_alpha)
+            gate_mean = _apply_with(local_adapter, node_subset, local_alpha)
+            support_gate_used[int(support_value)] = float(gate_mean)
+            weighted_alpha += float(local_alpha) * int(node_subset.numel())
+            weighted_count += int(node_subset.numel())
+            weighted_gate += float(gate_mean) * int(node_subset.numel())
+        return corrected, {
+            "corrected": int(hit_nodes.numel()),
+            "alpha": 0.0 if weighted_count == 0 else float(weighted_alpha / max(1, weighted_count)),
+            "gate": 0.0 if weighted_count == 0 else float(weighted_gate / max(1, weighted_count)),
+            "alpha_by_support": support_alpha_used,
+            "gate_by_support": support_gate_used,
+            "support_adapters": support_adapters,
+        }
+
+    gate_mean = _apply_with(adapter, hit_nodes, default_alpha)
+    return corrected, {
+        "corrected": int(hit_nodes.numel()),
+        "alpha": float(default_alpha),
+        "gate": float(gate_mean),
+    }
 
 
 def embedding_error(reference_embeddings, approx_embeddings):
