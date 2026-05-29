@@ -9,6 +9,12 @@
 
 Graph-Bit 不是普通的 W4A8/W4A4 路由，也不是 FFN channel gating。它深入到 GEMM datapath：同一个 W4 weight encoder path 下，activation 逻辑上仍是 A8，但硬件可以只执行 P8/P6/P5/P4 中的一种 precision depth。
 
+更细的 predictor-free bit-serial 实现、degree/propagation risk 阈值管理和 ONNXim 验证接口见：
+
+```text
+docs/npu/GRAPH_CONDITIONED_BIT_SERIAL_EXECUTION.md
+```
+
 ## 1. 系统位置
 
 完整系统可以分成四级：
