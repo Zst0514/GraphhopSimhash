@@ -16,18 +16,29 @@ class LowRankResidualAdapter(nn.Module):
 
     def forward_with_gate(self, x):
         delta = self.up(F.gelu(self.down(x)))
-        gate = torch.ones(delta.size(0), 1, dtype=delta.dtype, device=delta.device)
-        return delta, gate
+        corr_gate = torch.ones(delta.size(0), 1, dtype=delta.dtype, device=delta.device)
+        accept_gate = torch.ones(delta.size(0), 1, dtype=delta.dtype, device=delta.device)
+        return delta, corr_gate, accept_gate
 
     def forward(self, x):
-        delta, gate = self.forward_with_gate(x)
-        return delta * gate
+        delta, corr_gate, _accept_gate = self.forward_with_gate(x)
+        return delta * corr_gate
 
 
 class ResidualMLPAdapter(nn.Module):
-    def __init__(self, input_dim, output_dim, rank=32, hidden_dim=0, hidden_layers=2, dropout=0.1):
+    def __init__(
+        self,
+        input_dim,
+        output_dim,
+        rank=32,
+        hidden_dim=0,
+        hidden_layers=2,
+        dropout=0.1,
+        accept_mode="shared",
+    ):
         super().__init__()
         self.supports_gate = True
+        self.accept_mode = str(accept_mode)
         input_dim = int(input_dim)
         output_dim = int(output_dim)
         rank = int(rank)
@@ -48,22 +59,30 @@ class ResidualMLPAdapter(nn.Module):
         self.latent = nn.Linear(dim, rank)
         self.out = nn.Linear(rank, output_dim)
         self.scale = nn.Linear(dim, 1)
+        self.accept = None if self.accept_mode == "shared" else nn.Linear(dim, 1)
 
         nn.init.normal_(self.out.weight, mean=0.0, std=1e-3)
         nn.init.zeros_(self.out.bias)
         nn.init.zeros_(self.scale.weight)
         nn.init.constant_(self.scale.bias, -1.0)
+        if self.accept is not None:
+            nn.init.zeros_(self.accept.weight)
+            nn.init.constant_(self.accept.bias, 1.0)
 
     def forward_with_gate(self, x):
         h = self.trunk(self.input_norm(x))
         z = F.gelu(self.latent(h))
         delta = self.out(z)
-        gain = torch.sigmoid(self.scale(h))
-        return delta, gain
+        corr_gain = torch.sigmoid(self.scale(h))
+        if self.accept is None:
+            accept_gain = corr_gain
+        else:
+            accept_gain = torch.sigmoid(self.accept(h))
+        return delta, corr_gain, accept_gain
 
     def forward(self, x):
-        delta, gain = self.forward_with_gate(x)
-        return delta * gain
+        delta, corr_gain, _accept_gain = self.forward_with_gate(x)
+        return delta * corr_gain
 
 
 class SupportAwareResidualAdapter:
@@ -265,6 +284,7 @@ def _build_residual_adapter(
     hidden_dim=0,
     hidden_layers=2,
     dropout=0.1,
+    accept_mode="shared",
 ):
     adapter_type = str(adapter_type).lower()
     if adapter_type == "low_rank":
@@ -277,22 +297,31 @@ def _build_residual_adapter(
             hidden_dim=hidden_dim,
             hidden_layers=hidden_layers,
             dropout=dropout,
+            accept_mode=accept_mode,
         )
     raise ValueError(f"Unknown residual adapter type: {adapter_type}")
 
 
 def _adapter_forward(adapter, x):
     if hasattr(adapter, "forward_with_gate"):
-        raw_delta, gate = adapter.forward_with_gate(x)
+        outputs = adapter.forward_with_gate(x)
+        if isinstance(outputs, tuple) and len(outputs) == 3:
+            raw_delta, correction_gate, accept_gate = outputs
+        elif isinstance(outputs, tuple) and len(outputs) == 2:
+            raw_delta, correction_gate = outputs
+            accept_gate = correction_gate
+        else:
+            raise ValueError("forward_with_gate must return (delta, corr_gate) or (delta, corr_gate, accept_gate)")
     else:
         raw_delta = adapter(x)
-        gate = torch.ones(raw_delta.size(0), 1, dtype=raw_delta.dtype, device=raw_delta.device)
+        correction_gate = torch.ones(raw_delta.size(0), 1, dtype=raw_delta.dtype, device=raw_delta.device)
+        accept_gate = torch.ones(raw_delta.size(0), 1, dtype=raw_delta.dtype, device=raw_delta.device)
     if not bool(getattr(adapter, "supports_gate", False)):
-        gate = None
+        correction_gate = None
         gated_residual = raw_delta
     else:
-        gated_residual = raw_delta * gate
-    return gated_residual, raw_delta, gate
+        gated_residual = raw_delta * correction_gate
+    return gated_residual, raw_delta, correction_gate, accept_gate
 
 
 def _compute_residual_loss(
@@ -304,8 +333,10 @@ def _compute_residual_loss(
     delta_weight,
     residual_l2,
     raw_delta=None,
-    gate=None,
+    correction_gate=None,
+    accept_gate=None,
     gate_loss_weight=0.0,
+    accept_loss_weight=0.0,
     gate_error_scale=0.25,
     gate_error_max=0.45,
     gate_sparsity_weight=0.0,
@@ -324,7 +355,7 @@ def _compute_residual_loss(
         loss = loss + float(delta_weight) * F.smooth_l1_loss(residual, target_delta)
     if float(residual_l2) > 0.0:
         loss = loss + float(residual_l2) * residual.pow(2).mean()
-    if gate is not None:
+    if correction_gate is not None:
         anchor_norm = F.normalize(anchors, p=2, dim=1)
         anchor_error = (1.0 - F.cosine_similarity(anchor_norm, target_norm, dim=1)).clamp(min=0.0)
         error_scale = max(1e-6, float(gate_error_scale))
@@ -333,13 +364,16 @@ def _compute_residual_loss(
         fall = torch.clamp((error_max - anchor_error) / max(1e-6, error_max - error_scale), min=0.0, max=1.0)
         gate_target = (rise * fall).unsqueeze(1)
         if float(gate_loss_weight) > 0.0:
-            loss = loss + float(gate_loss_weight) * F.smooth_l1_loss(gate, gate_target)
+            loss = loss + float(gate_loss_weight) * F.smooth_l1_loss(correction_gate, gate_target)
         if float(gate_sparsity_weight) > 0.0:
             low_error_weight = (1.0 - gate_target).detach()
-            loss = loss + float(gate_sparsity_weight) * (gate * low_error_weight).mean()
+            loss = loss + float(gate_sparsity_weight) * (correction_gate * low_error_weight).mean()
             if raw_delta is not None:
                 delta_norm = raw_delta.pow(2).mean(dim=1, keepdim=True)
                 loss = loss + float(gate_sparsity_weight) * 0.5 * (delta_norm * low_error_weight).mean()
+    if accept_gate is not None and float(accept_loss_weight) > 0.0:
+        accept_target = torch.ones_like(accept_gate)
+        loss = loss + float(accept_loss_weight) * F.smooth_l1_loss(accept_gate, accept_target)
     return loss
 
 
@@ -356,10 +390,12 @@ def _fit_residual_adapter(
     hidden_dim=0,
     hidden_layers=2,
     dropout=0.1,
+    accept_mode="shared",
     cosine_weight=1.0,
     mse_weight=0.25,
     delta_weight=0.5,
     gate_loss_weight=0.0,
+    accept_loss_weight=0.0,
     gate_error_scale=0.25,
     gate_error_max=0.45,
     gate_sparsity_weight=0.0,
@@ -375,15 +411,17 @@ def _fit_residual_adapter(
         hidden_dim=hidden_dim,
         hidden_layers=hidden_layers,
         dropout=dropout,
+        accept_mode=accept_mode,
     ).to(device)
     optimizer = torch.optim.AdamW(adapter.parameters(), lr=float(lr), weight_decay=float(weight_decay))
 
     last_loss = 0.0
-    gate_mean = 1.0
+    correction_gate_mean = 1.0
+    accept_gate_mean = 1.0
     for _epoch in range(int(epochs)):
         adapter.train()
         optimizer.zero_grad()
-        residual, raw_delta, gate = _adapter_forward(adapter, x_train)
+        residual, raw_delta, correction_gate, accept_gate = _adapter_forward(adapter, x_train)
         loss = _compute_residual_loss(
             residual,
             anchors,
@@ -393,29 +431,35 @@ def _fit_residual_adapter(
             delta_weight=delta_weight,
             residual_l2=residual_l2,
             raw_delta=raw_delta,
-            gate=gate,
+            correction_gate=correction_gate,
+            accept_gate=accept_gate,
             gate_loss_weight=gate_loss_weight,
+            accept_loss_weight=accept_loss_weight,
             gate_error_scale=gate_error_scale,
             gate_error_max=gate_error_max,
             gate_sparsity_weight=gate_sparsity_weight,
         )
         if x_neg is not None and int(x_neg.size(0)) > 0:
-            neg_residual, neg_raw_delta, neg_gate = _adapter_forward(adapter, x_neg)
+            neg_residual, neg_raw_delta, neg_correction_gate, neg_accept_gate = _adapter_forward(adapter, x_neg)
             neg_loss = neg_residual.new_tensor(0.0)
-            if neg_gate is not None:
-                zeros = torch.zeros_like(neg_gate)
+            if neg_correction_gate is not None:
+                zeros = torch.zeros_like(neg_correction_gate)
                 if float(gate_loss_weight) > 0.0:
-                    neg_loss = neg_loss + float(gate_loss_weight) * F.smooth_l1_loss(neg_gate, zeros)
+                    neg_loss = neg_loss + float(gate_loss_weight) * F.smooth_l1_loss(neg_correction_gate, zeros)
                 if float(gate_sparsity_weight) > 0.0:
-                    neg_loss = neg_loss + float(gate_sparsity_weight) * neg_gate.mean()
+                    neg_loss = neg_loss + float(gate_sparsity_weight) * neg_correction_gate.mean()
+            if neg_accept_gate is not None and float(accept_loss_weight) > 0.0:
+                zeros = torch.zeros_like(neg_accept_gate)
+                neg_loss = neg_loss + float(accept_loss_weight) * F.smooth_l1_loss(neg_accept_gate, zeros)
             if float(gate_sparsity_weight) > 0.0:
                 neg_loss = neg_loss + float(gate_sparsity_weight) * neg_raw_delta.pow(2).mean()
             loss = loss + float(negative_gate_weight) * neg_loss
         loss.backward()
         optimizer.step()
         last_loss = float(loss.detach().item())
-        gate_mean = 1.0 if gate is None else float(gate.detach().mean().item())
-    return adapter, last_loss, gate_mean
+        correction_gate_mean = 1.0 if correction_gate is None else float(correction_gate.detach().mean().item())
+        accept_gate_mean = 1.0 if accept_gate is None else float(accept_gate.detach().mean().item())
+    return adapter, last_loss, correction_gate_mean, accept_gate_mean
 
 
 def _split_mask_for_train_pairs(data, split, device):
@@ -452,10 +496,33 @@ def _append_training_pairs(pair_tensors, extra_pairs):
     return merged
 
 
+def _filter_positive_pairs_by_error(pair_tensors, target_embeddings, positive_error_max):
+    if pair_tensors is None:
+        return None, 0, 0
+    if float(positive_error_max) < 0.0:
+        count = int(pair_tensors["node_indices"].numel())
+        return pair_tensors, count, count
+
+    node_indices = pair_tensors["node_indices"]
+    source_ids = pair_tensors["source_ids"]
+    if node_indices.numel() == 0:
+        return pair_tensors, 0, 0
+
+    query_targets = target_embeddings[node_indices]
+    anchor_targets = target_embeddings[source_ids]
+    errors = (1.0 - F.cosine_similarity(query_targets, anchor_targets, dim=1)).clamp(min=0.0)
+    keep_mask = errors <= float(positive_error_max)
+    kept = int(keep_mask.sum().item())
+    total = int(node_indices.numel())
+    filtered = {key: value[keep_mask] for key, value in pair_tensors.items()}
+    return filtered, kept, total
+
+
 def _harvest_extra_anchor_pairs(
     controller,
     hash_route_features,
     verify_features,
+    target_embeddings,
     trace,
     data,
     train_nodes,
@@ -464,6 +531,7 @@ def _harvest_extra_anchor_pairs(
     extra_anchors_per_node,
     extra_query_nodes,
     max_extra_pairs,
+    positive_error_max,
 ):
     if (
         controller is None
@@ -502,6 +570,7 @@ def _harvest_extra_anchor_pairs(
         controller._compute_route_fingerprint(route_features, route_idx)
         for route_idx, route_features in enumerate(hash_feature_routes)
     ]
+    target_embeddings_cpu = target_embeddings.detach().cpu()
 
     extra_node_indices = []
     extra_source_ids = []
@@ -533,6 +602,7 @@ def _harvest_extra_anchor_pairs(
         )
         primary_source = int(trace["source_ids"][int(node_idx)].item())
         seen_sources = {primary_source} if primary_source >= 0 else set()
+        query_target = target_embeddings_cpu[int(node_idx)]
         taken = 0
         for item in scored:
             if len(extra_node_indices) >= int(max_extra_pairs):
@@ -546,6 +616,19 @@ def _harvest_extra_anchor_pairs(
                 continue
             if candidate_support_values and support_hits not in candidate_support_values:
                 continue
+            if float(positive_error_max) >= 0.0:
+                anchor_error = float(
+                    (
+                        1.0
+                        - F.cosine_similarity(
+                            query_target.unsqueeze(0),
+                            target_embeddings_cpu[src].unsqueeze(0),
+                            dim=1,
+                        )
+                    ).item()
+                )
+                if anchor_error > float(positive_error_max):
+                    continue
             seen_sources.add(src)
             extra_node_indices.append(int(node_idx))
             extra_source_ids.append(src)
@@ -757,15 +840,18 @@ def train_residual_adapter(
     hash_route_features=None,
     extra_anchors_per_node=0,
     extra_query_nodes=0,
+    positive_error_max=-1.0,
     adapter_type="low_rank",
     hidden_dim=0,
     hidden_layers=2,
     dropout=0.1,
+    accept_mode="shared",
     cosine_weight=1.0,
     mse_weight=0.25,
     delta_weight=0.5,
     bucket_mode="support",
     gate_loss_weight=0.0,
+    accept_loss_weight=0.0,
     gate_error_scale=0.25,
     gate_error_max=0.45,
     gate_sparsity_weight=0.0,
@@ -786,10 +872,16 @@ def train_residual_adapter(
         return None, {"train_pairs": 0, "loss": 0.0}
 
     pair_tensors = _build_training_pair_tensors(trace, train_nodes, device)
+    pair_tensors, base_pairs_kept, base_pairs_total = _filter_positive_pairs_by_error(
+        pair_tensors,
+        target_embeddings,
+        positive_error_max,
+    )
     extra_pairs = _harvest_extra_anchor_pairs(
         controller,
         hash_route_features,
         verify_features,
+        target_embeddings,
         trace,
         data,
         train_nodes,
@@ -798,6 +890,7 @@ def train_residual_adapter(
         extra_anchors_per_node,
         extra_query_nodes,
         max(0, int(max_pairs) - int(train_nodes.numel())),
+        positive_error_max,
     )
     pair_tensors = _append_training_pairs(pair_tensors, extra_pairs)
     negative_pairs = _harvest_negative_anchor_pairs(
@@ -814,6 +907,26 @@ def train_residual_adapter(
         max(0, int(max_pairs)),
         negative_error_min,
     )
+    if pair_tensors["node_indices"].numel() == 0:
+        return None, {
+            "train_pairs": 0,
+            "base_train_nodes": int(train_nodes.numel()),
+            "base_pairs_kept": int(base_pairs_kept),
+            "base_pairs_total": int(base_pairs_total),
+            "extra_pairs": 0 if extra_pairs is None else int(extra_pairs["node_indices"].numel()),
+            "negative_pairs": 0 if negative_pairs is None else int(negative_pairs["node_indices"].numel()),
+            "loss": 0.0,
+            "gate_mean": 0.0,
+            "accept_gate_mean": 0.0,
+            "support_pairs": {},
+            "support_losses": {},
+            "support_gate_means": {},
+            "support_accept_gate_means": {},
+            "support_aware": False,
+            "adapter_type": str(adapter_type),
+            "accept_mode": str(accept_mode),
+            "bucket_mode": str(bucket_mode),
+        }
 
     x_train = build_residual_pair_inputs(
         verify_features,
@@ -846,7 +959,7 @@ def train_residual_adapter(
             winning_base_table_hit_counts=negative_pairs["winning_base_table_hit_counts"],
             best_cosines=negative_pairs["best_cosines"],
         )
-    global_adapter, global_loss, global_gate_mean = _fit_residual_adapter(
+    global_adapter, global_loss, global_gate_mean, global_accept_gate_mean = _fit_residual_adapter(
         x_train,
         anchors,
         targets,
@@ -859,10 +972,12 @@ def train_residual_adapter(
         hidden_dim=hidden_dim,
         hidden_layers=hidden_layers,
         dropout=dropout,
+        accept_mode=accept_mode,
         cosine_weight=cosine_weight,
         mse_weight=mse_weight,
         delta_weight=delta_weight,
         gate_loss_weight=gate_loss_weight,
+        accept_loss_weight=accept_loss_weight,
         gate_error_scale=gate_error_scale,
         gate_error_max=gate_error_max,
         gate_sparsity_weight=gate_sparsity_weight,
@@ -887,6 +1002,7 @@ def train_residual_adapter(
     support_pair_counts = {}
     support_losses = {}
     support_gate_means = {}
+    support_accept_gate_means = {}
     min_bucket_pairs = max(32, int(rank))
 
     for support_value in sorted(set(int(v) for v in bucket_values.detach().cpu().tolist())):
@@ -897,7 +1013,7 @@ def train_residual_adapter(
         bucket_x = x_train[bucket_mask]
         bucket_anchors = anchors[bucket_mask]
         bucket_targets = targets[bucket_mask]
-        bucket_adapter, bucket_loss, bucket_gate_mean = _fit_residual_adapter(
+        bucket_adapter, bucket_loss, bucket_gate_mean, bucket_accept_gate_mean = _fit_residual_adapter(
             bucket_x,
             bucket_anchors,
             bucket_targets,
@@ -910,10 +1026,12 @@ def train_residual_adapter(
             hidden_dim=hidden_dim,
             hidden_layers=hidden_layers,
             dropout=dropout,
+            accept_mode=accept_mode,
             cosine_weight=cosine_weight,
             mse_weight=mse_weight,
             delta_weight=delta_weight,
             gate_loss_weight=gate_loss_weight,
+            accept_loss_weight=accept_loss_weight,
             gate_error_scale=gate_error_scale,
             gate_error_max=gate_error_max,
             gate_sparsity_weight=gate_sparsity_weight,
@@ -924,6 +1042,7 @@ def train_residual_adapter(
         support_pair_counts[int(support_value)] = bucket_pairs
         support_losses[int(support_value)] = bucket_loss
         support_gate_means[int(support_value)] = bucket_gate_mean
+        support_accept_gate_means[int(support_value)] = bucket_accept_gate_mean
 
     if adapters_by_support:
         adapter = SupportAwareResidualAdapter(
@@ -937,15 +1056,20 @@ def train_residual_adapter(
     return adapter, {
         "train_pairs": int(pair_tensors["node_indices"].numel()),
         "base_train_nodes": int(train_nodes.numel()),
+        "base_pairs_kept": int(base_pairs_kept),
+        "base_pairs_total": int(base_pairs_total),
         "extra_pairs": 0 if extra_pairs is None else int(extra_pairs["node_indices"].numel()),
         "negative_pairs": 0 if negative_pairs is None else int(negative_pairs["node_indices"].numel()),
         "loss": global_loss,
         "gate_mean": global_gate_mean,
+        "accept_gate_mean": global_accept_gate_mean,
         "support_pairs": support_pair_counts,
         "support_losses": support_losses,
         "support_gate_means": support_gate_means,
+        "support_accept_gate_means": support_accept_gate_means,
         "support_aware": bool(adapters_by_support),
         "adapter_type": str(adapter_type),
+        "accept_mode": str(accept_mode),
         "bucket_mode": str(bucket_mode),
     }
 
@@ -959,26 +1083,48 @@ def apply_residual_adapter(
     adapter,
     risk_scores=None,
     alpha=1.0,
+    gate_accept_threshold=None,
     min_dist=1.0,
     correction_mask=None,
 ):
     if adapter is None:
-        return direct_embeddings, {"corrected": 0, "alpha": 0.0}
+        return direct_embeddings, {
+            "corrected": 0,
+            "alpha": 0.0,
+            "gate": 0.0,
+            "accept_gate": 1.0,
+            "accepted": 0,
+            "rejected": 0,
+        }
     device = direct_embeddings.device
     hit_nodes = (trace["hit_mask"] & (trace["source_ids"] >= 0)).nonzero(as_tuple=False).view(-1)
     if hit_nodes.numel() == 0:
-        return direct_embeddings, {"corrected": 0, "alpha": 0.0}
+        return direct_embeddings, {"corrected": 0, "alpha": 0.0, "gate": 0.0, "accepted": 0, "rejected": 0}
 
     if float(min_dist) > 0.0:
         dist = trace["best_dists"][hit_nodes].to(device=device, dtype=torch.float32)
         hit_nodes = hit_nodes[dist >= float(min_dist)]
         if hit_nodes.numel() == 0:
-            return direct_embeddings, {"corrected": 0, "alpha": float(alpha)}
+            return direct_embeddings, {
+                "corrected": 0,
+                "alpha": float(alpha),
+                "gate": 0.0,
+                "accept_gate": 1.0,
+                "accepted": 0,
+                "rejected": 0,
+            }
     if correction_mask is not None:
         active = correction_mask.to(device=device, dtype=torch.bool)
         hit_nodes = hit_nodes[active[hit_nodes]]
         if hit_nodes.numel() == 0:
-            return direct_embeddings, {"corrected": 0, "alpha": float(alpha)}
+            return direct_embeddings, {
+                "corrected": 0,
+                "alpha": float(alpha),
+                "gate": 0.0,
+                "accept_gate": 1.0,
+                "accepted": 0,
+                "rejected": 0,
+            }
 
     corrected = direct_embeddings.clone()
     support_hits = trace["winning_base_table_hit_counts"][hit_nodes].to(device=device, dtype=torch.long)
@@ -991,21 +1137,50 @@ def apply_residual_adapter(
     else:
         default_alpha = float(alpha)
 
+    gate_threshold = None if gate_accept_threshold is None else float(gate_accept_threshold)
+
     def _apply_with(local_adapter, node_subset, local_alpha):
         local_adapter.eval()
         with torch.no_grad():
             x = build_residual_pair_inputs(verify_features, edge_index, trace, node_subset, risk_scores=risk_scores)
             source_ids = trace["source_ids"][node_subset].to(device=device, dtype=torch.long)
             anchors = target_embeddings[source_ids]
-            residual, _raw_delta, gate = _adapter_forward(local_adapter, x)
-            corrected[node_subset] = F.normalize(anchors + float(local_alpha) * residual, p=2, dim=1)
-        return 1.0 if gate is None else float(gate.mean().item())
+            residual, _raw_delta, correction_gate, accept_gate = _adapter_forward(local_adapter, x)
+            if accept_gate is None or gate_threshold is None or gate_threshold <= 0.0:
+                accept_mask = torch.ones(node_subset.numel(), dtype=torch.bool, device=device)
+            else:
+                accept_mask = accept_gate.view(-1) >= gate_threshold
+            reject_mask = ~accept_mask
+            if bool(accept_mask.any().item()):
+                accept_nodes = node_subset[accept_mask]
+                corrected[accept_nodes] = F.normalize(
+                    anchors[accept_mask] + float(local_alpha) * residual[accept_mask],
+                    p=2,
+                    dim=1,
+                )
+            if bool(reject_mask.any().item()):
+                reject_nodes = node_subset[reject_mask]
+                corrected[reject_nodes] = target_embeddings[reject_nodes]
+        correction_gate_mean = 1.0 if correction_gate is None else float(correction_gate.mean().item())
+        accept_gate_mean = 1.0 if accept_gate is None else float(accept_gate.mean().item())
+        return (
+            correction_gate_mean,
+            accept_gate_mean,
+            int(accept_mask.sum().item()),
+            int(reject_mask.sum().item()),
+            node_subset[reject_mask],
+        )
 
     support_alpha_used = {}
     support_gate_used = {}
+    support_accept_gate_used = {}
     weighted_alpha = 0.0
     weighted_count = 0
     weighted_gate = 0.0
+    weighted_accept_gate = 0.0
+    total_accepted = 0
+    total_rejected = 0
+    rejected_nodes = []
     if isinstance(adapter, SupportAwareResidualAdapter):
         bucket_mode = adapter.bucket_mode
     else:
@@ -1027,25 +1202,46 @@ def apply_residual_adapter(
                 support_adapters = 0
             local_alpha = default_alpha if alpha_map is None else float(alpha_map.get(int(support_value), default_alpha))
             support_alpha_used[int(support_value)] = float(local_alpha)
-            gate_mean = _apply_with(local_adapter, node_subset, local_alpha)
-            support_gate_used[int(support_value)] = float(gate_mean)
+            correction_gate_mean, accept_gate_mean, accepted_count, rejected_count, rejected_subset = _apply_with(
+                local_adapter, node_subset, local_alpha
+            )
+            support_gate_used[int(support_value)] = float(correction_gate_mean)
+            support_accept_gate_used[int(support_value)] = float(accept_gate_mean)
             weighted_alpha += float(local_alpha) * int(node_subset.numel())
             weighted_count += int(node_subset.numel())
-            weighted_gate += float(gate_mean) * int(node_subset.numel())
+            weighted_gate += float(correction_gate_mean) * int(node_subset.numel())
+            weighted_accept_gate += float(accept_gate_mean) * int(node_subset.numel())
+            total_accepted += int(accepted_count)
+            total_rejected += int(rejected_count)
+            if int(rejected_subset.numel()) > 0:
+                rejected_nodes.append(rejected_subset)
         return corrected, {
             "corrected": int(hit_nodes.numel()),
             "alpha": 0.0 if weighted_count == 0 else float(weighted_alpha / max(1, weighted_count)),
             "gate": 0.0 if weighted_count == 0 else float(weighted_gate / max(1, weighted_count)),
+            "accept_gate": 1.0 if weighted_count == 0 else float(weighted_accept_gate / max(1, weighted_count)),
             "alpha_by_support": support_alpha_used,
             "gate_by_support": support_gate_used,
+            "accept_gate_by_support": support_accept_gate_used,
+            "accepted": int(total_accepted),
+            "rejected": int(total_rejected),
+            "rejected_nodes": torch.cat(rejected_nodes, dim=0) if rejected_nodes else torch.empty(0, dtype=torch.long, device=device),
+            "gate_accept_threshold": gate_threshold,
             "support_adapters": support_adapters,
         }
 
-    gate_mean = _apply_with(adapter, hit_nodes, default_alpha)
+    correction_gate_mean, accept_gate_mean, accepted_count, rejected_count, rejected_subset = _apply_with(
+        adapter, hit_nodes, default_alpha
+    )
     return corrected, {
         "corrected": int(hit_nodes.numel()),
         "alpha": float(default_alpha),
-        "gate": float(gate_mean),
+        "gate": float(correction_gate_mean),
+        "accept_gate": float(accept_gate_mean),
+        "accepted": int(accepted_count),
+        "rejected": int(rejected_count),
+        "rejected_nodes": rejected_subset,
+        "gate_accept_threshold": gate_threshold,
     }
 
 

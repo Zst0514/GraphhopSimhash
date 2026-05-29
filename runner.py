@@ -1284,10 +1284,12 @@ def run_residual_reuse_experiment(args):
                     hash_route_features=route_bundle["hash_route_features"],
                     extra_anchors_per_node=args.residual_offline_extra_anchors_per_node,
                     extra_query_nodes=args.residual_offline_extra_query_nodes,
+                    positive_error_max=args.residual_positive_error_max,
                     extra_negative_anchors_per_node=args.residual_offline_negative_anchors_per_node,
                     negative_error_min=args.residual_negative_error_min,
                     negative_gate_weight=args.residual_negative_gate_weight,
                     adapter_type=args.residual_adapter_type,
+                    accept_mode=args.residual_accept_mode,
                     hidden_dim=args.residual_hidden_dim,
                     hidden_layers=args.residual_hidden_layers,
                     dropout=args.residual_dropout,
@@ -1296,12 +1298,13 @@ def run_residual_reuse_experiment(args):
                     delta_weight=args.residual_loss_delta_weight,
                     bucket_mode=args.residual_bucket_mode,
                     gate_loss_weight=args.residual_gate_loss_weight,
+                    accept_loss_weight=args.residual_accept_loss_weight,
                     gate_error_scale=args.residual_gate_error_scale,
                     gate_error_max=args.residual_gate_error_max,
                     gate_sparsity_weight=args.residual_gate_sparsity_weight,
                 )
 
-                if adapter is not None and float(args.residual_alpha) < 0.0:
+                if adapter is not None:
                     support_alpha_enabled = bool(args.residual_support_aware_alpha)
                     full_bucket_values = compute_bucket_values_from_trace(
                         trace,
@@ -1315,26 +1318,40 @@ def run_residual_reuse_experiment(args):
                         bucket_mode=args.residual_bucket_mode,
                         device=device,
                     )
-                    alpha_grid = resolve_residual_alpha_grid(args, residual_fit_cfg)
+                    alpha_grid = (
+                        resolve_residual_alpha_grid(args, residual_fit_cfg)
+                        if float(args.residual_alpha) < 0.0
+                        else [max(0.0, float(args.residual_alpha))]
+                    )
+                    gate_grid = (
+                        sorted(float(value) for value in args.residual_gate_accept_grid)
+                        if float(args.residual_gate_accept_threshold) < 0.0
+                        else [max(0.0, float(args.residual_gate_accept_threshold))]
+                    )
+
                     selected_alpha = float(alpha_grid[0])
+                    selected_gate_threshold = float(gate_grid[0])
                     selected_val_acc = -1.0
                     for alpha in alpha_grid:
-                        candidate_features, _candidate_info = apply_residual_adapter(
-                            direct_embeddings=residual_base_features,
-                            target_embeddings=target_features,
-                            verify_features=verify_features,
-                            edge_index=data.edge_index,
-                            trace=trace,
-                            adapter=adapter,
-                            risk_scores=controller.node_risk_scores,
-                            alpha=alpha,
-                            min_dist=args.residual_min_dist,
-                            correction_mask=correction_mask,
-                        )
-                        val_acc = evaluate_raw_node_features(model, data, candidate_features, mask=data.val_mask)
-                        if val_acc > selected_val_acc + 1e-12:
-                            selected_val_acc = val_acc
-                            selected_alpha = alpha
+                        for gate_threshold in gate_grid:
+                            candidate_features, _candidate_info = apply_residual_adapter(
+                                direct_embeddings=residual_base_features,
+                                target_embeddings=target_features,
+                                verify_features=verify_features,
+                                edge_index=data.edge_index,
+                                trace=trace,
+                                adapter=adapter,
+                                risk_scores=controller.node_risk_scores,
+                                alpha=alpha,
+                                gate_accept_threshold=gate_threshold,
+                                min_dist=args.residual_min_dist,
+                                correction_mask=correction_mask,
+                            )
+                            val_acc = evaluate_raw_node_features(model, data, candidate_features, mask=data.val_mask)
+                            if val_acc > selected_val_acc + 1e-12:
+                                selected_val_acc = val_acc
+                                selected_alpha = float(alpha)
+                                selected_gate_threshold = float(gate_threshold)
                     if support_alpha_enabled:
                         alpha_by_support = {}
                         support_note_parts = []
@@ -1355,6 +1372,7 @@ def run_residual_reuse_experiment(args):
                                         adapter=adapter,
                                         risk_scores=controller.node_risk_scores,
                                         alpha=alpha,
+                                        gate_accept_threshold=selected_gate_threshold,
                                         min_dist=args.residual_min_dist,
                                         correction_mask=support_mask,
                                     )
@@ -1366,7 +1384,7 @@ def run_residual_reuse_experiment(args):
                                     )
                                     if val_acc > best_val_acc + 1e-12:
                                         best_val_acc = val_acc
-                                        best_alpha = alpha
+                                        best_alpha = float(alpha)
                             alpha_by_support[int(support_value)] = float(best_alpha)
                             bucket_label = format_bucket_label(int(support_value), args.residual_bucket_mode)
                             if best_val_acc >= 0.0:
@@ -1378,11 +1396,19 @@ def run_residual_reuse_experiment(args):
                             f"support-auto(global={selected_val_acc:.4f}; " + ", ".join(support_note_parts) + ")"
                         )
                     else:
-                        alpha_for_apply = selected_alpha
+                        alpha_for_apply = float(selected_alpha)
                         alpha_note = f"auto(val_acc={selected_val_acc:.4f})"
+                    gate_threshold_for_apply = float(selected_gate_threshold)
+                    gate_note = (
+                        f"auto({selected_val_acc:.4f}, tau={selected_gate_threshold:.3f})"
+                        if float(args.residual_gate_accept_threshold) < 0.0
+                        else "fixed"
+                    )
                 else:
                     alpha_for_apply = max(0.0, float(args.residual_alpha))
                     alpha_note = "fixed"
+                    gate_threshold_for_apply = max(0.0, float(args.residual_gate_accept_threshold))
+                    gate_note = "fixed"
 
                 residual_features, apply_info = apply_residual_adapter(
                     direct_embeddings=residual_base_features,
@@ -1393,6 +1419,7 @@ def run_residual_reuse_experiment(args):
                     adapter=adapter,
                     risk_scores=controller.node_risk_scores,
                     alpha=alpha_for_apply,
+                    gate_accept_threshold=gate_threshold_for_apply,
                     min_dist=args.residual_min_dist,
                     correction_mask=correction_mask,
                 )
@@ -1401,13 +1428,20 @@ def run_residual_reuse_experiment(args):
                 residual_err = embedding_error(target_features, residual_features)
 
                 direct_hit_count = int(direct_hit_mask.sum().item())
-                residual_hit_count = int(residual_hit_mask.sum().item())
+                soft_residual_hit_count = int(residual_hit_mask.sum().item())
+                effective_residual_hit_mask = residual_hit_mask.clone()
+                rejected_nodes = apply_info.get("rejected_nodes", None)
+                if rejected_nodes is not None and int(rejected_nodes.numel()) > 0:
+                    effective_residual_hit_mask[rejected_nodes] = False
+                residual_hit_count = int(effective_residual_hit_mask.sum().item())
                 direct_hit_err = float(direct_err[direct_hit_mask].mean().item()) if direct_hit_count > 0 else 0.0
-                residual_hit_err = float(residual_err[residual_hit_mask].mean().item()) if residual_hit_count > 0 else 0.0
+                residual_hit_err = (
+                    float(residual_err[effective_residual_hit_mask].mean().item()) if residual_hit_count > 0 else 0.0
+                )
                 direct_reuse_rate = direct_hit_count / max(1, stats["total_queries"])
                 residual_reuse_rate = residual_hit_count / max(1, stats["total_queries"])
                 if soft_direct_err is not None:
-                    soft_direct_hit_count = residual_hit_count
+                    soft_direct_hit_count = soft_residual_hit_count
                     soft_direct_hit_err = (
                         float(soft_direct_err[residual_hit_mask].mean().item())
                         if soft_direct_hit_count > 0
@@ -1468,12 +1502,17 @@ def run_residual_reuse_experiment(args):
                     f"| ResidualCand={correction_info['residual_candidates']} "
                     f"| TrainPairs={train_info['train_pairs']} "
                     f"| BaseNodes={train_info.get('base_train_nodes', train_info['train_pairs'])} "
+                    f"| BaseKeep={train_info.get('base_pairs_kept', train_info.get('base_train_nodes', train_info['train_pairs']))}/{train_info.get('base_pairs_total', train_info.get('base_train_nodes', train_info['train_pairs']))} "
                     f"| ExtraPairs={train_info.get('extra_pairs', 0)} "
                     f"| NegPairs={train_info.get('negative_pairs', 0)} "
                     f"| Alpha={apply_info['alpha']:.3f} ({alpha_note}) "
+                    f"| Tau={apply_info.get('gate_accept_threshold', 0.0):.3f} ({gate_note}) "
                     f"| Gate={apply_info.get('gate', 1.0):.3f} "
+                    f"| AcceptGate={apply_info.get('accept_gate', 1.0):.3f} "
+                    f"| Rejected={apply_info.get('rejected', 0)} "
                     f"| TrainLoss={train_info['loss']:.6f} "
                     f"| TrainGate={train_info.get('gate_mean', 1.0):.3f} "
+                    f"| TrainAcceptGate={train_info.get('accept_gate_mean', 1.0):.3f} "
                     f"| Acc={residual_acc:.4f} | Drop={residual_drop:.2%} "
                     f"| AvgErr={float(residual_err.mean().item()):.5f} "
                     f"| HitErr={residual_hit_err:.5f}"
@@ -1490,6 +1529,12 @@ def run_residual_reuse_experiment(args):
                         for k, v in sorted(apply_info["gate_by_support"].items())
                     )
                     log_important(f"  GateBySupport: {gate_support_text}")
+                if "accept_gate_by_support" in apply_info:
+                    gate_support_text = ", ".join(
+                        f"{format_bucket_label(int(k), args.residual_bucket_mode)}={float(v):.3f}"
+                        for k, v in sorted(apply_info["accept_gate_by_support"].items())
+                    )
+                    log_important(f"  AcceptGateBySupport: {gate_support_text}")
                 if train_info.get("support_aware"):
                     support_pair_text = ", ".join(
                         f"{format_bucket_label(int(k), train_info.get('bucket_mode', args.residual_bucket_mode))}={int(v)}"
@@ -1503,6 +1548,12 @@ def run_residual_reuse_experiment(args):
                     )
                     if support_gate_text:
                         log_important(f"  TrainSupportGates: {support_gate_text}")
+                    support_gate_text = ", ".join(
+                        f"{format_bucket_label(int(k), train_info.get('bucket_mode', args.residual_bucket_mode))}={float(v):.3f}"
+                        for k, v in sorted(train_info.get("support_accept_gate_means", {}).items())
+                    )
+                    if support_gate_text:
+                        log_important(f"  TrainSupportAcceptGates: {support_gate_text}")
                 if split_info is not None:
                     hist_text = ", ".join(
                         f"{hits}head={count}" for hits, count in split_info["support_hist"].items()

@@ -330,6 +330,13 @@ def build_parser():
         help="Residual correction model. mlp is a stronger nonlinear adapter; low_rank keeps the original lightweight head.",
     )
     parser.add_argument(
+        "--residual_accept_mode",
+        type=str,
+        default="shared",
+        choices=["shared", "separate"],
+        help="Whether soft-hit accept/reject shares the correction gate or uses a separate accept head.",
+    )
+    parser.add_argument(
         "--residual_hidden_dim",
         type=int,
         default=0,
@@ -372,6 +379,12 @@ def build_parser():
         help="Weight of per-sample correction gate supervision during residual training.",
     )
     parser.add_argument(
+        "--residual_accept_loss_weight",
+        type=float,
+        default=0.5,
+        help="Weight of per-sample accept gate supervision during residual training.",
+    )
+    parser.add_argument(
         "--residual_gate_error_scale",
         type=float,
         default=0.25,
@@ -388,6 +401,19 @@ def build_parser():
         type=float,
         default=0.01,
         help="Regularize low-error samples toward zero correction by shrinking their gate and raw delta.",
+    )
+    parser.add_argument(
+        "--residual_gate_accept_threshold",
+        type=float,
+        default=-1.0,
+        help="If non-negative, only soft hits with gate >= threshold remain reused; lower-gate hits fall back to compute.",
+    )
+    parser.add_argument(
+        "--residual_gate_accept_grid",
+        nargs="+",
+        type=float,
+        default=[0.0, 0.2, 0.3, 0.4, 0.5],
+        help="Candidate gate thresholds when --residual_gate_accept_threshold is negative.",
     )
     parser.add_argument(
         "--residual_embedding_source",
@@ -464,6 +490,12 @@ def build_parser():
         type=int,
         default=0,
         help="Offline-only: augment each residual training node with up to this many extra train/train_val anchors.",
+    )
+    parser.add_argument(
+        "--residual_positive_error_max",
+        type=float,
+        default=-1.0,
+        help="Offline-only: only keep extra positive anchors whose oracle cosine error to the target node is at most this value. Negative disables filtering.",
     )
     parser.add_argument(
         "--residual_offline_extra_query_nodes",
