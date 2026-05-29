@@ -344,7 +344,169 @@ mode can control:
 
 其中最核心、最应该主打的是 activation precision depth，因为它直接作用于 GEMM bit-plane datapath，适用 QKV / attention projection / FFN 等主要线性层。
 
-## 9. 当前验证结果
+## 9. ONNXim Hardware Flow
+
+当前已经接入两层硬件仿真闭环：
+
+```text
+Layer A: workload-level hardware proxy
+    从算法结果导出 direct / residual / P8 / P6 / P4 比例，
+    再叠加到 ONNXim Full-P8 GEMM baseline 上。
+
+Layer B: ONNXim internal Graph-Bit execution
+    直接修改 ONNXim GemmWS / SystolicWS，
+    在 GEMM instruction 内部模拟 activation bit-plane early termination。
+```
+
+### 9.1 Workload-Level Proxy
+
+```text
+1. scripts/export_graphbit_workload.py
+   从 residual / Graph-Bit 结果中导出 direct、residual、P8/P6/P4 比例。
+
+2. scripts/onnxim_graphbit_microbench.py
+   为 LLaMA-7B 主要 GEMM 生成 ONNX microbenchmark，并调用 ONNXim 得到 Full-P8 baseline cycles/traffic。
+
+3. scripts/summarize_onnxim_graphbit.py
+   将 workload profile 叠加到 ONNXim baseline，输出 Graph-Bit normalized cycles、traffic 和 energy proxy。
+```
+
+一键运行：
+
+```bash
+bash scripts/run_onnxim_graphbit_sim.sh
+```
+
+默认使用 `SEQ_LEN=64` 做快速 microbenchmark；需要更接近长文本 encoder 时可以：
+
+```bash
+SEQ_LEN=128 bash scripts/run_onnxim_graphbit_sim.sh
+```
+
+输出路径：
+
+```text
+output/onnxim_graphbit/microbench_s64/summary.tsv
+output/onnxim_graphbit/microbench_s64/aggregate.json
+output/onnxim_graphbit/workloads/three_depth_deg_profiles.json
+output/onnxim_graphbit/summary/three_depth_deg_profiles_hardware.tsv
+output/onnxim_graphbit/summary/three_depth_deg_profiles_compact.txt
+```
+
+### 9.2 Internal GemmWS Bit-Plane Execution
+
+ONNXim 内部已经加入 Graph-Bit knobs：
+
+```json
+{
+  "graphbit_enable": true,
+  "graphbit_precision_depth": 6,
+  "graphbit_full_depth": 8,
+  "graphbit_min_depth": 4,
+  "graphbit_bound_enable": false,
+  "graphbit_bound_tolerance": 0.0,
+  "graphbit_bound_scale": 1.0,
+  "graphbit_memory_scale": 1.0
+}
+```
+
+代码路径：
+
+```text
+ONNXim/src/SimulationConfig.h
+ONNXim/src/Common.h
+ONNXim/src/Common.cc
+ONNXim/src/operations/GemmWS.cc
+ONNXim/src/SystolicWS.cc
+ONNXim/src/SystolicWS.h
+```
+
+实现方式：
+
+```text
+GemmWS:
+    生成 MOVIN activation 和 GEMM_PRELOAD instruction 时，
+    标注 graphbit_full_depth / config_depth / effective_depth / remaining_bound。
+
+    activation MOVIN 的 src_addrs 根据 effective_depth/full_depth 截短，
+    用来模拟低位 activation bit-plane 不再进入 SRAM/array。
+
+SystolicWS:
+    get_inst_compute_cycles() 按 effective_depth/full_depth 缩放 GEMM cycle，
+    代表 bit-serial PE array 少执行低位 bit-plane。
+
+    print_stats() 输出：
+        GraphBit Inst
+        BoundStops
+        AvgDepth
+        AvgSavedBitplanes
+```
+
+固定 depth 运行：
+
+```bash
+python scripts/onnxim_graphbit_microbench.py \
+  --seq-len 64 \
+  --workspace output/onnxim_graphbit/microbench_s64_internal_p6 \
+  --graphbit-depth 6 \
+  --action all
+```
+
+predictor-free bound estimator 运行：
+
+```bash
+python scripts/onnxim_graphbit_microbench.py \
+  --seq-len 64 \
+  --workspace output/onnxim_graphbit/microbench_s64_internal_bound_t006 \
+  --graphbit-depth 8 \
+  --graphbit-bound-enable \
+  --graphbit-bound-tolerance 0.06 \
+  --action all
+```
+
+这个 bound mode 的含义是：虽然外部给的是 P8 上限，但 GemmWS 会逐 depth 检查 remaining low-bit bound，只要 bound 小于 tolerance，就提前停止低位 bit-plane。
+
+当前 smoke result，LLaMA-7B GEMM microbench，seq_len=64，32 layers：
+
+| Mode | Cycles | Cycle Ratio | DRAM Read Req | Read Ratio | AvgDepth |
+|---|---:|---:|---:|---:|---:|
+| P8 baseline | 43,159,520 | 1.000 | 466,386,944 | 1.000 | - |
+| Internal P6 | 41,112,672 | 0.953 | 450,977,792 | 0.967 | 6.0 |
+| Internal P4 | 40,355,424 | 0.935 | 435,568,640 | 0.934 | 4.0 |
+| Bound P8, tol=0.06 | 42,442,784 | 0.983 | 458,682,368 | 0.983 | 4.0 |
+
+P6/P4 的 read request 下降来自 activation MOVIN bit-plane 截短；cycle 下降来自 GEMM_PRELOAD 的 effective bit-plane execution。Bound mode 的日志中 `BoundStops` 等于 GraphBit GEMM instruction 数，说明 early termination 是在 ONNXim 内部触发的，而不是外部后处理。
+
+当前 smoke result 使用 LLaMA-7B GEMM microbench：
+
+```text
+seq_len = 64
+layers  = 32
+Full-P8 encoder baseline cycles = 43,159,520
+Full-P8 DRAM requests ~= 471,826,432
+```
+
+Degree Graph-Bit 的硬件 proxy 结果：
+
+| Dataset | Setting | Reuse | Drop | Norm cycles | Norm traffic | Energy proxy | Bounded cycles |
+|---|---|---:|---:|---:|---:|---:|---:|
+| Cora | h4 T20 balanced | 4.5% | 2.45% | 0.692 | 0.863 | 0.769 | 0.653 |
+| Cora | h4 T22 conservative | 12.1% | 2.95% | 0.683 | 0.812 | 0.741 | 0.650 |
+| PubMed | h8 T16 conservative | 14.4% | 2.13% | 0.664 | 0.789 | 0.720 | 0.632 |
+| PubMed | h8 T20 conservative | 33.5% | 3.43% | 0.517 | 0.616 | 0.562 | 0.492 |
+
+这里：
+
+```text
+Norm cycles = 相对所有节点都跑 Full-P8 encoder 的周期比例
+Norm traffic = 相对 Full-P8 的访存请求比例估计
+Energy proxy = 0.55 * cycles + 0.45 * traffic
+Bounded cycles = predictor-free bounded early termination 进一步允许 P6/P4 少跑少量低位 bit-plane 的估计
+```
+
+注意：上面的 workload-level proxy 仍然有用，因为它负责组合 direct/residual/P8/P6/P4 的全栈比例；但 ONNXim internal path 已经把 P8/P6/P4 下沉到 GemmWS/SystolicWS 内部。后续要做的是把 workload profile 自动映射成多次 internal ONNXim run 并汇总，而不是只在 Python 后处理里缩放。
+
+## 10. 当前验证结果
 
 LLaMA-7B / Arxiv，10 runs：
 
@@ -368,7 +530,7 @@ graph risk 尤其 Degree/propagation risk 能比 Random 更稳地保护精度。
 ../results/GRAPH_BIT_VALIDATION_SUMMARY.md
 ```
 
-## 10. 论文表述建议
+## 11. 论文表述建议
 
 推荐主贡献表述：
 

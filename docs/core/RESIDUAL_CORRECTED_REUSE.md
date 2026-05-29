@@ -589,6 +589,44 @@ output/residual_reuse/common_param_sweep_20260528/summary_compact.txt
 output/residual_reuse/common_param_sweep_20260528/summary.tsv
 ```
 
+复现当前主线共同参数 `h8_54_T40` 的命令如下。这一命令只评估 residual reuse 前端，后续 Graph-Bit / full-stack 实验会固定沿用这组前端参数。
+
+```bash
+python -m GraphhopSimhash \
+  --datasets cora pubmed \
+  --runs 3 \
+  --experiment_suite residual_reuse \
+  --learned_hash_epochs 10 \
+  --learned_hash_dim 128 \
+  --hash_heads_per_route 8 \
+  --hamming_only_acceptor \
+  --enable_score_gate \
+  --allow_rare_fuzzy \
+  --score_reuse_threshold 40 \
+  --score_propagation_weight 3 \
+  --score_graph_context_weight 1 \
+  --score_low_unique_weight 1 \
+  --radius 2 \
+  --main_hash_head_bits 16 16 16 16 16 16 16 16 \
+  --residual_embedding_source data_x \
+  --residual_fit_profile st \
+  --residual_hard_min_support_hits 5 \
+  --residual_soft_min_support_hits 4 \
+  --residual_rank 64 \
+  --residual_epochs 200 \
+  --residual_max_train_pairs 2048 \
+  --residual_train_split train_val \
+  --residual_min_dist 1.0 \
+  --residual_alpha_grid 0 0.0625 0.125 0.25
+```
+
+对应日志：
+
+```text
+output/residual_reuse/common_param_sweep_20260528/logs/cora_h8_54_T40_runs3.log
+output/residual_reuse/common_param_sweep_20260528/logs/pubmed_h8_54_T40_runs3.log
+```
+
 核心表如下。`minReuse` 是 Cora/PubMed 两者中较低的 reuse，`maxDrop` 是两者中较高的 drop；因此它们更适合判断“共同参数”是否稳健。
 
 | Config | Heads | Hard / Soft | T | Cora Reuse | Cora Drop | PubMed Reuse | PubMed Drop | minReuse | maxDrop |

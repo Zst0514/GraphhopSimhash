@@ -134,6 +134,22 @@ SimulationConfig initialize_config(json config) {
   parsed_config.scheduler_type = get_config_value<std::string>(config, "scheduler");
   parsed_config.precision = get_config_value<uint32_t>(config, "precision");
   parsed_config.layout = get_config_value<std::string>(config, "layout");
+  if (config.contains("graphbit_enable"))
+    parsed_config.graphbit_enable = config["graphbit_enable"];
+  if (config.contains("graphbit_bound_enable"))
+    parsed_config.graphbit_bound_enable = config["graphbit_bound_enable"];
+  if (config.contains("graphbit_full_depth"))
+    parsed_config.graphbit_full_depth = config["graphbit_full_depth"];
+  if (config.contains("graphbit_precision_depth"))
+    parsed_config.graphbit_precision_depth = config["graphbit_precision_depth"];
+  if (config.contains("graphbit_min_depth"))
+    parsed_config.graphbit_min_depth = config["graphbit_min_depth"];
+  if (config.contains("graphbit_bound_tolerance"))
+    parsed_config.graphbit_bound_tolerance = config["graphbit_bound_tolerance"];
+  if (config.contains("graphbit_bound_scale"))
+    parsed_config.graphbit_bound_scale = config["graphbit_bound_scale"];
+  if (config.contains("graphbit_memory_scale"))
+    parsed_config.graphbit_memory_scale = config["graphbit_memory_scale"];
 
   if (config.contains("partition")) {
     for (int i=0; i<parsed_config.num_cores; i++) {

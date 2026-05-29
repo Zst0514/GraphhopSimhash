@@ -71,6 +71,21 @@ struct SimulationConfig {
   uint32_t full_precision = 4;
   std::string layout;
 
+  /* Graph-Bit precision-depth execution.
+   *
+   * These knobs let a GemmWS tile execute only the high-order activation
+   * bit-planes that are required by the graph-risk selected precision depth.
+   * full_depth is normally 8 for W4A8, while precision_depth can be 8/6/4.
+   */
+  bool graphbit_enable = false;
+  bool graphbit_bound_enable = false;
+  uint32_t graphbit_full_depth = 8;
+  uint32_t graphbit_precision_depth = 8;
+  uint32_t graphbit_min_depth = 4;
+  float graphbit_bound_tolerance = 0.0f;
+  float graphbit_bound_scale = 1.0f;
+  float graphbit_memory_scale = 1.0f;
+
   /*
    * This map stores the partition information: <partition_id, core_id>
    *

@@ -32,7 +32,8 @@ using json = nlohmann::json;
 typedef uint64_t addr_type;
 typedef uint64_t cycle_type;
 
-typedef struct {
+typedef struct
+{
   uint32_t id;
   addr_type dram_address;
   addr_type spad_address;
@@ -46,7 +47,8 @@ typedef struct {
   int buffer_id;
 } MemoryAccess;
 
-enum class Opcode {
+enum class Opcode
+{
   MOVIN,
   MOVOUT,
   MOVOUT_POOL,
@@ -68,7 +70,8 @@ enum class Opcode {
   BAR
 };
 struct Tile;
-typedef struct {
+typedef struct
+{
   Opcode opcode;
   cycle_type start_cycle;
   cycle_type finish_cycle;
@@ -76,12 +79,12 @@ typedef struct {
   std::vector<std::string> dependent_ids;
   std::string dest_id;
   addr_type dest_addr;
-  uint32_t size;          // Used for sram allocation. Multiple of _config.dram_req_size
+  uint32_t size; // Used for sram allocation. Multiple of _config.dram_req_size
   uint32_t compute_size;
   std::vector<addr_type> src_addrs;
   int spad_id;
   int accum_spad_id;
-  uint32_t operand_id  = 0;
+  uint32_t operand_id = 0;
   addr_type base_addr;
 
   uint32_t tile_m;
@@ -91,12 +94,21 @@ typedef struct {
   bool src_from_accum = false;
   bool zero_init = false;
   bool last_inst = false;
-  Tile* my_tile;
+  Tile *my_tile;
+
+  bool graphbit_enabled = false;
+  uint32_t graphbit_full_depth = 8;
+  uint32_t graphbit_config_depth = 8;
+  uint32_t graphbit_effective_depth = 8;
+  double graphbit_remaining_bound = 0.0;
+  uint32_t graphbit_original_size = 0;
   std::string to_string();
 } Instruction;
 
-struct Tile {
-  enum class Status {
+struct Tile
+{
+  enum class Status
+  {
     INITIALIZED,
     RUNNING,
     FINISH,
@@ -123,22 +135,24 @@ struct Tile {
   int accum_spad_id;
   int core_id = -1;
   bool inst_finished = false;
-} ;
+};
 
 uint32_t generate_id();
 uint32_t generate_mem_access_id();
 addr_type allocate_address(uint32_t size);
 SimulationConfig initialize_config(json config);
 template <typename... Args>
-std::string name_gen(Args... args) {
-    std::vector<std::string> strs = {args...};
-    assert(!strs.empty());
-    std::string ret = "";
-    for (auto &str : strs) {
-        ret += str + ".";
-    }
-    ret.resize(ret.size() - 1);
-    return ret;
+std::string name_gen(Args... args)
+{
+  std::vector<std::string> strs = {args...};
+  assert(!strs.empty());
+  std::string ret = "";
+  for (auto &str : strs)
+  {
+    ret += str + ".";
+  }
+  ret.resize(ret.size() - 1);
+  return ret;
 }
 uint32_t ceil_div(uint32_t src, uint32_t div);
 

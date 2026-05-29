@@ -268,23 +268,32 @@ FFN channel gating
 
 ## 7. 最近要完成的代码任务
 
-按优先级：
+当前已经完成第一版 wrapper flow：
 
 ```text
-1. 新增 scripts/export_graphbit_workload.py
+scripts/export_graphbit_workload.py
    从 residual_precision_depth / precision_depth 输出中提取 workload profile JSON。
 
-2. 新增 scripts/onnxim_graphbit_microbench.py
+scripts/onnxim_graphbit_microbench.py
    生成或调用 ONNX GEMM microbenchmark，并整理 ONNXim baseline 指标。
 
-3. 新增 scripts/summarize_onnxim_graphbit.py
+scripts/summarize_onnxim_graphbit.py
    把 workload profile 和 ONNXim baseline 合成 Graph-Bit cycles/traffic 表。
 
-4. 新增 output/onnxim_graphbit/
-   保存 profile、ONNXim log、summary table。
+scripts/run_onnxim_graphbit_sim.sh
+   一键执行上面三步。
 
-5. 更新 docs/npu/GRAPH_BIT_NPU_DESIGN.md
-   加入 ONNXim 仿真流程和硬件收益结果。
+output/onnxim_graphbit/
+   保存 profile、ONNXim log、summary table。
 ```
 
-这套流程完成后，项目就从“算法模拟”推进到“Graph-conditioned bit-serial NPU 仿真”。
+这套流程让项目从“算法模拟”推进到“Graph-conditioned bit-serial NPU proxy 仿真”。
+
+下一步代码优先级：
+
+```text
+1. 在 ONNXim 内部新增 GraphBitGemm / GraphBitGemmWS。
+2. 将 P8/P6/P4 从后处理 scaling 下沉到 GEMM tile execution。
+3. 加入 bit-plane sequencer、partial-sum scoreboard、remaining-bound estimator。
+4. 让每个 node-batch 的 graph_tolerance 控制 low-bit early termination。
+```

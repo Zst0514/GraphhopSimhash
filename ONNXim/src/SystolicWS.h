@@ -11,5 +11,9 @@ class SystolicWS : public Core {
   virtual cycle_type get_inst_compute_cycles(std::unique_ptr<Instruction>& inst) override;
   uint32_t _stat_systolic_inst_issue_count = 0;
   uint32_t _stat_systolic_preload_issue_count = 0;
+  uint64_t _stat_graphbit_inst_count = 0;
+  uint64_t _stat_graphbit_bound_stop_count = 0;
+  uint64_t _stat_graphbit_effective_bitplanes = 0;
+  uint64_t _stat_graphbit_saved_bitplanes = 0;
   cycle_type get_vector_compute_cycles(std::unique_ptr<Instruction>& inst);
 };
