@@ -13,11 +13,9 @@
 
 - [GRAPH_BIT_NPU_DESIGN.md](npu/GRAPH_BIT_NPU_DESIGN.md): Graph-Bit NPU 主线设计，包含 datapath、scheduler、buffer、cost model。
 - [GRAPH_CONDITIONED_BIT_SERIAL_EXECUTION.md](npu/GRAPH_CONDITIONED_BIT_SERIAL_EXECUTION.md): Graph-conditioned predictor-free bit-serial execution，包含风险定义、阈值管理和验证接口。
-- [HIERARCHICAL_ENCODER_NPU_DESIGN.md](npu/HIERARCHICAL_ENCODER_NPU_DESIGN.md): P0/P1/P2/P3 分层 encoder 执行框架。
-- [GRAPH_AWARE_ENCODER_NPU_PROPOSAL.md](npu/GRAPH_AWARE_ENCODER_NPU_PROPOSAL.md): Graph-aware encoder NPU 方案探索。
-- [NPU_ADAPTIVE_ENCODER_EXPERIMENTS.md](npu/NPU_ADAPTIVE_ENCODER_EXPERIMENTS.md): NPU 实验路线。
-- [PRECISION_DEPTH_ABLATION.md](npu/PRECISION_DEPTH_ABLATION.md): precision-depth ablation。
-- [FFN_CHANNEL_GATING.md](npu/FFN_CHANNEL_GATING.md): FFN gating 原型，当前作为辅助消融，不是主线。
+- [GRAPH_BIT_PROXY_EXPERIMENTS.md](npu/GRAPH_BIT_PROXY_EXPERIMENTS.md): Graph-Bit 的 embedding-pool proxy 实验、precision-depth ablation 和命令。
+
+已删除早期探索文档：partial-depth / token budget / FFN channel gating / graph-aware proposal 这些路线不再作为主线，相关结论已合并到 [PROJECT_ROADMAP.md](PROJECT_ROADMAP.md) 的“当前不作为主线的方向”。
 
 ## Results
 

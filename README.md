@@ -91,8 +91,8 @@ P3: full W4A8 encoder
 对应完整说明见：
 
 ```text
-docs/npu/HIERARCHICAL_ENCODER_NPU_DESIGN.md
 docs/npu/GRAPH_BIT_NPU_DESIGN.md
+docs/npu/GRAPH_CONDITIONED_BIT_SERIAL_EXECUTION.md
 docs/core/RESIDUAL_CORRECTED_REUSE.md
 docs/results/GRAPH_BIT_VALIDATION_SUMMARY.md
 ```

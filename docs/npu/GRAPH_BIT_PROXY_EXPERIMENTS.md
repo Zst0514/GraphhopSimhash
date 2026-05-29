@@ -1,6 +1,8 @@
-# Graph-Conditioned Precision-Depth Ablation
+# Graph-Bit Proxy Experiments
 
-本文档记录当前新增的 graph-conditioned precision-depth 模拟实验。目标是验证一个更贴近 NPU datapath 的想法：
+本文档记录 Graph-Bit 的 embedding-pool proxy 实验。它不是最终硬件仿真，而是用不同 activation precision-depth 的 embedding pool 近似 bit-serial early termination，先验证 graph risk 是否能指导 NPU 算术努力分配。
+
+核心问题：
 
 ```text
 高风险节点使用完整 P8 / W4A8 计算；
@@ -9,6 +11,12 @@
 ```
 
 这里的 P8/P6/P5/P4 是对 bit-serial / bit-grained early termination 的离线近似：先生成不同 activation bit-depth 的 embedding pool，再在同一个下游 GNN 上比较不同路由策略的精度和成本。
+
+真正的 NPU 内部 bit-serial 设计见：
+
+```text
+docs/npu/GRAPH_CONDITIONED_BIT_SERIAL_EXECUTION.md
+```
 
 ## 1. 实现位置
 
