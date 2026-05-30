@@ -207,16 +207,11 @@ fixed traffic:
     weight reads and output writes remain unless a separate weight-stationary / fused-FFN design attacks them
 ```
 
-The demand-fetch model is documented in:
+The consolidated NPU design is documented in:
 
 ```text
-docs/npu/GRAPH_BIT_DEMAND_FETCH_MODEL.md
-```
-
-The component-level NPU dataflow model is documented in:
-
-```text
-docs/npu/GRAPH_BIT_NPU_DATAFLOW_MODEL.md
+docs/npu/GRAPH_BIT_NPU_DESIGN.md
+docs/npu/GRAPH_BIT_TRACE_DRIVEN_SCHEDULER.md
 ```
 
 ## Repository Layout
@@ -286,8 +281,7 @@ docs/README.md
 docs/PROJECT_ROADMAP.md
 docs/core/RESIDUAL_CORRECTED_REUSE.md
 docs/npu/GRAPH_BIT_NPU_DESIGN.md
-docs/npu/GRAPH_CONDITIONED_BIT_SERIAL_EXECUTION.md
-docs/npu/GRAPH_BIT_NPU_DATAFLOW_MODEL.md
+docs/npu/GRAPH_BIT_TRACE_DRIVEN_SCHEDULER.md
 docs/results/GRAPH_BIT_VALIDATION_SUMMARY.md
 ```
 

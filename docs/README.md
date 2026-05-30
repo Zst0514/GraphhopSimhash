@@ -12,16 +12,10 @@
 ## NPU
 
 - [GRAPH_BIT_NPU_DESIGN.md](npu/GRAPH_BIT_NPU_DESIGN.md): Graph-Bit NPU 主线设计，包含 datapath、scheduler、buffer、cost model。
-- [GRAPH_CONDITIONED_BIT_SERIAL_EXECUTION.md](npu/GRAPH_CONDITIONED_BIT_SERIAL_EXECUTION.md): Graph-conditioned predictor-free bit-serial execution，包含风险定义、阈值管理和验证接口。
-- [GRAPH_BIT_DEMAND_FETCH_MODEL.md](npu/GRAPH_BIT_DEMAND_FETCH_MODEL.md): bit-plane demand-fetch / risk-bucket batching / utilization 的保守硬件建模。
-- [GRAPH_BIT_NPU_DATAFLOW_MODEL.md](npu/GRAPH_BIT_NPU_DATAFLOW_MODEL.md): bit-plane-major activation buffer、risk-bucket scheduler、weight-stationary tile reuse 的组件级数据流模型。
-- [GRAPH_BIT_BOUND_IMPLEMENTATION.md](npu/GRAPH_BIT_BOUND_IMPLEMENTATION.md): predictor-free tile-level bound 的公式、ONNXim 实现和验证命令。
-- [GRAPH_BIT_BUCKET_SCHEDULER_SWEEP.md](npu/GRAPH_BIT_BUCKET_SCHEDULER_SWEEP.md): Graph-Bit risk-bucket micro-batch / weight-stationary tile reuse sweep。
-- [GRAPH_BIT_FULLSTACK_HARDWARE_TABLE.md](npu/GRAPH_BIT_FULLSTACK_HARDWARE_TABLE.md): residual/reuse workload、ONNXim stop-depth trace、bucket feasibility 合成后的 full-stack 硬件主表。
 - [GRAPH_BIT_TRACE_DRIVEN_SCHEDULER.md](npu/GRAPH_BIT_TRACE_DRIVEN_SCHEDULER.md): per-node trace 导出、bucket scheduler replay、真实 W tile load / Wscale 统计。
 - [GRAPH_BIT_PROXY_EXPERIMENTS.md](npu/GRAPH_BIT_PROXY_EXPERIMENTS.md): Graph-Bit 的 embedding-pool proxy 实验、precision-depth ablation 和命令。
 
-已删除早期探索文档：partial-depth / token budget / FFN channel gating / graph-aware proposal 这些路线不再作为主线，相关结论已合并到 [PROJECT_ROADMAP.md](PROJECT_ROADMAP.md) 的“当前不作为主线的方向”。
+已删除/合并早期探索文档：partial-depth / token budget / FFN channel gating，以及 Graph-Bit 的 demand-fetch、bound、bucket、dataflow 分散文档。主线内容已合并到 [GRAPH_BIT_NPU_DESIGN.md](npu/GRAPH_BIT_NPU_DESIGN.md) 和 [GRAPH_BIT_TRACE_DRIVEN_SCHEDULER.md](npu/GRAPH_BIT_TRACE_DRIVEN_SCHEDULER.md)。
 
 ## Results
 

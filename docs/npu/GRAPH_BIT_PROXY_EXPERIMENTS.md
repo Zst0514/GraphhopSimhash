@@ -15,7 +15,7 @@
 真正的 NPU 内部 bit-serial 设计见：
 
 ```text
-docs/npu/GRAPH_CONDITIONED_BIT_SERIAL_EXECUTION.md
+docs/npu/GRAPH_BIT_NPU_DESIGN.md
 ```
 
 ## 1. 实现位置

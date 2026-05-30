@@ -615,7 +615,8 @@ Takeaway:
 Detailed model:
 
 ```text
-docs/npu/GRAPH_BIT_DEMAND_FETCH_MODEL.md
+docs/npu/GRAPH_BIT_NPU_DESIGN.md
+docs/npu/GRAPH_BIT_TRACE_DRIVEN_SCHEDULER.md
 ```
 
 ## Closure Suite And Dynamic-Depth Follow-Up
