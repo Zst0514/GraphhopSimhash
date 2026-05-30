@@ -278,6 +278,10 @@ def make_row(
     base: dict[str, Any],
     components: dict[str, dict[str, Any]],
     sram_fit: bool,
+    scheduler_nodes: int = 0,
+    scheduler_cycles_per_node: float = 0.0,
+    scheduler_read_requests_per_node: float = 0.0,
+    scheduler_write_requests_per_node: float = 0.0,
 ) -> dict[str, Any]:
     composed = compose_from_exec_counts(
         exec_counts=exec_counts,
@@ -287,15 +291,40 @@ def make_row(
         components=components,
     )
     hist_counts = {DEPTH_BY_KEY[key]: count for key, count in exec_counts.items()}
+    base_cycles = float(base.get("cycles", 0.0) or 0.0)
+    base_traffic = traffic(base)
+    scheduler_cycles = 0.0
+    scheduler_traffic = 0.0
+    if scheduler_nodes > 0:
+        if base_cycles > 0.0:
+            scheduler_cycles = (
+                scheduler_nodes
+                / max(1, total_nodes)
+                * float(scheduler_cycles_per_node)
+                / base_cycles
+            )
+        req_per_node = float(scheduler_read_requests_per_node) + float(
+            scheduler_write_requests_per_node
+        )
+        if base_traffic > 0.0:
+            scheduler_traffic = scheduler_nodes / max(1, total_nodes) * req_per_node / base_traffic
+    cycles = composed["cycles"] + scheduler_cycles
+    traff = composed["traffic"] + scheduler_traffic
+    energy = 0.5 * cycles + 0.5 * traff
     return {
         "method": method,
         "reuse": reuse_count / total_nodes,
         "direct": direct_count / total_nodes,
         "residual": residual_count / total_nodes,
         "miss": miss_count / total_nodes,
-        "cycles": composed["cycles"],
-        "traffic": composed["traffic"],
-        "energy": composed["energy"],
+        "cycles": cycles,
+        "traffic": traff,
+        "energy": energy,
+        "component_cycles": composed["cycles"],
+        "component_traffic": composed["traffic"],
+        "scheduler_cycles": scheduler_cycles,
+        "scheduler_traffic": scheduler_traffic,
+        "scheduler_nodes": scheduler_nodes,
         "drop": drop,
         "avg_depth": composed["avg_depth"],
         "depth_hist": hist_from_counts(hist_counts, max(1, miss_count)),
@@ -324,6 +353,27 @@ def main() -> None:
     parser.add_argument("--psum-bits", type=int, default=32)
     parser.add_argument("--output-bits", type=int, default=16)
     parser.add_argument("--buffer-factor", type=float, default=2.0)
+    parser.add_argument(
+        "--bucket-overhead-cycles-per-node",
+        type=float,
+        default=0.0,
+        help=(
+            "Optional risk-bucket enqueue/sort overhead in cycles per miss node. "
+            "Default 0 assumes metadata bucketing is overlapped or ignored."
+        ),
+    )
+    parser.add_argument(
+        "--bucket-overhead-read-requests-per-node",
+        type=float,
+        default=0.0,
+        help="Optional risk-bucket metadata read requests per miss node.",
+    )
+    parser.add_argument(
+        "--bucket-overhead-write-requests-per-node",
+        type=float,
+        default=0.0,
+        help="Optional risk-bucket metadata write requests per miss node.",
+    )
     args = parser.parse_args()
 
     meta, rows = load_trace(args.trace)
@@ -435,6 +485,10 @@ def main() -> None:
                 base=base,
                 components=components,
                 sram_fit=batch <= buffers.max_batch(),
+                scheduler_nodes=miss_count,
+                scheduler_cycles_per_node=args.bucket_overhead_cycles_per_node,
+                scheduler_read_requests_per_node=args.bucket_overhead_read_requests_per_node,
+                scheduler_write_requests_per_node=args.bucket_overhead_write_requests_per_node,
             )
         )
 
@@ -457,6 +511,11 @@ def main() -> None:
         "cycles",
         "traffic",
         "energy",
+        "component_cycles",
+        "component_traffic",
+        "scheduler_cycles",
+        "scheduler_traffic",
+        "scheduler_nodes",
         "drop",
         "avg_depth",
         "depth_hist",
@@ -472,7 +531,22 @@ def main() -> None:
         for row in out_rows:
             out = dict(row)
             out["depth_hist"] = fmt_hist(row["depth_hist"])
-            for key in ("reuse", "direct", "residual", "miss", "cycles", "traffic", "energy", "avg_depth", "wscale", "tail_util"):
+            for key in (
+                "reuse",
+                "direct",
+                "residual",
+                "miss",
+                "cycles",
+                "traffic",
+                "energy",
+                "component_cycles",
+                "component_traffic",
+                "scheduler_cycles",
+                "scheduler_traffic",
+                "avg_depth",
+                "wscale",
+                "tail_util",
+            ):
                 out[key] = f"{float(out[key]):.6f}"
             out["drop"] = f"{float(out['drop']):.3f}"
             writer.writerow(out)
@@ -511,18 +585,26 @@ def main() -> None:
         f"components: {args.components_root}",
         f"dataset={meta.get('dataset')} | seed={meta.get('seed')} | config={meta.get('config')} | priority={meta.get('priority')}",
         f"nodes={total_nodes} | reuse={fmt_pct(reuse_count/total_nodes)} | miss={fmt_pct(miss_count/total_nodes)} | max_sram_batch={buffers.max_batch()}",
+        (
+            "bucket_overhead="
+            f"{args.bucket_overhead_cycles_per_node:g} cycles/node, "
+            f"{args.bucket_overhead_read_requests_per_node:g}+"
+            f"{args.bucket_overhead_write_requests_per_node:g} requests/node"
+        ),
         "",
         (
             f"{'Method':<18s} {'Reuse':>7s} {'Miss':>7s} {'Cycles':>8s} "
-            f"{'Traffic':>8s} {'Energy':>8s} {'Drop':>7s} {'AvgD':>6s} "
-            f"{'Hist(miss)':<24s} {'Wloads':>7s} {'Wscale':>7s} {'Tail':>7s} {'SRAM':>5s}"
+            f"{'Traffic':>8s} {'Energy':>8s} {'SchedC':>7s} {'SchedT':>7s} "
+            f"{'Drop':>7s} {'AvgD':>6s} {'Hist(miss)':<24s} "
+            f"{'Wloads':>7s} {'Wscale':>7s} {'Tail':>7s} {'SRAM':>5s}"
         ),
-        "-" * 132,
+        "-" * 150,
     ]
     for row in out_rows:
         lines.append(
             f"{row['method']:<18s} {fmt_pct(row['reuse']):>7s} {fmt_pct(row['miss']):>7s} "
             f"{row['cycles']:8.3f} {row['traffic']:8.3f} {row['energy']:8.3f} "
+            f"{row['scheduler_cycles']:7.4f} {row['scheduler_traffic']:7.4f} "
             f"{row['drop']:6.2f}% {row['avg_depth']:6.2f} {fmt_hist(row['depth_hist']):<24s} "
             f"{int(row['wloads']):7d} {row['wscale']:7.3f} {fmt_pct(row['tail_util']):>7s} {row['sram_fit']:>5s}"
         )

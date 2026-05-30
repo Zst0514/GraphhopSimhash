@@ -136,7 +136,7 @@ output/graphbit_trace_replay/cora_h8_54_T40_boundclean_quick/replay/cora_seed42_
 | OriginalOrder-b64 | 27.8% | 72.2% | 0.290 | 0.191 | 0.241 | 2.13% | 7.87 | D6:6.5%, D8:93.5% | 31 | 0.252 |
 | RiskBucket-b64 | 27.8% | 72.2% | 0.289 | 0.189 | 0.239 | 2.13% | 6.10 | D5:30.0%, D6:50.0%, D8:20.0% | 33 | 0.268 |
 
-## 4. 如何解读
+## 4. Component Lookup
 
 `component_lookup.tsv` 展开第 3 步的 ONNXim cost lookup。每一行对应一个 ONNXim component case：
 
@@ -161,6 +161,44 @@ energy_norm:
 ```
 
 trace replay 主表中的 `Cycles / Traffic / Energy` 就是按真实 miss node depth histogram 和调度方式，从这些 component rows 组合出来的。
+
+## 5. Bucket 形成开销
+
+默认主表不把 risk bucket 形成的 metadata enqueue 开销计入 `Cycles / Traffic / Energy`：
+
+```text
+bucket_overhead = 0 cycles/node, 0+0 requests/node
+```
+
+这个默认表示：
+
+```text
+1. 每个 miss node 的 risk / stop-depth metadata 已经由前端 routing 阶段产生；
+2. bucket enqueue 是轻量 metadata 操作；
+3. 第一版模型把它视为和 batch 准备 / 前端 routing 重叠。
+```
+
+如果要显式加入该开销，可以使用：
+
+```bash
+--bucket-overhead-cycles-per-node 16 \
+--bucket-overhead-read-requests-per-node 1 \
+--bucket-overhead-write-requests-per-node 1
+```
+
+输出表会增加：
+
+```text
+SchedC:
+    bucket enqueue / metadata scheduling 的归一化 cycles。
+
+SchedT:
+    bucket enqueue / metadata scheduling 的归一化 traffic。
+```
+
+当前 Cora quick probe 中，即使设置 `16 cycles/node` 和 `1 read + 1 write request/node`，`SchedC/SchedT` 在三位小数主表中仍接近 0，因为它相对于 LLaMA GEMM component cycles 和 DRAM request 规模很小。后续如果采用更细粒度的 tile-level event trace，可以把这部分从 metadata enqueue 扩展成更完整的 scheduler pipeline 模型。
+
+## 6. 如何解读
 
 这张表最重要的不是单个 cycles 数字，而是 `Wloads / Wscale / AvgD` 已经由真实 trace replay 得到：
 
@@ -194,7 +232,7 @@ RiskBucket:
     同时保留 D5/D6/D8 的 stop-depth 分布。
 ```
 
-## 5. 当前结论
+## 7. 当前结论
 
 当前实现把 Graph-Bit 硬件证据链推进到：
 
