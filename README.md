@@ -199,6 +199,12 @@ The demand-fetch model is documented in:
 docs/npu/GRAPH_BIT_DEMAND_FETCH_MODEL.md
 ```
 
+The component-level NPU dataflow model is documented in:
+
+```text
+docs/npu/GRAPH_BIT_NPU_DATAFLOW_MODEL.md
+```
+
 ## Repository Layout
 
 ```text
@@ -267,6 +273,7 @@ docs/PROJECT_ROADMAP.md
 docs/core/RESIDUAL_CORRECTED_REUSE.md
 docs/npu/GRAPH_BIT_NPU_DESIGN.md
 docs/npu/GRAPH_CONDITIONED_BIT_SERIAL_EXECUTION.md
+docs/npu/GRAPH_BIT_NPU_DATAFLOW_MODEL.md
 docs/results/GRAPH_BIT_VALIDATION_SUMMARY.md
 ```
 
@@ -579,6 +586,36 @@ This reuses an existing workload and reruns only the demand-fetch model:
 output/graphbit_predictor_free/pubmed_h8_76_T40/demand_fetch_model/
 ```
 
+### 6. Component-Level NPU Dataflow Model
+
+This model answers what early stop actually skips:
+
+```text
+ordinary byte-major A8:
+    cannot reduce activation traffic
+
+plane-group-major activation buffer:
+    can skip low activation plane-group fetches
+
+risk-bucket scheduling:
+    prevents one P8 node from dragging a low-risk batch to P8
+
+weight-stationary reuse:
+    amortizes HBM weight tile reads over same-risk batches
+```
+
+Run:
+
+```bash
+bash GraphhopSimhash/scripts/run_graphbit_npu_dataflow_model.sh
+```
+
+Default output:
+
+```text
+output/graphbit_predictor_free/cora_h8_54_T40_dynp5/npu_dataflow_model/
+```
+
 ## ONNXim Integration
 
 ONNXim is integrated under:
@@ -637,6 +674,9 @@ output/graphbit_predictor_free/cora_h8_54_T40/
 
 output/graphbit_predictor_free/cora_h8_54_T40_dynp5/
     Cora dynamic-depth P5 proxy flow
+
+output/graphbit_predictor_free/cora_h8_54_T40_dynp5/npu_dataflow_model/
+    Component-level Graph-Bit NPU dataflow model
 
 output/graphbit_closure/cora/
     Cora demand-fetch closure table

@@ -29,6 +29,24 @@ Predictor-free early-stop:
 docs/npu/GRAPH_CONDITIONED_BIT_SERIAL_EXECUTION.md
 ```
 
+更具体的 NPU 数据流组件模型见：
+
+```text
+docs/npu/GRAPH_BIT_NPU_DATAFLOW_MODEL.md
+```
+
+它把 early stop 拆成：
+
+```text
+byte-major compute mask
+bit-plane / plane-group-major activation demand fetch
+risk-bucket batching
+weight-stationary tile reuse
+psum update gating
+```
+
+用于解释“跳过 bit-plane”如何真正减少 A/W/psum 访问和 PE issue cycles。
+
 ## 1. 系统位置
 
 完整系统可以分成四级：

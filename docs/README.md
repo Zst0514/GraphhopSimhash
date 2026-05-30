@@ -14,6 +14,7 @@
 - [GRAPH_BIT_NPU_DESIGN.md](npu/GRAPH_BIT_NPU_DESIGN.md): Graph-Bit NPU 主线设计，包含 datapath、scheduler、buffer、cost model。
 - [GRAPH_CONDITIONED_BIT_SERIAL_EXECUTION.md](npu/GRAPH_CONDITIONED_BIT_SERIAL_EXECUTION.md): Graph-conditioned predictor-free bit-serial execution，包含风险定义、阈值管理和验证接口。
 - [GRAPH_BIT_DEMAND_FETCH_MODEL.md](npu/GRAPH_BIT_DEMAND_FETCH_MODEL.md): bit-plane demand-fetch / risk-bucket batching / utilization 的保守硬件建模。
+- [GRAPH_BIT_NPU_DATAFLOW_MODEL.md](npu/GRAPH_BIT_NPU_DATAFLOW_MODEL.md): bit-plane-major activation buffer、risk-bucket scheduler、weight-stationary tile reuse 的组件级数据流模型。
 - [GRAPH_BIT_PROXY_EXPERIMENTS.md](npu/GRAPH_BIT_PROXY_EXPERIMENTS.md): Graph-Bit 的 embedding-pool proxy 实验、precision-depth ablation 和命令。
 
 已删除早期探索文档：partial-depth / token budget / FFN channel gating / graph-aware proposal 这些路线不再作为主线，相关结论已合并到 [PROJECT_ROADMAP.md](PROJECT_ROADMAP.md) 的“当前不作为主线的方向”。
