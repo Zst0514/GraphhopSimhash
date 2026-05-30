@@ -1,10 +1,13 @@
 # Graph-Bit NPU Design
 
-本文档是 Graph-Bit NPU 的主设计入口。旧版拆成了很多探索文档，现在统一收敛到三份核心材料：
+本文档是 Graph-Bit NPU 的主设计入口。旧版拆成了很多探索文档，现在统一收敛到四份核心材料：
 
 ```text
 GRAPH_BIT_NPU_DESIGN.md
     设计总览：datapath、scheduler、buffer、cost model、主结论。
+
+GRAPH_BIT_EARLY_STOP_IMPLEMENTATION.md
+    实现细节：CLI、runner、ONNXim/GemmWS、trace replay 中 bit-plane early stop 的代码路径。
 
 GRAPH_BIT_TRACE_DRIVEN_SCHEDULER.md
     仿真证据：真实 per-node trace、bucket replay、W tile load / Wscale 统计。
