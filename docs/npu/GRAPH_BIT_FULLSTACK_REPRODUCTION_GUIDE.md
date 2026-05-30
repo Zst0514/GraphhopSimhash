@@ -1,6 +1,6 @@
 # Graph-Bit Full-Stack Reproduction Guide
 
-本文档是给后续调参和复现实验用的最高层说明。目标是让一个新的同学可以按流程跑出：
+本文档记录 Graph-Bit full-stack 实验的复现流程、参数入口和输出位置，覆盖以下实验产物：
 
 ```text
 1. residual reuse + Graph-Bit accuracy / drop
@@ -10,7 +10,7 @@
 5. FullP8-miss / GraphBit-now / RiskBucket-b32 / RiskBucket-b64 cycles 表
 ```
 
-如果只想理解机制，先看：
+相关机制说明：
 
 ```text
 docs/npu/GRAPH_BIT_END_TO_END_THEORY.md
@@ -18,7 +18,7 @@ docs/npu/GRAPH_BIT_EARLY_STOP_IMPLEMENTATION.md
 docs/npu/GRAPH_BIT_TRACE_DRIVEN_SCHEDULER.md
 ```
 
-本文档重点是：**怎么跑、怎么改参数、输出看哪里**。
+本文档重点是运行流程、参数修改方式和结果读取路径。
 
 ## 1. 当前主线实验是什么
 
@@ -905,4 +905,3 @@ RiskBucket-b64
 ```
 
 如果这四行都有，说明 full-stack reproduction flow 已经跑通。
-
