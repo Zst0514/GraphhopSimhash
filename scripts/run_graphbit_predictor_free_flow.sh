@@ -17,6 +17,7 @@ set -euo pipefail
 #   RESIDUAL_ACCEPT_MODE=separate  test wider accept gate
 #   RESIDUAL_GATE_THRESHOLD=0.60   fixed soft-hit accept threshold
 #   RUN_ALGO=1      rerun residual_precision_depth even if a log exists
+#   BOUND_ENABLE=1  use graph-conditioned runtime-bound depth policies
 #   RUN_ONNXIM=1    rerun ONNXim LLaMA GEMM microbenchmarks
 #   BUILD_ONNXIM=1  try to build ONNXim before running microbenchmarks
 
@@ -43,8 +44,18 @@ RESIDUAL_ACCEPT_MODE="${RESIDUAL_ACCEPT_MODE:-shared}"
 RESIDUAL_GATE_THRESHOLD="${RESIDUAL_GATE_THRESHOLD:-0.60}"
 RESIDUAL_EPOCHS="${RESIDUAL_EPOCHS:-200}"
 RESIDUAL_ALPHA_GRID=(${RESIDUAL_ALPHA_GRID:-0 0.03125 0.0625 0.125 0.25 0.5})
-PRECISION_DEPTH_TAGS=(${PRECISION_DEPTH_TAGS:-W4A6 W4A4})
-PRECISION_DEPTH_BITS=(${PRECISION_DEPTH_BITS:-6 4})
+PRECISION_DEPTH_TAGS=(${PRECISION_DEPTH_TAGS:-W4A6 W4A5 W4A4})
+PRECISION_DEPTH_BITS=(${PRECISION_DEPTH_BITS:-6 5 4})
+BOUND_ENABLE="${BOUND_ENABLE:-1}"
+BOUND_PRIORITIES=(${BOUND_PRIORITIES:-degree tser})
+BOUND_HIGH_MIN="${BOUND_HIGH_MIN:-8}"
+BOUND_MID_MIN="${BOUND_MID_MIN:-6}"
+BOUND_LOW_MIN="${BOUND_LOW_MIN:-4}"
+BOUND_HIGH_TOL="${BOUND_HIGH_TOL:-0.0}"
+BOUND_MID_TOL="${BOUND_MID_TOL:-0.02}"
+BOUND_LOW_TOL="${BOUND_LOW_TOL:-0.04}"
+BOUND_SCALE="${BOUND_SCALE:-1.0}"
+BOUND_TILE_K="${BOUND_TILE_K:-128}"
 
 case "${BUDGET}" in
   p8heavy)
@@ -96,6 +107,21 @@ maybe_seed_existing_log() {
 
 run_algo() {
   local head_bits=(16 16 16 16 16 16 16 16)
+  local bound_args=()
+  if [[ "${BOUND_ENABLE}" == "1" ]]; then
+    bound_args=(
+      --precision_depth_bound_enable
+      --precision_depth_bound_priorities "${BOUND_PRIORITIES[@]}"
+      --precision_depth_bound_high_min_depth "${BOUND_HIGH_MIN}"
+      --precision_depth_bound_mid_min_depth "${BOUND_MID_MIN}"
+      --precision_depth_bound_low_min_depth "${BOUND_LOW_MIN}"
+      --precision_depth_bound_high_tolerance "${BOUND_HIGH_TOL}"
+      --precision_depth_bound_mid_tolerance "${BOUND_MID_TOL}"
+      --precision_depth_bound_low_tolerance "${BOUND_LOW_TOL}"
+      --precision_depth_bound_scale "${BOUND_SCALE}"
+      --precision_depth_bound_tile_k "${BOUND_TILE_K}"
+    )
+  fi
   echo "[$(timestamp)] [Algo] running ${DATASET} ${FRONTEND_ID} residual + Graph-Bit, runs=${RUNS}"
   set +e
   "${PYTHON_BIN}" -m GraphhopSimhash \
@@ -112,6 +138,7 @@ run_algo() {
     --precision_depth_low_ratio "${LOW_RATIO}" \
     --precision_depth_cost_scale 0.50 \
     --precision_depth_fixed_cost 0.15 \
+    "${bound_args[@]}" \
     --radius 2 \
     --hash_heads_per_route 8 \
     --main_hash_head_bits "${head_bits[@]}" \

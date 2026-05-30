@@ -1888,7 +1888,87 @@ def build_precision_depth_policy_configs(args, bits):
         configs.append(("Pred", {"kind": "budget", "priority": "predictor"}))
     if bool(getattr(args, "precision_depth_include_oracle", False)):
         configs.append(("Oracle", {"kind": "budget", "priority": "oracle_damage"}))
+    if bool(getattr(args, "precision_depth_bound_enable", False)):
+        name_by_priority = {
+            "degree": "DegBound",
+            "tser": "TSERBound",
+            "context": "CtxBound",
+            "low_unique": "UniqBound",
+            "random": "RandBound",
+        }
+        for priority in getattr(args, "precision_depth_bound_priorities", ["degree", "tser"]):
+            configs.append((name_by_priority[priority], {"kind": "bound_budget", "priority": priority}))
     return configs
+
+
+def precision_depth_remaining_bit_bound(depth, ref_bit, args):
+    """Predictor-free bound for omitted low activation bit-planes.
+
+    This is a simulation-side proxy for the hardware bound estimator: if execution
+    stops at `depth`, the omitted low bits are bounded by their maximum normalized
+    contribution. The tile factor keeps the bound conservative for larger K tiles.
+    """
+    depth = int(depth)
+    ref_bit = int(ref_bit)
+    if depth >= ref_bit:
+        return 0.0
+    omitted = (2 ** (ref_bit - depth)) - 1
+    denom = max(1, (2 ** ref_bit) - 1)
+    tile_k = max(1, int(getattr(args, "precision_depth_bound_tile_k", 128)))
+    tile_scale = float(np.sqrt(tile_k / 128.0))
+    return float(getattr(args, "precision_depth_bound_scale", 1.0)) * (float(omitted) / float(denom)) * tile_scale
+
+
+def select_runtime_bound_depth(min_depth, tolerance, ref_bit, args):
+    """Return the first depth accepted by runtime bound, respecting min_depth."""
+    min_depth = max(1, min(int(min_depth), int(ref_bit)))
+    tolerance = max(0.0, float(tolerance))
+    for depth in range(min_depth, int(ref_bit) + 1):
+        if precision_depth_remaining_bit_bound(depth, ref_bit, args) <= tolerance:
+            return int(depth)
+    return int(ref_bit)
+
+
+def nearest_available_precision_depth(requested_depth, bits, ref_bit):
+    """Map a runtime depth to the nearest generated embedding pool not below it."""
+    available = sorted({int(ref_bit), *[int(bit) for bit in bits]})
+    requested_depth = int(requested_depth)
+    for bit in available:
+        if bit >= requested_depth:
+            return int(bit)
+    return int(ref_bit)
+
+
+def bound_policy_bucket_bits(bits, ref_bit, args):
+    buckets = [
+        (
+            "high",
+            int(getattr(args, "precision_depth_bound_high_min_depth", ref_bit)),
+            float(getattr(args, "precision_depth_bound_high_tolerance", 0.0)),
+        ),
+        (
+            "mid",
+            int(getattr(args, "precision_depth_bound_mid_min_depth", 6)),
+            float(getattr(args, "precision_depth_bound_mid_tolerance", 0.02)),
+        ),
+        (
+            "low",
+            int(getattr(args, "precision_depth_bound_low_min_depth", 4)),
+            float(getattr(args, "precision_depth_bound_low_tolerance", 0.04)),
+        ),
+    ]
+    out = {}
+    for name, min_depth, tolerance in buckets:
+        runtime_depth = select_runtime_bound_depth(min_depth, tolerance, ref_bit, args)
+        pool_bit = nearest_available_precision_depth(runtime_depth, bits, ref_bit)
+        out[name] = {
+            "min_depth": int(min_depth),
+            "tolerance": float(tolerance),
+            "runtime_depth": int(runtime_depth),
+            "pool_bit": int(pool_bit),
+            "bound": precision_depth_remaining_bit_bound(runtime_depth, ref_bit, args),
+        }
+    return out
 
 
 def select_precision_depth_actions(
@@ -1909,7 +1989,7 @@ def select_precision_depth_actions(
         return torch.full((num_nodes,), ref_bit, dtype=torch.int64, device=device)
     if policy["kind"] == "all_depth":
         return torch.full((num_nodes,), int(policy["bit"]), dtype=torch.int64, device=device)
-    if policy["kind"] != "budget":
+    if policy["kind"] not in {"budget", "bound_budget"}:
         raise ValueError(f"Unknown precision-depth policy: {policy}")
 
     priority_name = policy["priority"]
@@ -1962,9 +2042,16 @@ def select_precision_depth_actions(
     high_count = max(0, min(high_count, eligible_count))
     mid_count = max(0, min(mid_count, eligible_count - high_count))
     low_count = max(0, min(low_count, eligible_count - high_count - mid_count))
-    actions[order[:high_count]] = ref_bit
-    actions[order[high_count : high_count + mid_count]] = safest_low_bit
-    actions[order[high_count + mid_count : high_count + mid_count + low_count]] = second_low_bit
+    if policy["kind"] == "bound_budget":
+        bucket_bits = bound_policy_bucket_bits(bits, ref_bit, args)
+        actions[eligible_idx] = bucket_bits["low"]["pool_bit"]
+        actions[order[:high_count]] = bucket_bits["high"]["pool_bit"]
+        actions[order[high_count : high_count + mid_count]] = bucket_bits["mid"]["pool_bit"]
+        actions[order[high_count + mid_count : high_count + mid_count + low_count]] = bucket_bits["low"]["pool_bit"]
+    else:
+        actions[order[:high_count]] = ref_bit
+        actions[order[high_count : high_count + mid_count]] = safest_low_bit
+        actions[order[high_count + mid_count : high_count + mid_count + low_count]] = second_low_bit
     return actions
 
 
@@ -2653,6 +2740,21 @@ def run_residual_precision_depth_experiment(args):
                 f"| fixed_cost={args.precision_depth_fixed_cost:.2f} "
                 f"| residual_cost={args.hierarchical_residual_cost:.4f}"
             )
+            if bool(getattr(args, "precision_depth_bound_enable", False)):
+                bucket_bits = bound_policy_bucket_bits(bits, ref_bit, args)
+                bucket_text = " | ".join(
+                    f"{name}:min={info['min_depth']},tau={info['tolerance']:.4f},"
+                    f"runtime=P{info['runtime_depth']},pool=P{info['pool_bit']},"
+                    f"bound={info['bound']:.5f}"
+                    for name, info in bucket_bits.items()
+                )
+                log_important(
+                    "[GraphBitBound] "
+                    f"priorities={list(getattr(args, 'precision_depth_bound_priorities', []))} | "
+                    f"tile_k={int(getattr(args, 'precision_depth_bound_tile_k', 128))} | "
+                    f"scale={float(getattr(args, 'precision_depth_bound_scale', 1.0)):.3f} | "
+                    f"{bucket_text}"
+                )
 
             seeds = [int(args.seed) + run_idx for run_idx in range(args.runs)]
             for run_idx, seed in enumerate(seeds):

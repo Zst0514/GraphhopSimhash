@@ -6,15 +6,17 @@ Input:
   2. ONNXim LLaMA GEMM microbenchmark aggregate.json
 
 Output:
-  A compact table with:
-    FullP8-miss
-    Random static P8/P6/P4
-    Degree static P8/P6/P4
-    Degree predictor-free bounded early stop
+  A compact table with static precision-depth rows and, when available, true
+  runtime-bound rows from residual_precision_depth:
 
-The bounded row is a hardware-side estimate: it keeps the same algorithmic
-embedding/drop row as Degree static, but estimates extra bit-plane savings from
-the bounded early-stop datapath.
+    FullP8-miss
+    Random static P8/P6/P5/P4
+    Degree/TSER static P8/P6/P5/P4
+    Degree/TSER runtime-bound min_depth+tolerance
+
+The runtime-bound rows use the actual embedding pool selected by the runner
+after graph risk sets min_depth/tolerance and the predictor-free bound decides
+the final depth.
 """
 
 from __future__ import annotations
@@ -32,6 +34,10 @@ CONFIG_ALIASES = {
     "TSERDepthBudget": "TSER",
     "ContextDepthBudget": "Ctx",
     "LowUniqueDepthBudget": "Uniq",
+    "DegreeBound": "DegBound",
+    "TSERBound": "TSERBound",
+    "ContextBound": "CtxBound",
+    "LowUniqueBound": "UniqBound",
 }
 
 
@@ -86,6 +92,13 @@ def find_row(rows: list[dict[str, str]], args: argparse.Namespace, config: str) 
     if not matches:
         raise SystemExit(f"No row found for config={config} in {args.residual_summary}")
     return matches[0]
+
+
+def maybe_find_row(rows: list[dict[str, str]], args: argparse.Namespace, config: str) -> dict[str, str] | None:
+    try:
+        return find_row(rows, args, config)
+    except SystemExit:
+        return None
 
 
 def ratios_from_row(row: dict[str, str]) -> dict[str, float]:
@@ -262,7 +275,7 @@ def write_compact(rows: list[dict[str, Any]], path: Path, args: argparse.Namespa
             f"Fixed front-end: {args.frontend_id}, R=2, "
             f"hard>={args.hard_support}, residual support{residual_support_text}."
         ),
-        "Drop is inherited from the static embedding proxy; bounded row estimates extra NPU bit-plane savings.",
+        "Runtime-bound rows are evaluated with the embedding depth selected by min_depth+tolerance bound.",
         "",
         "Method                         Reuse   P8     P6     P5     P4     AvgBit Saved  Cycles Traffic Energy Drop",
         "------------------------------------------------------------------------------------------------------",
@@ -366,15 +379,25 @@ def main() -> None:
         print(f"[GraphBitPF] microbench not found, writing normalized metrics only: {args.microbench}")
 
     full = find_row(rows, args, "FullP8")
-    rand = find_row(rows, args, "Rand")
-    deg = find_row(rows, args, "Deg")
+    rand = maybe_find_row(rows, args, "Rand")
+    deg = maybe_find_row(rows, args, "Deg")
+    tser = maybe_find_row(rows, args, "TSER")
+    deg_bound = maybe_find_row(rows, args, "DegBound")
+    tser_bound = maybe_find_row(rows, args, "TSERBound")
 
-    out_rows = [
-        method_row("FullP8-miss", full, args, aggregate, bounded=False),
-        method_row("Random static P8/P6/P4", rand, args, aggregate, bounded=False),
-        method_row("Degree static P8/P6/P4", deg, args, aggregate, bounded=False),
-        method_row("Degree predictor-free EarlyStop", deg, args, aggregate, bounded=True),
-    ]
+    out_rows = [method_row("FullP8-miss", full, args, aggregate, bounded=False)]
+    if rand is not None:
+        out_rows.append(method_row("Random static P8/P6/P5/P4", rand, args, aggregate, bounded=False))
+    if deg is not None:
+        out_rows.append(method_row("Degree static P8/P6/P5/P4", deg, args, aggregate, bounded=False))
+    if tser is not None:
+        out_rows.append(method_row("TSER static P8/P6/P5/P4", tser, args, aggregate, bounded=False))
+    if deg_bound is not None:
+        out_rows.append(method_row("Degree runtime-bound", deg_bound, args, aggregate, bounded=False))
+    elif deg is not None:
+        out_rows.append(method_row("Degree synthetic EarlyStop", deg, args, aggregate, bounded=True))
+    if tser_bound is not None:
+        out_rows.append(method_row("TSER runtime-bound", tser_bound, args, aggregate, bounded=False))
 
     args.output_dir.mkdir(parents=True, exist_ok=True)
     tsv_path = args.output_dir / "predictor_free_main.tsv"

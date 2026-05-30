@@ -774,6 +774,70 @@ def build_parser():
         choices=["embedding", "margin"],
         help="Predict lowest-depth embedding damage or downstream logit margin damage.",
     )
+    parser.add_argument(
+        "--precision_depth_bound_enable",
+        action="store_true",
+        help=(
+            "Add graph-conditioned predictor-free bound policies. Graph risk selects "
+            "min_depth/tolerance buckets; a runtime bound then decides the final depth."
+        ),
+    )
+    parser.add_argument(
+        "--precision_depth_bound_priorities",
+        type=str,
+        nargs="+",
+        default=["degree", "tser"],
+        choices=["degree", "tser", "context", "low_unique", "random"],
+        help="Graph risk proxies to evaluate for bound-based precision-depth policies.",
+    )
+    parser.add_argument(
+        "--precision_depth_bound_high_min_depth",
+        type=int,
+        default=8,
+        help="Minimum safe activation depth for high-risk nodes in bound policies.",
+    )
+    parser.add_argument(
+        "--precision_depth_bound_mid_min_depth",
+        type=int,
+        default=6,
+        help="Minimum safe activation depth for middle-risk nodes in bound policies.",
+    )
+    parser.add_argument(
+        "--precision_depth_bound_low_min_depth",
+        type=int,
+        default=4,
+        help="Minimum safe activation depth for low-risk nodes in bound policies.",
+    )
+    parser.add_argument(
+        "--precision_depth_bound_high_tolerance",
+        type=float,
+        default=0.0,
+        help="Runtime remaining-error tolerance for high-risk nodes.",
+    )
+    parser.add_argument(
+        "--precision_depth_bound_mid_tolerance",
+        type=float,
+        default=0.02,
+        help="Runtime remaining-error tolerance for middle-risk nodes.",
+    )
+    parser.add_argument(
+        "--precision_depth_bound_low_tolerance",
+        type=float,
+        default=0.04,
+        help="Runtime remaining-error tolerance for low-risk nodes.",
+    )
+    parser.add_argument(
+        "--precision_depth_bound_scale",
+        type=float,
+        default=1.0,
+        help="Scale factor for the predictor-free remaining-bit bound.",
+    )
+    parser.add_argument(
+        "--precision_depth_bound_tile_k",
+        type=int,
+        default=128,
+        help="Reduction tile size used by the bound estimator.",
+    )
     parser.add_argument("--token_compaction_reference_tag", type=str, default="W4A16")
     parser.add_argument("--token_compaction_full_tag", type=str, default="W4A8")
     parser.add_argument(
@@ -1234,6 +1298,26 @@ def validate_args(parser, args):
         parser.error("--precision_depth_predictor_calib_samples must be positive")
     if args.precision_depth_predictor_ridge < 0:
         parser.error("--precision_depth_predictor_ridge must be non-negative")
+    bound_min_depths = [
+        args.precision_depth_bound_high_min_depth,
+        args.precision_depth_bound_mid_min_depth,
+        args.precision_depth_bound_low_min_depth,
+    ]
+    if any(depth <= 0 for depth in bound_min_depths):
+        parser.error("--precision_depth_bound_*_min_depth values must be positive")
+    if any(depth > args.precision_depth_reference_bits for depth in bound_min_depths):
+        parser.error("--precision_depth_bound_*_min_depth cannot exceed --precision_depth_reference_bits")
+    bound_tolerances = [
+        args.precision_depth_bound_high_tolerance,
+        args.precision_depth_bound_mid_tolerance,
+        args.precision_depth_bound_low_tolerance,
+    ]
+    if any(tol < 0 for tol in bound_tolerances):
+        parser.error("--precision_depth_bound_*_tolerance values must be non-negative")
+    if args.precision_depth_bound_scale <= 0:
+        parser.error("--precision_depth_bound_scale must be positive")
+    if args.precision_depth_bound_tile_k <= 0:
+        parser.error("--precision_depth_bound_tile_k must be positive")
     if not args.token_compaction_tags:
         parser.error("--token_compaction_tags must contain at least one tag")
     if args.token_compaction_names is not None and len(args.token_compaction_names) != len(args.token_compaction_tags):

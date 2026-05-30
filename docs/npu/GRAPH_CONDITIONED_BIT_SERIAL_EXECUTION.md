@@ -17,6 +17,96 @@ PADE-style predictor-free bound controls whether low-bit computation is still ne
 graph risk controls how strict this bound must be.
 ```
 
+## 0. Current Runtime-Bound Implementation
+
+当前代码已经把 Graph-Bit 从“静态 P8/P6/P4 路由”推进到 runtime-bound 路由：
+
+```text
+Degree / TSER 不直接决定最终执行 P8/P6/P4。
+
+它们只决定节点属于 high / mid / low 哪个风险桶；
+每个风险桶只给出：
+    1. min_depth: 最低安全执行深度
+    2. tolerance: 剩余低位 bit-plane 的可容忍上界
+
+最终执行到 P8/P6/P5/P4 中哪一个，
+由 predictor-free remaining-bit bound 在运行时决定。
+```
+
+当前 runner 入口是：
+
+```text
+--precision_depth_bound_enable
+--precision_depth_bound_priorities degree tser
+--precision_depth_bound_high_min_depth 8
+--precision_depth_bound_mid_min_depth 6
+--precision_depth_bound_low_min_depth 4
+--precision_depth_bound_high_tolerance 0.0
+--precision_depth_bound_mid_tolerance 0.02
+--precision_depth_bound_low_tolerance 0.04
+--precision_depth_bound_tile_k 128
+--precision_depth_bound_scale 1.0
+```
+
+示例 bound 映射：
+
+```text
+high: min=8, tau=0.00 -> runtime P8
+mid:  min=6, tau=0.02 -> runtime P6
+low:  min=4, tau=0.04 -> runtime P5
+```
+
+注意 low bucket 不是被手工指定为 P5。它先给 `min_depth=4`，然后 bound 判断 P4 的剩余误差界仍偏大，于是继续执行到 P5。
+
+### Cora/LLaMA Quick Validation
+
+固定前端：
+
+```text
+h8_54_T40
+8 heads x 16-bit
+R = 2
+hard direct: support >= 5
+residual: support == 4
+miss nodes -> Graph-Bit
+```
+
+命令：
+
+```bash
+RUNS=1 RUN_ALGO=1 RUN_ONNXIM=0 \
+DATASET=cora THRESHOLD=40 HARD_SUPPORT=5 SOFT_SUPPORT=4 \
+FRONTEND_ID=h8_54_T40 BUDGET=boundclean \
+HIGH_RATIO=0.20 MID_RATIO=0.50 LOW_RATIO=0.0 \
+OUT_DIR=output/graphbit_bound_runtime/cora_h8_54_T40_boundclean_quick \
+BOUND_ENABLE=1 BOUND_PRIORITIES='degree tser' \
+BOUND_MID_TOL=0.02 BOUND_LOW_TOL=0.04 \
+bash GraphhopSimhash/scripts/run_graphbit_predictor_free_flow.sh
+```
+
+关键结果：
+
+| Method | Reuse | P8 | P6 | P5 | P4 | Cost | Drop |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| FullP8-miss | 27.8% | 72.2% | 0.0% | 0.0% | 0.0% | 0.361 | 0.77% |
+| Degree static | 27.8% | 14.4% | 36.1% | 0.0% | 21.6% | 0.277 | 2.71% |
+| Degree runtime-bound | 27.8% | 14.4% | 36.1% | 21.6% | 0.0% | 0.288 | 2.13% |
+| TSER runtime-bound | 27.8% | 14.4% | 36.1% | 21.6% | 0.0% | 0.288 | 2.85% |
+
+这个表的意义：
+
+```text
+Static Degree:
+    低风险 miss 节点被硬压到 P4，drop=2.71%。
+
+Runtime-bound Degree:
+    Degree 只给 low bucket 的 min_depth=4/tolerance=0.04；
+    bound 发现 P4 不够安全，最终执行到 P5；
+    drop 降到 2.13%。
+```
+
+因此当前实现已经体现了核心机制：graph risk 配置安全下限和容忍度，实际 bit-depth 由 runtime bound 决定。
+
 ## 1. Motivation
 
 当前系统已经有三层：

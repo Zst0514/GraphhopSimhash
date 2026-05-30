@@ -23,6 +23,25 @@ Predictor-free early-stop:
 
 因此最终硬件主线不是“必须设计 6-bit/4-bit datatype”，而是“bit-serial datapath 支持 graph-conditioned early termination”。
 
+当前实现已经支持 runtime-bound 策略：
+
+```text
+Degree / TSER risk -> high/mid/low bucket
+bucket -> min_depth + tolerance
+runtime bound -> actual_depth
+actual_depth -> nearest generated validation pool P8/P6/P5/P4
+```
+
+例如：
+
+```text
+high: min_depth=8, tolerance=0.00 -> P8
+mid:  min_depth=6, tolerance=0.02 -> P6
+low:  min_depth=4, tolerance=0.04 -> P5
+```
+
+这里 low bucket 并不是静态指定 P5。硬件逻辑是从高位 bit-plane 开始执行，至少执行到 P4，然后由 remaining-bit bound 判断是否可以停。如果 P4 的剩余误差界仍超过 tolerance，就继续执行到 P5。
+
 更细的 predictor-free bit-serial 实现、degree/propagation risk 阈值管理和 ONNXim 验证接口见：
 
 ```text

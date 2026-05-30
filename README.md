@@ -507,7 +507,40 @@ They no longer mean "fixed P6/P4".
 They mean "start at P8, stop dynamically by bit-bound".
 ```
 
-The drop is currently inherited from the static Degree proxy as a conservative accuracy estimate. A stricter next step is to generate dynamic-depth embeddings or nearest-depth conservative mappings for exact dynamic-depth accuracy.
+The runner now also supports a stricter software validation path where the
+runtime bound is mapped to the nearest generated embedding pool:
+
+```text
+high risk -> min_depth=8, tolerance=0.00 -> runtime P8
+mid risk  -> min_depth=6, tolerance=0.02 -> runtime P6
+low risk  -> min_depth=4, tolerance=0.04 -> runtime P5
+```
+
+Example Cora/LLaMA quick command:
+
+```bash
+RUNS=1 RUN_ALGO=1 RUN_ONNXIM=0 \
+DATASET=cora THRESHOLD=40 HARD_SUPPORT=5 SOFT_SUPPORT=4 \
+FRONTEND_ID=h8_54_T40 BUDGET=boundclean \
+HIGH_RATIO=0.20 MID_RATIO=0.50 LOW_RATIO=0.0 \
+OUT_DIR=output/graphbit_bound_runtime/cora_h8_54_T40_boundclean_quick \
+BOUND_ENABLE=1 BOUND_PRIORITIES='degree tser' \
+BOUND_MID_TOL=0.02 BOUND_LOW_TOL=0.04 \
+bash GraphhopSimhash/scripts/run_graphbit_predictor_free_flow.sh
+```
+
+Quick result:
+
+```text
+Method              Reuse   P8     P6     P5     P4     Cost   Drop
+FullP8-miss          27.8%  72.2%   0.0%   0.0%   0.0%   0.361  0.77%
+Degree static        27.8%  14.4%  36.1%   0.0%  21.6%   0.277  2.71%
+Degree runtime-bound 27.8%  14.4%  36.1%  21.6%   0.0%   0.288  2.13%
+```
+
+This shows the intended behavior: Degree does not directly select P5. It only
+sets the low-risk bucket's `min_depth=4` and `tolerance=0.04`; the runtime
+remaining-bit bound decides that P4 is too aggressive and continues to P5.
 
 ### 5. Bit-Plane Demand-Fetch Modeling
 
