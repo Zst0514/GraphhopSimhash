@@ -12,17 +12,16 @@
 ## NPU
 
 - [GRAPH_BIT_NPU_DESIGN.md](npu/GRAPH_BIT_NPU_DESIGN.md): Graph-Bit NPU 主线设计，包含 datapath、scheduler、buffer、cost model。
-- [GRAPH_BIT_END_TO_END_THEORY.md](npu/GRAPH_BIT_END_TO_END_THEORY.md): Graph-Bit 端到端算法、prediction-free bound、变 bit-depth 计算、W tile reuse 和 speedup 数值推导。
-- [GRAPH_BIT_FULLSTACK_REPRODUCTION_GUIDE.md](npu/GRAPH_BIT_FULLSTACK_REPRODUCTION_GUIDE.md): Graph-Bit full-stack 复现实验流程、调参入口、输出文件和结果解读。
 - [GRAPH_BIT_EARLY_STOP_IMPLEMENTATION.md](npu/GRAPH_BIT_EARLY_STOP_IMPLEMENTATION.md): bit-plane early stop 从 CLI、runner、ONNXim/GemmWS 到 trace replay 的代码级实现说明。
-- [GRAPH_BIT_TRACE_DRIVEN_SCHEDULER.md](npu/GRAPH_BIT_TRACE_DRIVEN_SCHEDULER.md): per-node trace 导出、bucket scheduler replay、真实 W tile load / Wscale 统计。
-- [GRAPH_BIT_PROXY_EXPERIMENTS.md](npu/GRAPH_BIT_PROXY_EXPERIMENTS.md): Graph-Bit 的 embedding-pool proxy 实验、precision-depth ablation 和命令。
+- [GRAPH_BIT_FULLSTACK_REPRODUCTION_GUIDE.md](npu/GRAPH_BIT_FULLSTACK_REPRODUCTION_GUIDE.md): Graph-Bit full-stack 复现实验流程、调参入口、输出文件和结果解读。
 
-已删除/合并早期探索文档：partial-depth / token budget / FFN channel gating，以及 Graph-Bit 的 demand-fetch、bound、bucket、dataflow 分散文档。主线内容已合并到 [GRAPH_BIT_NPU_DESIGN.md](npu/GRAPH_BIT_NPU_DESIGN.md)、[GRAPH_BIT_END_TO_END_THEORY.md](npu/GRAPH_BIT_END_TO_END_THEORY.md)、[GRAPH_BIT_FULLSTACK_REPRODUCTION_GUIDE.md](npu/GRAPH_BIT_FULLSTACK_REPRODUCTION_GUIDE.md)、[GRAPH_BIT_EARLY_STOP_IMPLEMENTATION.md](npu/GRAPH_BIT_EARLY_STOP_IMPLEMENTATION.md) 和 [GRAPH_BIT_TRACE_DRIVEN_SCHEDULER.md](npu/GRAPH_BIT_TRACE_DRIVEN_SCHEDULER.md)。
+历史 proxy、早期理论拆分和旧 scheduler 说明已移到 `docs/archive/npu/`。主线只维护上面三份文档。
 
 ## Results
 
-- [GRAPH_BIT_VALIDATION_SUMMARY.md](results/GRAPH_BIT_VALIDATION_SUMMARY.md): Graph-Bit 在 Cora / PubMed / Arxiv 上的主线结果。
+- [GRAPH_BIT_MAIN_RESULTS.md](results/GRAPH_BIT_MAIN_RESULTS.md): 当前 Graph-Bit / residual reuse 主线结果。
+- [SHARED_ONLINE_RESIDUAL_REUSE_RESULT.md](results/SHARED_ONLINE_RESIDUAL_REUSE_RESULT.md): Cora/PubMed 共享在线 residual reuse 配置。
+- [ST_LLAMA_T31_SHARED_RETRIEVAL_RESULT.md](results/ST_LLAMA_T31_SHARED_RETRIEVAL_RESULT.md): ST/LLaMA 共享检索骨架的历史对照。
 
 ## Survey
 
@@ -31,8 +30,13 @@
 
 ## Tools
 
-- [ONNXIM_PROJECT_GUIDE.md](tools/ONNXIM_PROJECT_GUIDE.md): ONNXim 项目功能、模块和仿真流程说明。
+- [ONNXIM_PROJECT_GUIDE.md](../ONNXim/ONNXIM_PROJECT_GUIDE.md): ONNXim 项目功能、模块和仿真流程说明。
 - [量化+哈希命令.md](tools/量化+哈希命令.md): 常用量化与哈希实验命令。
+
+## Archive
+
+- `archive/npu/`: Graph-Bit 早期 proxy、旧理论拆分和旧 scheduler 说明。
+- `archive/results/`: 过往大规模 sweep 汇总，保留用于追溯，不作为主入口。
 
 ## Roadmap
 

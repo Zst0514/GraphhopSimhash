@@ -13,9 +13,8 @@
 相关机制说明：
 
 ```text
-docs/npu/GRAPH_BIT_END_TO_END_THEORY.md
+docs/npu/GRAPH_BIT_NPU_DESIGN.md
 docs/npu/GRAPH_BIT_EARLY_STOP_IMPLEMENTATION.md
-docs/npu/GRAPH_BIT_TRACE_DRIVEN_SCHEDULER.md
 ```
 
 本文档重点是运行流程、参数修改方式和结果读取路径。

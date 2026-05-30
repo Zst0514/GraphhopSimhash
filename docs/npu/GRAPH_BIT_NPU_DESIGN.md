@@ -1,26 +1,19 @@
 # Graph-Bit NPU Design
 
-本文档是 Graph-Bit NPU 的主设计入口。旧版拆成了很多探索文档，现在统一收敛到六份核心材料：
+本文档是 Graph-Bit NPU 的主设计入口。当前主线只维护三份 NPU 文档：
 
 ```text
 GRAPH_BIT_NPU_DESIGN.md
     设计总览：datapath、scheduler、buffer、cost model、主结论。
 
-GRAPH_BIT_END_TO_END_THEORY.md
-    端到端算法与理论：prediction-free bound、变 bit-depth 计算、W tile reuse、HEAT-like 对比和 speedup 数值推导。
-
-GRAPH_BIT_FULLSTACK_REPRODUCTION_GUIDE.md
-    复现和调参：从 residual/Graph-Bit trace 导出到 ONNXim component lookup、scheduler replay、cycles 表的完整流程。
-
 GRAPH_BIT_EARLY_STOP_IMPLEMENTATION.md
     实现细节：CLI、runner、ONNXim/GemmWS、trace replay 中 bit-plane early stop 的代码路径。
 
-GRAPH_BIT_TRACE_DRIVEN_SCHEDULER.md
-    仿真证据：真实 per-node trace、bucket replay、W tile load / Wscale 统计。
-
-GRAPH_BIT_PROXY_EXPERIMENTS.md
-    精度 proxy：P8/P6/P5/P4 embedding pools、Degree/TSER/Context ablation。
+GRAPH_BIT_FULLSTACK_REPRODUCTION_GUIDE.md
+    复现和调参：从 residual/Graph-Bit trace 导出到 ONNXim component lookup、scheduler replay、cycles 表的完整流程。
 ```
+
+早期 proxy、理论拆分和旧 scheduler 文档已移到 `docs/archive/npu/`，不作为主入口。
 
 ## 1. 设计目标
 
@@ -272,11 +265,7 @@ compute / Graph-Bit: support < 4
 验证 Degree / TSER / Context 是否能指导 precision depth。
 ```
 
-文档：
-
-```text
-docs/npu/GRAPH_BIT_PROXY_EXPERIMENTS.md
-```
+主线结果汇总见 `docs/results/GRAPH_BIT_MAIN_RESULTS.md`。
 
 ### 6.2 ONNXim Component Simulation
 
@@ -308,11 +297,7 @@ real miss node trace
     -> ONNXim component cost lookup
 ```
 
-文档：
-
-```text
-docs/npu/GRAPH_BIT_TRACE_DRIVEN_SCHEDULER.md
-```
+复现流程见 `docs/npu/GRAPH_BIT_FULLSTACK_REPRODUCTION_GUIDE.md`。
 
 一键命令：
 

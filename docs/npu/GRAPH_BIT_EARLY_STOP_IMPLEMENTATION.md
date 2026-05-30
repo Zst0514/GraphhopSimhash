@@ -12,8 +12,7 @@ ONNXim 里又如何把这个 stop depth 反映到 activation fetch、bit-plane i
 
 ```text
 docs/npu/GRAPH_BIT_NPU_DESIGN.md
-docs/npu/GRAPH_BIT_TRACE_DRIVEN_SCHEDULER.md
-docs/npu/GRAPH_BIT_PROXY_EXPERIMENTS.md
+docs/npu/GRAPH_BIT_FULLSTACK_REPRODUCTION_GUIDE.md
 ```
 
 ## 1. 核心定义

@@ -211,7 +211,8 @@ The consolidated NPU design is documented in:
 
 ```text
 docs/npu/GRAPH_BIT_NPU_DESIGN.md
-docs/npu/GRAPH_BIT_TRACE_DRIVEN_SCHEDULER.md
+docs/npu/GRAPH_BIT_EARLY_STOP_IMPLEMENTATION.md
+docs/npu/GRAPH_BIT_FULLSTACK_REPRODUCTION_GUIDE.md
 ```
 
 ## Repository Layout
@@ -262,7 +263,7 @@ docs/core/
     AWQ embedding generation, CAM design, score definitions, residual reuse
 
 docs/npu/
-    Graph-Bit NPU design, predictor-free bit-serial execution, proxy experiments
+    Graph-Bit NPU design, predictor-free bit-serial execution, reproduction guide
 
 docs/results/
     main result summaries
@@ -271,7 +272,7 @@ docs/survey/
     LLM / Transformer accelerator survey
 
 docs/tools/
-    ONNXim guide and command notes
+    command notes
 ```
 
 Start here:
@@ -281,8 +282,8 @@ docs/README.md
 docs/PROJECT_ROADMAP.md
 docs/core/RESIDUAL_CORRECTED_REUSE.md
 docs/npu/GRAPH_BIT_NPU_DESIGN.md
-docs/npu/GRAPH_BIT_TRACE_DRIVEN_SCHEDULER.md
-docs/results/GRAPH_BIT_VALIDATION_SUMMARY.md
+docs/npu/GRAPH_BIT_FULLSTACK_REPRODUCTION_GUIDE.md
+docs/results/GRAPH_BIT_MAIN_RESULTS.md
 ```
 
 ## Running Location
@@ -710,7 +711,7 @@ output/onnxim_graphbit/datapath_suite_s8/datapath_summary.txt
 Guide:
 
 ```text
-docs/tools/ONNXIM_PROJECT_GUIDE.md
+ONNXim/ONNXIM_PROJECT_GUIDE.md
 ```
 
 ## Main Result Files

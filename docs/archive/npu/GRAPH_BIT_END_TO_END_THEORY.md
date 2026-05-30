@@ -15,7 +15,7 @@
 
 ```text
 docs/npu/GRAPH_BIT_EARLY_STOP_IMPLEMENTATION.md
-docs/npu/GRAPH_BIT_TRACE_DRIVEN_SCHEDULER.md
+docs/archive/npu/GRAPH_BIT_TRACE_DRIVEN_SCHEDULER.md
 docs/npu/GRAPH_BIT_NPU_DESIGN.md
 ```
 
@@ -874,4 +874,3 @@ weight tile service window
 ```
 
 这四个层次，而不是只做静态 mixed precision。
-
