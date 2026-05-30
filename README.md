@@ -601,7 +601,8 @@ risk-bucket scheduling:
     prevents one P8 node from dragging a low-risk batch to P8
 
 weight-stationary reuse:
-    amortizes HBM weight tile reads over same-risk batches
+    optional sensitivity only; the mainline keeps weight HBM scale at 1.0
+    unless a concrete scheduler/capacity model justifies extra amortization
 ```
 
 Run:
@@ -659,7 +660,7 @@ SEQ_LEN=8 bash GraphhopSimhash/scripts/run_onnxim_graphbit_datapath_suite.sh
 ```
 
 It separates byte-major mask-only, plane-group demand fetch, risk-bucket issue
-gating, W RF/psum gating, and weight-stationary reuse.  The compact result is:
+gating, W RF/psum gating, and optional weight-stationary sensitivity.  The compact result is:
 
 ```text
 output/onnxim_graphbit/datapath_suite_s8/datapath_summary.txt

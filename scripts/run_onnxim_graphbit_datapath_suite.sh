@@ -77,7 +77,10 @@ run_case "no_risk_bucket_p6" \
   --graphbit-psum-gate \
   --disable-graphbit-risk-bucket
 
-run_case "plane_group2_ws_p6" \
+# Sensitivity only: this assumes a 4x larger effective weight-stationary
+# bucket.  It is useful to show the upper-bound impact of W HBM amortization,
+# but it is not the default Graph-Bit datapath claim.
+run_case "ws_sensitivity_4x_p6" \
   --graphbit-depth 6 \
   --graphbit-activation-layout plane_group \
   --graphbit-plane-group-bits 2 \

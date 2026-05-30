@@ -21,7 +21,10 @@ NODE_COUNT="${NODE_COUNT:-2708}"
 BATCH_SIZE="${BATCH_SIZE:-64}"
 PLANE_GROUP_BITS="${PLANE_GROUP_BITS:-2}"
 BASELINE_WEIGHT_TILE_BATCH="${BASELINE_WEIGHT_TILE_BATCH:-16}"
-WEIGHT_STATIONARY_TILE_BATCH="${WEIGHT_STATIONARY_TILE_BATCH:-64}"
+# Keep the default conservative: Graph-Bit does not automatically reduce HBM
+# weight reads.  A larger value is a sensitivity study for extra
+# risk-bucket/weight-stationary batching, not the main claim.
+WEIGHT_STATIONARY_TILE_BATCH="${WEIGHT_STATIONARY_TILE_BATCH:-16}"
 
 "${PYTHON_BIN}" "${SCRIPT_DIR}/model_graphbit_npu_dataflow.py" \
   --workload "${WORKLOAD}" \

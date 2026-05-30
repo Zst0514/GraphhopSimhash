@@ -218,59 +218,65 @@ OUT_DIR=/home/zhangshangtong/Transformer/OFA/output/graphbit_predictor_free/pubm
 bash scripts/run_graphbit_npu_dataflow_model.sh
 ```
 
-## 8. Cora Result
+## 8. Conservative Cora / PubMed Result
 
-Default:
+这部分是当前更严谨的主线：**不默认给 weight HBM 任何额外 4x 约简**。
+
+默认参数：
 
 ```text
-frontend = h8_54_T40_dynp5
 plane_group_bits = 2
 batch_size = 64
 baseline_weight_tile_batch = 16
-weight_stationary_tile_batch = 64
+weight_stationary_tile_batch = 16
+WHBM scale = 1.0
+```
+
+也就是说，下面的 `PlaneGroup risk bucket` 只声称三件事：
+
+```text
+1. plane-group activation fetch 减少 Aread；
+2. bit-plane issue gating 减少 PE issue / WRF / Psum depth；
+3. risk-bucket batching 防止 low-risk 节点被 high-risk 节点拖到 P8。
+```
+
+它**不声称** weight HBM 自动下降。
+
+### 8.1 Cora h8_54_T40
+
+输入：
+
+```text
+output/graphbit_predictor_free/cora_h8_54_T40/predictor_free_workload.json
 ```
 
 核心结果：
 
 | Method | Layout | Schedule | PE | Aread | WHBM | WRF | Psum | FullC | FullT | FullE | Drop |
 |---|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
-| FullP8 byte baseline | byte | bucket | 1.000 | 1.000 | 1.000 | 1.000 | 1.000 | 0.712 | 0.712 | 0.712 | 1.08% |
-| ByteMajor mask only | byte | bucket | 1.000 | 1.000 | 1.000 | 1.000 | 1.000 | 0.711 | 0.711 | 0.711 | 1.93% |
-| ByteMajor issue gate | byte | bucket | 0.762 | 1.000 | 1.000 | 0.762 | 0.762 | 0.618 | 0.711 | 0.618 | 1.93% |
-| PlaneGroup random mixed | plane | random | 1.000 | 1.000 | 1.000 | 1.000 | 1.000 | 0.711 | 0.711 | 0.721 | 1.93% |
-| PlaneGroup risk bucket | plane | bucket | 0.762 | 0.800 | 1.000 | 0.762 | 0.762 | 0.597 | 0.662 | 0.600 | 1.93% |
-| RiskBucket + WS | plane | bucket | 0.762 | 0.800 | 0.250 | 0.762 | 0.762 | 0.490 | 0.395 | 0.494 | 1.93% |
-| Random risk full NPU | plane | bucket | 0.762 | 0.800 | 0.250 | 0.762 | 0.762 | 0.490 | 0.395 | 0.494 | 2.30% |
+| FullP8 byte baseline | byte | bucket | 1.000 | 1.000 | 1.000 | 1.000 | 1.000 | 0.601 | 0.602 | 0.601 | 1.53% |
+| ByteMajor mask only | byte | bucket | 1.000 | 1.000 | 1.000 | 1.000 | 1.000 | 0.601 | 0.602 | 0.601 | 2.39% |
+| ByteMajor issue gate | byte | bucket | 0.725 | 1.000 | 1.000 | 0.725 | 0.725 | 0.510 | 0.602 | 0.510 | 2.39% |
+| PlaneGroup random mixed | plane | random | 1.000 | 1.000 | 1.000 | 1.000 | 1.000 | 0.601 | 0.602 | 0.610 | 2.39% |
+| PlaneGroup risk bucket | plane | bucket | 0.725 | 0.725 | 1.000 | 0.725 | 0.725 | 0.486 | 0.544 | 0.486 | 2.39% |
+| Random risk full NPU | plane | bucket | 0.725 | 0.725 | 1.000 | 0.725 | 0.725 | 0.486 | 0.544 | 0.486 | 2.79% |
 
-解读：
+相对 FullP8 byte baseline：
 
 ```text
-ByteMajor mask only:
-    几乎没有系统收益，说明只 mask MAC 不够。
-
-ByteMajor issue gate:
-    cycles/energy 降了，但 traffic 几乎没降，因为 A8 仍完整读取。
-
-PlaneGroup random mixed:
-    有 plane layout 但 batch 被 P8 节点拖回 full depth，没有收益。
-
 PlaneGroup risk bucket:
-    最小可行 Graph-Bit NPU。它真正减少 Aread、PE issue、WRF、Psum。
-
-RiskBucket + WS:
-    加入 weight-stationary tile reuse 后，WHBM 从 1.0 降到 0.25，
-    这是让 full-stack traffic 明显下降的关键。
-
-Random risk full NPU:
-    同样硬件下随机风险分配 drop 更高，说明 graph risk 不是摆设。
+    FullC-save = 19.2%
+    FullT-save = 9.6%
+    FullE-save = 19.1%
+    ExtraDrop  = 0.86%
 ```
 
-## 9. PubMed Result
+### 8.2 PubMed h8_76_T40
 
 输入：
 
 ```text
-frontend = pubmed_h8_76_T40
+output/graphbit_predictor_free/pubmed_h8_76_T40/predictor_free_workload.json
 ```
 
 核心结果：
@@ -280,18 +286,70 @@ frontend = pubmed_h8_76_T40
 | FullP8 byte baseline | byte | bucket | 1.000 | 1.000 | 1.000 | 1.000 | 1.000 | 0.778 | 0.779 | 0.778 | 1.26% |
 | ByteMajor mask only | byte | bucket | 1.000 | 1.000 | 1.000 | 1.000 | 1.000 | 0.777 | 0.778 | 0.777 | 2.54% |
 | ByteMajor issue gate | byte | bucket | 0.725 | 1.000 | 1.000 | 0.725 | 0.725 | 0.660 | 0.778 | 0.660 | 2.54% |
+| PlaneGroup random mixed | plane | random | 1.000 | 1.000 | 1.000 | 1.000 | 1.000 | 0.777 | 0.778 | 0.789 | 2.54% |
 | PlaneGroup risk bucket | plane | bucket | 0.725 | 0.725 | 1.000 | 0.725 | 0.725 | 0.627 | 0.703 | 0.628 | 2.54% |
-| RiskBucket + WS | plane | bucket | 0.725 | 0.725 | 0.250 | 0.725 | 0.725 | 0.511 | 0.412 | 0.512 | 2.54% |
-| Random risk full NPU | plane | bucket | 0.725 | 0.725 | 0.250 | 0.725 | 0.725 | 0.511 | 0.412 | 0.512 | 2.75% |
+| Random risk full NPU | plane | bucket | 0.725 | 0.725 | 1.000 | 0.725 | 0.725 | 0.627 | 0.703 | 0.628 | 2.75% |
 
-PubMed 和 Cora 的趋势一致：
+相对 FullP8 byte baseline：
 
 ```text
-1. byte-major 不能省 activation traffic；
-2. plane-group risk bucket 是最低可行 datapath；
-3. weight-stationary tile reuse 是降低 weight HBM traffic 的关键；
-4. random risk 在同样硬件成本下精度更差。
+PlaneGroup risk bucket:
+    FullC-save = 19.3%
+    FullT-save = 9.7%
+    FullE-save = 19.2%
+    ExtraDrop  = 1.28%
 ```
+
+### 8.3 Bucket Realism Check
+
+这个检查只回答“risk bucket 是否足够大、会不会严重 tail padding”，不声称额外 W HBM 下降。
+
+Cora：
+
+```text
+P8: 325 nodes,  6 batches, tail_util 84.6%
+P6: 812 nodes, 13 batches, tail_util 97.6%
+P4: 487 nodes,  8 batches, tail_util 95.1%
+bucket padding overhead = 1.064x
+assumed W HBM scale = 1.000
+```
+
+PubMed：
+
+```text
+P8: 3056 nodes,  48 batches, tail_util 99.5%
+P6: 7650 nodes, 120 batches, tail_util 99.6%
+P4: 4594 nodes,  72 batches, tail_util 99.7%
+bucket padding overhead = 1.004x
+assumed W HBM scale = 1.000
+```
+
+结论：
+
+```text
+1. risk buckets 足够大，batch tail overhead 很小；
+2. 这支持 risk-bucket batching 的可行性；
+3. 但它不证明 W HBM 能自动降到 0.25。
+```
+
+## 9. Optional Weight-Stationary Sensitivity
+
+`RiskBucket + WS sensitivity` 只用于参数扫描：
+
+```text
+baseline_weight_tile_batch = 16
+weight_stationary_tile_batch = 32 / 48 / 64 / ...
+```
+
+如果设置 64，就得到：
+
+```text
+W HBM scale = 16 / 64 = 0.25
+```
+
+这不是主线结论，而是一个上界/敏感性分析。只有当后续有更具体的 scheduler / SRAM capacity / batch formation 证明 `W tile` 真的能服务 4x 更多 row，才能把它写成正式收益。
+
+当前主线不依赖这个假设。
 
 ## 10. 设计边界
 
@@ -307,9 +365,10 @@ PubMed 和 Cora 的趋势一致：
 
 ```text
 1. 2-bit plane group 是片上 activation buffer layout；
-2. WHBM 降低来自 weight-stationary tile reuse；
-3. RiskBucket + WS 的收益依赖足够大的同风险 batch；
-4. P5 是 dynamic-depth proxy，不代表必须有 5-bit ISA。
+2. risk-bucket batching 可以重排离线 graph embedding workload；
+3. 主线 WHBM scale 固定为 1.0，不默认声称 weight HBM 下降；
+4. P5 是 dynamic-depth proxy，不代表必须有 5-bit ISA；
+5. 任何 WHBM < 1.0 都必须作为 sensitivity / 上界单独标注。
 ```
 
 ## 11. ONNXim / GemmWS 下沉实现
@@ -319,8 +378,9 @@ PubMed 和 Cora 的趋势一致：
 ```text
 ONNXim/src/operations/GemmWS.cc
     1. 为 activation MOVIN 显式生成 plane-group fetch depth；
-    2. 为 weight MOVIN 显式建模 weight-stationary HBM amortization；
-    3. 给 GEMM instruction 标注 effective / fetch / issue / WRF / psum depth。
+    2. 为 weight MOVIN 保留 original/actual 计数；
+    3. 可选建模 weight-stationary HBM sensitivity；
+    4. 给 GEMM instruction 标注 effective / fetch / issue / WRF / psum depth。
 
 ONNXim/src/SystolicWS.cc
     1. 用 issue depth 缩放 bit-plane issue cycles；
@@ -341,7 +401,7 @@ ONNXim/src/Core.cc
 4. W RF / broadcast gating，减少片上权重广播深度；
 5. psum update gating，减少低位 partial-sum 更新；
 6. risk-bucket disabled 时，低风险节点被 P8 batch 拖住；
-7. weight-stationary reuse 时，降低 weight HBM actual request。
+7. 可选 weight-stationary sensitivity 会降低 weight HBM actual request，但主线不默认使用。
 ```
 
 ### 11.1 Microbench 运行方式
@@ -369,7 +429,7 @@ output/onnxim_graphbit/datapath_suite_s8/datapath_summary.tsv
 | plane_group2_issue_rf_psum_p6 | 37.23M | 0.750 | 1.000 | 6.0 | 6.0 | 6.0 | 6.0 | activation demand fetch 生效 |
 | plane_group2_bound_low | 37.22M | 0.750 | 1.000 | 6.0 | 5.0 | 5.0 | 5.0 | predictor-free bound early stop 生效 |
 | no_risk_bucket_p6 | 37.65M | 1.000 | 1.000 | 8.0 | 8.0 | 8.0 | 8.0 | 无 risk bucket 时被 P8 batch 拖住 |
-| plane_group2_ws_p6 | 15.09M | 0.750 | 0.250 | 6.0 | 6.0 | 6.0 | 6.0 | weight-stationary HBM reuse 生效 |
+| ws_sensitivity_4x_p6 | 15.09M | 0.750 | 0.250 | 6.0 | 6.0 | 6.0 | 6.0 | 4x WS sensitivity，上界/参数扫描 |
 
 这个结果说明：
 
@@ -378,7 +438,7 @@ output/onnxim_graphbit/datapath_suite_s8/datapath_summary.tsv
 2. byte-major layout 无法减少 activation fetch；
 3. plane-group layout 能把 Aread 降到 6/8；
 4. risk-bucket batching 是让低风险节点真的停在低 depth 的必要条件；
-5. weight-stationary batching 是把 W HBM 也降下来的关键。
+5. W HBM 不自动下降；`ws_sensitivity_4x_p6` 只是显式 4x WS 假设下的上界。
 ```
 
 ### 11.3 下一步

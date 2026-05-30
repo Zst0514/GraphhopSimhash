@@ -317,7 +317,7 @@ def default_flows() -> list[Dataflow]:
             include_pack_overhead=True,
         ),
         Dataflow(
-            name="RiskBucket + WS",
+            name="RiskBucket + WS sensitivity",
             profile_match="degree static",
             schedule="risk_bucket",
             activation_layout="plane_group",
@@ -399,8 +399,8 @@ def write_outputs(rows: list[dict[str, Any]], output_dir: Path, workload: dict[s
             "- ByteMajor issue gate removes PE/WRF/psum low-bit cycles but still reads full activations.",
             "- PlaneGroup random mixed has plane-group layout but loses depth savings when high-risk nodes share a batch.",
             "- PlaneGroup risk bucket is the minimum viable Graph-Bit datapath: plane-group layout plus risk-bucket scheduling.",
-            "- RiskBucket + WS adds weight-stationary tile reuse; this is how skipped bit-planes stop being dominated by HBM weight reads.",
-            "- Random risk full NPU uses the same hardware as RiskBucket + WS but random assignment, isolating why graph risk matters.",
+            "- RiskBucket + WS sensitivity is not a default claim. It only shows what would happen if a larger risk-bucket/weight-stationary batch is explicitly assumed.",
+            "- Random risk full NPU uses the same optional WS sensitivity setting but random assignment, isolating why graph risk matters when that assumption is enabled.",
         ]
     )
     txt_path.write_text("\n".join(lines) + "\n")
@@ -409,7 +409,13 @@ def write_outputs(rows: list[dict[str, Any]], output_dir: Path, workload: dict[s
         "assumptions": {
             "activation_byte_major_cannot_reduce_activation_reads": True,
             "plane_group_fetch_granularity_bits": args.plane_group_bits,
-            "weight_hbm_saving_requires_weight_stationary_tile_reuse": True,
+            "weight_hbm_saving_requires_extra_weight_stationary_batching": True,
+            "weight_stationary_reuse_gain": safe_div(
+                args.weight_stationary_tile_batch,
+                args.baseline_weight_tile_batch,
+                1.0,
+            ),
+            "weight_stationary_is_sensitivity_not_main_claim": True,
             "p5_fetches_one_2bit_group_more_than_p4_when_plane_group_bits_is_2": args.plane_group_bits == 2,
         },
         "args": vars(args) | {"workload": str(args.workload), "output_dir": str(args.output_dir)},
