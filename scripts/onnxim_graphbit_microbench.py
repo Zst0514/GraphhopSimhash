@@ -158,6 +158,12 @@ def write_graphbit_config(base_config: Path, workspace: Path, args: argparse.Nam
             "graphbit_bound_enable": bool(args.graphbit_bound_enable),
             "graphbit_bound_tolerance": float(args.graphbit_bound_tolerance),
             "graphbit_bound_scale": float(args.graphbit_bound_scale),
+            "graphbit_bound_mode": args.graphbit_bound_mode,
+            "graphbit_bound_weight_abs_mean": float(args.graphbit_bound_weight_abs_mean),
+            "graphbit_bound_weight_abs_max": float(args.graphbit_bound_weight_abs_max),
+            "graphbit_bound_partial_norm_scale": float(args.graphbit_bound_partial_norm_scale),
+            "graphbit_bound_partial_norm_floor": float(args.graphbit_bound_partial_norm_floor),
+            "graphbit_bound_safety_factor": float(args.graphbit_bound_safety_factor),
             "graphbit_memory_scale": float(args.graphbit_memory_scale),
             "graphbit_activation_layout": args.graphbit_activation_layout,
             "graphbit_plane_group_bits": int(args.graphbit_plane_group_bits),
@@ -175,7 +181,7 @@ def write_graphbit_config(base_config: Path, workspace: Path, args: argparse.Nam
     config_dir.mkdir(parents=True, exist_ok=True)
     suffix = f"gbp{args.graphbit_depth}_min{args.graphbit_min_depth}"
     if args.graphbit_bound_enable:
-        suffix += f"_tol{str(args.graphbit_bound_tolerance).replace('.', 'p')}"
+        suffix += f"_{args.graphbit_bound_mode}_tol{str(args.graphbit_bound_tolerance).replace('.', 'p')}"
     path = config_dir / f"{base_config.stem}_{suffix}.json"
     with path.open("w") as handle:
         json.dump(payload, handle, indent=2)
@@ -423,6 +429,12 @@ def main() -> None:
     parser.add_argument("--graphbit-bound-enable", action="store_true")
     parser.add_argument("--graphbit-bound-tolerance", type=float, default=0.0)
     parser.add_argument("--graphbit-bound-scale", type=float, default=1.0)
+    parser.add_argument("--graphbit-bound-mode", choices=["range", "tile_mean", "tile_max"], default="range")
+    parser.add_argument("--graphbit-bound-weight-abs-mean", type=float, default=0.50)
+    parser.add_argument("--graphbit-bound-weight-abs-max", type=float, default=1.00)
+    parser.add_argument("--graphbit-bound-partial-norm-scale", type=float, default=1.0)
+    parser.add_argument("--graphbit-bound-partial-norm-floor", type=float, default=1.0e-6)
+    parser.add_argument("--graphbit-bound-safety-factor", type=float, default=1.0)
     parser.add_argument("--graphbit-memory-scale", type=float, default=1.0)
     parser.add_argument("--graphbit-activation-layout", choices=["plane_group", "byte_major"], default="plane_group")
     parser.add_argument("--graphbit-plane-group-bits", type=int, default=1)

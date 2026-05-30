@@ -30,11 +30,53 @@ namespace
         std::pow(2.0, static_cast<double>(full_depth - depth)) - 1.0;
     double normalized_omitted = omitted_range / std::max(1.0, full_range);
 
-    // A wider K tile accumulates more omitted low-bit contribution. The sqrt
-    // term is a conservative normalized bound proxy rather than an oracle value.
+    // Legacy bound: only the remaining low-bit range and K-tile width are used.
+    // This is useful as a lower-fidelity baseline and is kept selectable for
+    // ablations against the tile-aware predictor-free bound below.
+    if (config.graphbit_bound_mode == "range")
+    {
+      double k_scale = std::sqrt(static_cast<double>(std::max(1u, tile_k))) /
+                       std::sqrt(128.0);
+      return normalized_omitted * k_scale * config.graphbit_bound_scale;
+    }
+
+    // Tile-aware predictor-free bound.  No oracle embedding or learned
+    // predictor is used.  We bound the uncomputed low-bit contribution with
+    //
+    //   ||A_low @ W|| <= max_abs(A_low) * sum_abs(W_tile)
+    //
+    // and normalize by a partial-output norm proxy.  ONNXim does not carry
+    // runtime activation/weight values, so W statistics are modeled with
+    // hardware-visible tile metadata knobs.  The mean mode is the deployable
+    // default; max mode is a conservative stress test.
+    double tile = static_cast<double>(std::max(1u, tile_k));
+    double weight_mean =
+        std::max(1.0e-9, static_cast<double>(config.graphbit_bound_weight_abs_mean));
+    double weight_max =
+        std::max(weight_mean, static_cast<double>(config.graphbit_bound_weight_abs_max));
+    double remaining_weight =
+        (config.graphbit_bound_mode == "tile_max") ? weight_max : weight_mean;
+    double remaining_bound =
+        normalized_omitted * tile * remaining_weight *
+        std::max(0.0, static_cast<double>(config.graphbit_bound_safety_factor));
+
+    double high_range = std::max(0.0, 1.0 - normalized_omitted);
+    double partial_norm =
+        high_range * tile * weight_mean *
+        std::max(0.0, static_cast<double>(config.graphbit_bound_partial_norm_scale));
+    partial_norm =
+        std::max(partial_norm,
+                 static_cast<double>(config.graphbit_bound_partial_norm_floor));
+
+    double normalized_bound =
+        remaining_bound / std::max(1.0e-12, partial_norm + remaining_bound);
+
+    // Keep the old K-width guard as a configurable safety multiplier.  This
+    // makes larger K tiles slightly harder to terminate early unless explicitly
+    // tuned down.
     double k_scale = std::sqrt(static_cast<double>(std::max(1u, tile_k))) /
                      std::sqrt(128.0);
-    return normalized_omitted * k_scale * config.graphbit_bound_scale;
+    return normalized_bound * k_scale * config.graphbit_bound_scale;
   }
 
   uint32_t select_graphbit_effective_depth(uint32_t tile_k,

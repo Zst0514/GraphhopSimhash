@@ -84,6 +84,12 @@ struct SimulationConfig {
   uint32_t graphbit_min_depth = 4;
   float graphbit_bound_tolerance = 0.0f;
   float graphbit_bound_scale = 1.0f;
+  std::string graphbit_bound_mode = "range";
+  float graphbit_bound_weight_abs_mean = 0.50f;
+  float graphbit_bound_weight_abs_max = 1.00f;
+  float graphbit_bound_partial_norm_scale = 1.0f;
+  float graphbit_bound_partial_norm_floor = 1.0e-6f;
+  float graphbit_bound_safety_factor = 1.0f;
   float graphbit_memory_scale = 1.0f;
   std::string graphbit_activation_layout = "plane_group";
   uint32_t graphbit_plane_group_bits = 1;

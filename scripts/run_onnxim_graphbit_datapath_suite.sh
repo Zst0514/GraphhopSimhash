@@ -64,6 +64,29 @@ run_case "plane_group2_bound_low" \
   --graphbit-min-depth 4 \
   --graphbit-bound-enable \
   --graphbit-bound-tolerance 0.04 \
+  --graphbit-bound-mode range \
+  --graphbit-activation-layout plane_group \
+  --graphbit-plane-group-bits 2 \
+  --graphbit-weight-rf-gate \
+  --graphbit-psum-gate
+
+run_case "plane_group2_tilemean_low" \
+  --graphbit-depth 8 \
+  --graphbit-min-depth 4 \
+  --graphbit-bound-enable \
+  --graphbit-bound-tolerance 0.04 \
+  --graphbit-bound-mode tile_mean \
+  --graphbit-activation-layout plane_group \
+  --graphbit-plane-group-bits 2 \
+  --graphbit-weight-rf-gate \
+  --graphbit-psum-gate
+
+run_case "plane_group2_tilemax_low" \
+  --graphbit-depth 8 \
+  --graphbit-min-depth 4 \
+  --graphbit-bound-enable \
+  --graphbit-bound-tolerance 0.04 \
+  --graphbit-bound-mode tile_max \
   --graphbit-activation-layout plane_group \
   --graphbit-plane-group-bits 2 \
   --graphbit-weight-rf-gate \

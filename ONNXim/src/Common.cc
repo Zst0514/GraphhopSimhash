@@ -148,6 +148,18 @@ SimulationConfig initialize_config(json config) {
     parsed_config.graphbit_bound_tolerance = config["graphbit_bound_tolerance"];
   if (config.contains("graphbit_bound_scale"))
     parsed_config.graphbit_bound_scale = config["graphbit_bound_scale"];
+  if (config.contains("graphbit_bound_mode"))
+    parsed_config.graphbit_bound_mode = config["graphbit_bound_mode"];
+  if (config.contains("graphbit_bound_weight_abs_mean"))
+    parsed_config.graphbit_bound_weight_abs_mean = config["graphbit_bound_weight_abs_mean"];
+  if (config.contains("graphbit_bound_weight_abs_max"))
+    parsed_config.graphbit_bound_weight_abs_max = config["graphbit_bound_weight_abs_max"];
+  if (config.contains("graphbit_bound_partial_norm_scale"))
+    parsed_config.graphbit_bound_partial_norm_scale = config["graphbit_bound_partial_norm_scale"];
+  if (config.contains("graphbit_bound_partial_norm_floor"))
+    parsed_config.graphbit_bound_partial_norm_floor = config["graphbit_bound_partial_norm_floor"];
+  if (config.contains("graphbit_bound_safety_factor"))
+    parsed_config.graphbit_bound_safety_factor = config["graphbit_bound_safety_factor"];
   if (config.contains("graphbit_memory_scale"))
     parsed_config.graphbit_memory_scale = config["graphbit_memory_scale"];
   if (config.contains("graphbit_activation_layout"))
