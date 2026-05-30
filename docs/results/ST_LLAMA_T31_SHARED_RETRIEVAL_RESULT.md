@@ -2,7 +2,7 @@
 
 日期：2026-05-30
 
-本文档记录一次针对 `ST/data_x` 与 `Llama2-7B W4A16` 的联合调参结果。
+本文档记录一次针对 `ST full/HQ cache (data.x)` 与 `Llama2-7B W4A16` 的联合调参结果。
 
 目标是：
 
@@ -67,10 +67,22 @@ support < 3    -> compute
 
 | Embedding 源 | 数据集 | Baseline Acc | ResidualReuse | Acc | Drop | 关键 gate 设置 |
 |---|---|---:|---:|---:|---:|---|
-| ST/data_x | Cora | 0.7200 | 48.4% | 0.7079 | 1.21% | separate, tau=0.575 |
-| ST/data_x | PubMed | 0.7587 | 40.4% | 0.7404 | 1.84% | shared, tau=0.65 |
+| ST full/HQ cache (data.x) | Cora | 0.7200 | 48.4% | 0.7079 | 1.21% | separate, tau=0.575 |
+| ST full/HQ cache (data.x) | PubMed | 0.7587 | 40.4% | 0.7404 | 1.84% | shared, tau=0.65 |
 | Llama2-7B W4A16 | Cora | 0.7308 | 40.8% | 0.7132 | 1.76% | classifier-aware separate, tau=0.40 |
 | Llama2-7B W4A16 | PubMed | 0.7000 | 40.8% | 0.6819 | 1.81% | shared, tau=0.91 |
+
+这里的 `data.x` 不是 cheap feature，也不是 DistilBERT Layer-1。
+在 ST 实验线中，`data.x` 来自 `cache_data/{Cora,Pubmed}/ST/processed/geometric_data_processed.pt`，也就是缓存好的 ST full/HQ 节点特征；`data.x` 只是该 full embedding 在 PyG `Data` 对象里的存放位置。
+
+对应日志形式为：
+
+```text
+[ResidualTarget] source=data_x | path=<data.x> | shape=(2708, 384)
+[ResidualTarget] source=data_x | path=<data.x> | shape=(19717, 384)
+```
+
+Llama2-7B W4A16 则不是从 `data.x` 读取，而是通过 `real_quant_fp` 加载独立的 Llama embedding pool。
 
 ## Llama 需要调整的原因
 
@@ -134,4 +146,3 @@ Llama/Cora 使用的新增关键参数：
 /tmp/llama_cora_T31_tau_relax_3run_20260530/tau040.log
 /tmp/llama_T31_final_3run_20260530/pubmed.log
 ```
-
