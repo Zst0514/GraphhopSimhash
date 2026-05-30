@@ -233,3 +233,87 @@ one W tile to serve more miss nodes before eviction.
 应该说：当 scheduler/capacity 支持 W tile 跨 X 个同风险 node blocks 复用时，
 ONNXim sensitivity 显示 weight-side bottleneck 可以被显著摊薄。
 ```
+
+## 9. Bucket feasibility model
+
+为了避免被质疑“凭空把 W HBM 降到 0.5/0.25”，现在增加一个独立建模脚本：
+
+```bash
+python GraphhopSimhash/scripts/model_graphbit_bucket_scheduler.py \
+  --workload-json output/graphbit_bound_runtime/cora_h8_54_T40_boundclean_quick/predictor_free_workload.json \
+  --workload-json output/graphbit_bound_runtime/pubmed_h8_54_T40_boundclean_runs10/predictor_free_workload.json \
+  --profile-match degree_runtime-bound \
+  --manual-profile arxiv_h20_m30_l30_Deg:arxiv:0.0:0.20:0.30:0.30:0.20 \
+  --tile-batches 16 32 64 \
+  --baseline-tile-batch 16 \
+  --sram-kb 512 \
+  --tile-k 128 \
+  --tile-n 128 \
+  --weight-bits 4 \
+  --fetch-depth 6 \
+  --psum-bits 32 \
+  --output-bits 16 \
+  --buffer-factor 2 \
+  --output-dir output/onnxim_graphbit/bucket_feasibility
+```
+
+这个模型显式检查四件事：
+
+```text
+1. 每个 P8/P6/P5/P4 bucket 有多少 miss nodes
+2. bucket 是否足够形成 32/64 级别 same-risk tile batch
+3. SRAM 是否能容纳 W tile + activation plane buffer + psum + output buffer
+4. 如果 bucket 太小或 SRAM 不够，自动退化到 baseline tile batch
+```
+
+默认 SRAM 模型：
+
+```text
+SRAM = 512KB
+W tile = 128 x 128 x 4b = 8KB
+activation plane buffer = batch x 128 x 6b
+psum buffer = batch x 128 x 32b
+output buffer = batch x 128 x 16b
+buffer_factor = 2.0
+```
+
+在这个配置下，最大可容纳 batch 约为 293，因此 32/64 级别的 same-risk tile batch 都能放入 SRAM。
+
+当前结果：
+
+```text
+dataset  profile                  miss   tileB  P8/P6/P5/P4 nodes        Wscale  Wred
+-------------------------------------------------------------------------------------
+cora     degree_runtime-bound     72.1%     16  390/978/585/0            1.000    0.0%
+cora     degree_runtime-bound     72.1%     32  390/978/585/0            0.508   49.2%
+cora     degree_runtime-bound     72.1%     64  390/978/585/0            0.266   73.4%
+pubmed   degree_runtime-bound     45.9%     16  1814/4515/2721/0         1.000    0.0%
+pubmed   degree_runtime-bound     45.9%     32  1814/4515/2721/0         0.502   49.8%
+pubmed   degree_runtime-bound     45.9%     64  1814/4515/2721/0         0.252   74.8%
+arxiv    arxiv_h20_m30_l30_Deg   100.0%     16  33869/50803/50803/33869  1.000    0.0%
+arxiv    arxiv_h20_m30_l30_Deg   100.0%     32  33869/50803/50803/33869  0.500   50.0%
+arxiv    arxiv_h20_m30_l30_Deg   100.0%     64  33869/50803/50803/33869  0.250   75.0%
+```
+
+解释：
+
+```text
+tileB=16:
+    baseline tile batch，没有额外 W-HBM amortization。
+
+tileB=32 / 64:
+    只有当真实 bucket size 和 SRAM capacity 都支持时，才允许同一个 W tile 服务更多同风险节点。
+    Wscale 是相对于 baseline tileB=16 的 W tile load 次数比例。
+
+自动退化：
+    如果某个 bucket 节点数不足或 SRAM 放不下，脚本会把该 bucket 退回 baseline tileB=16。
+    因此 Wscale<1 不是免费假设，而是由 bucket size + SRAM model 共同决定。
+```
+
+这一步把 Graph-Bit 的硬件主张从“假设 W tile 可以多复用”推进为：
+
+```text
+Graph risk creates large same-risk buckets;
+SRAM capacity supports 32/64-sized same-risk tile batches;
+therefore weight-stationary scheduling can amortize W tile loads when bucket size is sufficient.
+```
