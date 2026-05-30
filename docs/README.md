@@ -41,3 +41,4 @@
 ## Roadmap
 
 - [PROJECT_ROADMAP.md](PROJECT_ROADMAP.md): 当前项目主线、output 管理原则和下一步硬件仿真实现计划。
+- [PROJECT_TODO.md](PROJECT_TODO.md): 当前缺口、下一步实验优先级、可选增强和不建议继续投入的方向。
