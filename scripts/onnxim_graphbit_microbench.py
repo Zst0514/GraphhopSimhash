@@ -225,6 +225,25 @@ def parse_log(path: Path) -> dict[str, Any]:
         r"GraphBitMemory ReadWeightActual\s+(\d+)\s+ReadWeightOriginal\s+(\d+)",
         text,
     )
+    graphbit_depth_hist_matches = re.findall(
+        r"GraphBitDepthHist Effective\s+(.+?)Fetch\s+(.+?)Issue\s+(.+)$",
+        text,
+        flags=re.MULTILINE,
+    )
+
+    def parse_depth_hist(fragment: str) -> dict[str, int]:
+        hist: dict[str, int] = {}
+        for depth, count in re.findall(r"D(\d+):(\d+)", fragment):
+            hist[depth] = hist.get(depth, 0) + int(count)
+        return hist
+
+    def merge_hist(kind_index: int) -> dict[str, int]:
+        merged: dict[str, int] = {}
+        for match in graphbit_depth_hist_matches:
+            hist = parse_depth_hist(match[kind_index])
+            for depth, count in hist.items():
+                merged[depth] = merged.get(depth, 0) + count
+        return dict(sorted(merged.items(), key=lambda item: int(item[0])))
 
     bw_reads = sum(int(r) for r, _ in avg_bw_matches)
     bw_writes = sum(int(w) for _, w in avg_bw_matches)
@@ -290,6 +309,9 @@ def parse_log(path: Path) -> dict[str, Any]:
         "graphbit_avg_issue_depth": graphbit_avg_issue_depth,
         "graphbit_avg_weight_rf_depth": graphbit_avg_weight_rf_depth,
         "graphbit_avg_psum_depth": graphbit_avg_psum_depth,
+        "graphbit_effective_depth_hist": json.dumps(merge_hist(0), sort_keys=True),
+        "graphbit_fetch_depth_hist": json.dumps(merge_hist(1), sort_keys=True),
+        "graphbit_issue_depth_hist": json.dumps(merge_hist(2), sort_keys=True),
         "log": str(path),
     }
 
@@ -345,6 +367,19 @@ def write_summary(specs: list[GemmSpec], workspace: Path, layers: int) -> dict[s
         },
     }
     graphbit_inst = aggregate["per_layer"]["graphbit_inst"]
+
+    def add_hist_from_rows(key: str) -> dict[str, int]:
+        merged: dict[str, int] = {}
+        for row in rows:
+            try:
+                hist = json.loads(row.get(key) or "{}")
+            except json.JSONDecodeError:
+                hist = {}
+            weight = int(row["count_per_layer"])
+            for depth, count in hist.items():
+                merged[str(depth)] = merged.get(str(depth), 0) + int(count) * weight
+        return dict(sorted(merged.items(), key=lambda item: int(item[0])))
+
     if graphbit_inst:
         aggregate["per_layer"]["graphbit_avg_depth"] = (
             sum(
@@ -374,6 +409,15 @@ def write_summary(specs: list[GemmSpec], workspace: Path, layers: int) -> dict[s
                 sum((row[key] or 0.0) * row["graphbit_inst"] * row["count_per_layer"] for row in rows)
                 / graphbit_inst
             )
+        aggregate["per_layer"]["graphbit_effective_depth_hist"] = add_hist_from_rows(
+            "graphbit_effective_depth_hist"
+        )
+        aggregate["per_layer"]["graphbit_fetch_depth_hist"] = add_hist_from_rows(
+            "graphbit_fetch_depth_hist"
+        )
+        aggregate["per_layer"]["graphbit_issue_depth_hist"] = add_hist_from_rows(
+            "graphbit_issue_depth_hist"
+        )
     else:
         aggregate["per_layer"]["graphbit_avg_depth"] = None
         aggregate["per_layer"]["graphbit_avg_saved_bitplanes"] = None
@@ -381,6 +425,9 @@ def write_summary(specs: list[GemmSpec], workspace: Path, layers: int) -> dict[s
         aggregate["per_layer"]["graphbit_avg_issue_depth"] = None
         aggregate["per_layer"]["graphbit_avg_weight_rf_depth"] = None
         aggregate["per_layer"]["graphbit_avg_psum_depth"] = None
+        aggregate["per_layer"]["graphbit_effective_depth_hist"] = {}
+        aggregate["per_layer"]["graphbit_fetch_depth_hist"] = {}
+        aggregate["per_layer"]["graphbit_issue_depth_hist"] = {}
     aggregate["encoder"] = {
         key: value * layers for key, value in aggregate["per_layer"].items()
         if isinstance(value, (int, float))
@@ -396,6 +443,15 @@ def write_summary(specs: list[GemmSpec], workspace: Path, layers: int) -> dict[s
         "graphbit_avg_psum_depth",
     ):
         aggregate["encoder"][key] = aggregate["per_layer"][key]
+    for key in (
+        "graphbit_effective_depth_hist",
+        "graphbit_fetch_depth_hist",
+        "graphbit_issue_depth_hist",
+    ):
+        aggregate["encoder"][key] = {
+            depth: int(count) * layers
+            for depth, count in aggregate["per_layer"][key].items()
+        }
 
     aggregate_path = workspace / "aggregate.json"
     with aggregate_path.open("w") as handle:

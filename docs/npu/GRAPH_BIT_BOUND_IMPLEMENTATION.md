@@ -237,6 +237,10 @@ output/onnxim_graphbit/datapath_suite_s16/datapath_summary.tsv
 AvgDepth:
     runtime-bound 最终平均执行深度。
 
+EffectiveDepthHist:
+    每个 GEMM tile / instruction 的实际停止深度分布。
+    例如 {"4": 395264} 表示所有被统计的 tile 都在 D4 停止。
+
 fetch:
     activation plane-group fetch 深度。
 
@@ -322,6 +326,7 @@ runtime tile bound -> actual stop depth
 已实现:
     tile-level bound
     bit-depth selection
+    per-tile stop-depth histogram
     activation demand fetch
     PE issue gating
     W RF / psum gating statistics
@@ -329,7 +334,7 @@ runtime tile bound -> actual stop depth
 未实现:
     真实 Verilog PE array
     真实 activation value distribution
-    per-channel exact partial sum
+    per-MAC value-level partial sum trace
 ```
 
 因此论文表述应是：
@@ -340,3 +345,75 @@ and estimates cycles / traffic / energy proxy under a bit-plane-major NPU datafl
 ```
 
 不要写成已经完成 RTL 或硅级能耗测量。
+
+## 11. Stop-depth trace
+
+严格来说，Graph-Bit 需要证明 early-stop 不是只靠 embedding proxy 表格，而是在 ONNXim 的 NPU datapath 中实际触发。当前实现已经在 `SystolicWS` 中输出 per-tile / per-instruction 的 stop-depth histogram：
+
+```text
+GraphBitDepthHist Effective D4:...
+GraphBitDepthHist ... Fetch D4:...
+GraphBitDepthHist ... Issue D4:...
+```
+
+对应解析后的字段在：
+
+```text
+output/onnxim_graphbit/.../summary.tsv
+output/onnxim_graphbit/.../aggregate.json
+```
+
+字段包括：
+
+```text
+graphbit_effective_depth_hist
+graphbit_fetch_depth_hist
+graphbit_issue_depth_hist
+```
+
+示例命令：
+
+```bash
+python GraphhopSimhash/scripts/onnxim_graphbit_microbench.py \
+  --seq-len 8 \
+  --workspace output/onnxim_graphbit/microbench_s8_depthhist \
+  --graphbit-depth 8 \
+  --graphbit-min-depth 4 \
+  --graphbit-bound-enable \
+  --graphbit-bound-mode tile_mean \
+  --graphbit-bound-tolerance 0.12 \
+  --graphbit-activation-layout plane_group \
+  --graphbit-plane-group-bits 2 \
+  --graphbit-weight-rf-gate \
+  --graphbit-psum-gate \
+  --action all \
+  --log-level info
+```
+
+当前 quick sanity 结果：
+
+```text
+graphbit_effective_depth_hist = {"4": 395264}
+graphbit_fetch_depth_hist     = {"4": 395264}
+graphbit_issue_depth_hist     = {"4": 395264}
+AvgDepth = 4.0
+BoundStops = 395264
+```
+
+这说明在该 tolerance 下，ONNXim 的 GEMM tile 不是静态 P6/P4 表格代理，而是在 simulator 内部通过 runtime bound 真实停在 D4。
+
+为什么不是逐 MAC trace：
+
+```text
+1. 硬件 early-stop 通常在 tile / PE-group 粒度决策，而不是每个 MAC 单独决策。
+2. per-MAC trace 体积巨大，对架构论文不一定更有解释力。
+3. per-tile histogram 更贴近 NPU scheduler、bit-plane issue controller 和 SRAM fetch controller 的真实控制粒度。
+```
+
+因此主线报告应使用：
+
+```text
+per-tile stop-depth histogram
++ fetch / issue / WRF / psum depth
++ cycles / traffic / energy proxy
+```

@@ -91,6 +91,15 @@ void SystolicWS::cycle() {
         _stat_graphbit_issue_bitplanes += issue_depth;
         _stat_graphbit_weight_bitplanes += weight_depth;
         _stat_graphbit_psum_bitplanes += psum_depth;
+        if (effective_depth < _stat_graphbit_effective_depth_hist.size()) {
+          _stat_graphbit_effective_depth_hist[effective_depth]++;
+        }
+        if (fetch_depth < _stat_graphbit_fetch_depth_hist.size()) {
+          _stat_graphbit_fetch_depth_hist[fetch_depth]++;
+        }
+        if (issue_depth < _stat_graphbit_issue_depth_hist.size()) {
+          _stat_graphbit_issue_depth_hist[issue_depth]++;
+        }
         _stat_graphbit_raw_compute_cycles += raw_cycles;
         _stat_graphbit_effective_compute_cycles += effective_cycles;
         if (front->graphbit_remaining_bound <=
@@ -266,5 +275,28 @@ void SystolicWS::print_stats() {
         "Core [{}] : GraphBitDataflow AvgFetchDepth {:.2f} AvgIssueDepth {:.2f} "
         "AvgWeightRFDepth {:.2f} AvgPsumDepth {:.2f}",
         _id, avg_fetch, avg_issue, avg_weight, avg_psum);
+    std::string effective_hist;
+    std::string fetch_hist;
+    std::string issue_hist;
+    for (size_t depth = 0; depth < _stat_graphbit_effective_depth_hist.size();
+         depth++) {
+      if (_stat_graphbit_effective_depth_hist[depth] > 0) {
+        effective_hist +=
+            "D" + std::to_string(depth) + ":" +
+            std::to_string(_stat_graphbit_effective_depth_hist[depth]) + " ";
+      }
+      if (_stat_graphbit_fetch_depth_hist[depth] > 0) {
+        fetch_hist += "D" + std::to_string(depth) + ":" +
+                      std::to_string(_stat_graphbit_fetch_depth_hist[depth]) +
+                      " ";
+      }
+      if (_stat_graphbit_issue_depth_hist[depth] > 0) {
+        issue_hist += "D" + std::to_string(depth) + ":" +
+                      std::to_string(_stat_graphbit_issue_depth_hist[depth]) +
+                      " ";
+      }
+    }
+    spdlog::info("Core [{}] : GraphBitDepthHist Effective {}Fetch {}Issue {}",
+                 _id, effective_hist, fetch_hist, issue_hist);
   }
 }

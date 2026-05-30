@@ -1,5 +1,7 @@
 #include "Core.h"
 
+#include <array>
+
 class SystolicWS : public Core {
  public:
   SystolicWS(uint32_t id, SimulationConfig config);
@@ -20,6 +22,9 @@ class SystolicWS : public Core {
   uint64_t _stat_graphbit_issue_bitplanes = 0;
   uint64_t _stat_graphbit_weight_bitplanes = 0;
   uint64_t _stat_graphbit_psum_bitplanes = 0;
+  std::array<uint64_t, 33> _stat_graphbit_effective_depth_hist = {};
+  std::array<uint64_t, 33> _stat_graphbit_fetch_depth_hist = {};
+  std::array<uint64_t, 33> _stat_graphbit_issue_depth_hist = {};
   double _stat_graphbit_effective_compute_cycles = 0;
   double _stat_graphbit_raw_compute_cycles = 0;
   cycle_type get_inst_raw_compute_cycles(std::unique_ptr<Instruction>& inst);
