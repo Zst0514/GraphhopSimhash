@@ -13,9 +13,10 @@
 
 - [GRAPH_BIT_NPU_DESIGN.md](npu/GRAPH_BIT_NPU_DESIGN.md): Graph-Bit NPU 主线设计，包含 datapath、scheduler、buffer、cost model。
 - [GRAPH_BIT_EARLY_STOP_IMPLEMENTATION.md](npu/GRAPH_BIT_EARLY_STOP_IMPLEMENTATION.md): bit-plane early stop 从 CLI、runner、ONNXim/GemmWS 到 trace replay 的代码级实现说明。
+- [GRAPH_BIT_PREDICTOR_FREE_WTILE.md](npu/GRAPH_BIT_PREDICTOR_FREE_WTILE.md): predictor-free bound、activation bit-plane demand fetch、W tile 搬运节省和 b32/b64 tradeoff。
 - [GRAPH_BIT_FULLSTACK_REPRODUCTION_GUIDE.md](npu/GRAPH_BIT_FULLSTACK_REPRODUCTION_GUIDE.md): Graph-Bit full-stack 复现实验流程、调参入口、输出文件和结果解读。
 
-历史 proxy、早期理论拆分和旧 scheduler 说明已移到 `docs/archive/npu/`。主线只维护上面三份文档。
+历史 proxy、早期理论拆分和旧 scheduler 说明已移到 `docs/archive/npu/`。主线只维护上面四份文档。
 
 ## Results
 

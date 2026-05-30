@@ -48,6 +48,12 @@ Hardware validation:
 
 这比“只做 embedding proxy”更强，也避免了直接手写一个理想 speedup。
 
+prediction-free early stop 和 W tile 省搬运的细节见：
+
+```text
+docs/npu/GRAPH_BIT_PREDICTOR_FREE_WTILE.md
+```
+
 ### 1.3 当前 Cora Graph-Bit hardware table
 
 当前 Cora h8_54_T40 trace-driven replay：
