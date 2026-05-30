@@ -772,7 +772,93 @@ PubMed:
     复用率从 SoftDirect 的 69.5% 降到 42.3%，但 drop 从 4.48% 降到 1.96%。
 ```
 
-因此，当前纯 residual reuse 推荐采用这组共享在线配置；Graph-Bit full-stack 仍需要下一步把这个 learned accept gate trace 接入 `residual_precision_depth` 后重跑，不能直接把旧的 Graph-Bit full-stack 表和这组结果混用。
+因此，当前 ST/data.x 纯 residual reuse 推荐采用这组共享在线配置。
+
+### 7.11 Cora/LLaMA Residual Gate Sanity Check
+
+ST/768d 的结果不能直接搬到 LLaMA-7B/4096d。为避免把 ST-sized adapter 的结论误用到 LLaMA，当前又做了 Cora/LLaMA W4A8 target 的 residual-gate 检查。
+
+当前 Cora/LLaMA 推荐前端：
+
+```text
+8 heads x 16-bit
+R = 2
+T = 30
+score = 3 / 1 / 1
+
+support >= 5   -> hard direct reuse
+support = 3..4 -> residual candidate
+support < 3    -> compute
+
+residual_accept_mode = shared
+gate_accept_threshold = 0.60
+target = llama2_7b W4A8 raw embedding
+```
+
+3-run 结果：
+
+| Dataset/Target | Baseline Acc | Direct Reuse | Direct Drop | SoftDirect Reuse | SoftDirect Drop | Residual Reuse | Residual Drop | TrainPairs | Alpha |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| Cora / LLaMA W4A8 | 0.7289 | 16.1% | 0.53% | 50.4% | 2.97% | 29.7% | 1.47% | 456.3 | 0.122 |
+
+解释：
+
+```text
+SoftDirectReuse 说明 h8_53_T30 能找到大量候选，但 LLaMA fuzzy hit 质量明显比 ST 更难。
+ResidualReuse 使用 shared accept gate 后，会拒绝一部分 soft hit：
+    reuse 从 50.4% 降到 29.7%
+    drop 从 2.97% 降到 1.47%
+这说明 learned gate 对 LLaMA 是必要的，不能只靠 support split。
+```
+
+对应命令：
+
+```bash
+python -m GraphhopSimhash \
+  --datasets cora \
+  --runs 3 \
+  --experiment_suite residual_reuse \
+  --real_quant_model_name llama2_7b \
+  --real_quant_fp_tag W4A8 \
+  --residual_embedding_source real_quant_fp \
+  --learned_hash_epochs 10 \
+  --learned_hash_dim 128 \
+  --hash_heads_per_route 8 \
+  --hamming_only_acceptor \
+  --enable_score_gate \
+  --allow_rare_fuzzy \
+  --score_reuse_threshold 30 \
+  --score_propagation_weight 3 \
+  --score_graph_context_weight 1 \
+  --score_low_unique_weight 1 \
+  --radius 2 \
+  --main_hash_head_bits 16 16 16 16 16 16 16 16 \
+  --residual_fit_profile llama \
+  --residual_adapter_type mlp \
+  --residual_accept_mode shared \
+  --residual_hard_min_support_hits 5 \
+  --residual_soft_min_support_hits 3 \
+  --residual_rank 64 \
+  --residual_epochs 200 \
+  --residual_max_train_pairs 4096 \
+  --residual_alpha_grid 0 0.03125 0.0625 0.125 0.25 0.5 \
+  --residual_support_aware_alpha \
+  --residual_bucket_mode support_dist \
+  --residual_offline_extra_anchors_per_node 8 \
+  --residual_positive_error_max 0.40 \
+  --residual_offline_extra_query_nodes 4096 \
+  --residual_offline_negative_anchors_per_node 4 \
+  --residual_negative_error_min 0.45 \
+  --residual_negative_gate_weight 1.0 \
+  --residual_train_split train_val \
+  --residual_gate_loss_weight 0.5 \
+  --residual_accept_loss_weight 0.0 \
+  --residual_gate_error_scale 0.25 \
+  --residual_gate_error_max 0.45 \
+  --residual_gate_sparsity_weight 0.02 \
+  --residual_gate_accept_threshold 0.60 \
+  --residual_min_dist 1.0
+```
 
 <!-- PUBMED_ST_SUPPORT_SPLIT_END -->
 
@@ -786,7 +872,51 @@ fuzzy hit      -> residual correction
 reject / miss  -> Graph-Bit P8/P6/P5/P4
 ```
 
-后续 Graph-Bit full-stack 先从上一节确定的统一复用前端开始：
+`residual_precision_depth` 现在已经接入 learned residual gate trace。也就是说，如果 residual gate 拒绝某个 fuzzy hit，这个节点会被放回 miss/compute 集合，再交给 Graph-Bit 的 P8/P6/P4 或 predictor-free bit-serial path。
+
+当前 Cora/LLaMA full-stack 默认从 7.11 的 learned-gate 前端开始：
+
+```text
+R = 2
+heads = 8 x 16-bit
+score threshold T = 30
+hard direct reuse: support heads >= 5
+residual candidate: support heads = 3..4
+learned gate accepted candidate -> residual correction
+learned gate rejected candidate -> compute / Graph-Bit
+compute / Graph-Bit: support heads < 3
+gate_accept_threshold = 0.60
+```
+
+快速验证命令：
+
+```bash
+DATASET=cora RUNS=1 RUN_ALGO=1 RUN_ONNXIM=0 BUDGET=p8heavy \
+  bash scripts/run_graphbit_predictor_free_flow.sh
+```
+
+当前 seed-42 smoke 结果：
+
+| Config | Reuse | Direct | Residual | P8 | P6 | P4 | Cost | Drop |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| FullP8 | 29.4% | 17.3% | 12.1% | 70.6% | 0.0% | 0.0% | 0.354 | 1.60% |
+| Degree Graph-Bit | 29.4% | 17.3% | 12.1% | 56.5% | 14.1% | 0.0% | 0.339 | 2.18% |
+| Degree predictor-free EarlyStop | 29.4% | 17.3% | 12.1% | 56.5% | 14.1% | 0.0% | 0.663 cycles proxy | 2.18% |
+
+这只是 Cora/LLaMA 的快速链路检查，不是最终 10-run 主表。它证明当前 runner 已经把 learned gate 的 reject 结果并回 miss 集合，然后再交给 Graph-Bit。
+
+脚本默认配置：
+
+```text
+BUDGET=p8heavy:
+    P8 = 80% of miss nodes
+    P6 = 20% of miss nodes
+    P4 = 0%
+```
+
+这个 `p8heavy` 设置用于先验证 learned gate + Graph-Bit 的衔接，不追求极限省算。旧的 `balanced` 设置仍可通过 `BUDGET=balanced` 运行。
+
+历史 Graph-Bit full-stack 从 7.7 的 support-split 前端开始：
 
 ```text
 R = 2
@@ -812,7 +942,7 @@ residual correction: support heads == 6
 compute / Graph-Bit: support heads < 6
 ```
 
-推荐复现实验命令：
+历史复现实验命令：
 
 ```bash
 python -m GraphhopSimhash \

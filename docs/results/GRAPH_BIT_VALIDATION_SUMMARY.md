@@ -258,7 +258,7 @@ PubMed: reuse = 50.3%, drop = 2.52%
 
 It is preferred over `h8_64_T40` because both have the same reuse, but routing support=5 hits to direct reuse gives lower PubMed drop than forcing them through residual correction.
 
-The current pure residual-reuse front-end is stronger after adding the learned accept gate:
+The current ST/data.x pure residual-reuse front-end is stronger after adding the learned accept gate:
 
 ```text
 T = 30
@@ -275,11 +275,51 @@ gate_accept_threshold = 0.575
 | Cora | 46.5% | 0.93% |
 | PubMed | 42.3% | 1.96% |
 
-See `docs/results/SHARED_ONLINE_RESIDUAL_REUSE_RESULT.md`.  The Graph-Bit full-stack tables below were generated with the older support-split front-end; they remain useful for the NPU datapath validation, but final paper tables should be rerun with the learned accept gate wired into `residual_precision_depth`.
+See `docs/results/SHARED_ONLINE_RESIDUAL_REUSE_RESULT.md`.
+
+For Cora/LLaMA, the learned-gate front-end has now been adapted to W4A8 LLaMA embeddings:
+
+```text
+T = 30
+support >= 5   -> hard direct reuse
+support = 3..4 -> residual candidate
+support < 3    -> compute
+shared accept gate threshold = 0.60
+```
+
+3-run Cora/LLaMA W4A8 target result:
+
+| Config | Reuse | Drop |
+|---|---:|---:|
+| DirectReuse | 16.1% | 0.53% |
+| SoftDirectReuse | 50.4% | 2.97% |
+| ResidualReuse | 29.7% | 1.47% |
+
+The `residual_precision_depth` runner is now wired to this learned accept gate.  Gate-rejected fuzzy hits are removed from the accepted reuse set and routed to the miss-node Graph-Bit path.
+
+Current Cora/LLaMA Graph-Bit smoke command:
+
+```bash
+DATASET=cora RUNS=1 RUN_ALGO=1 RUN_ONNXIM=0 BUDGET=p8heavy \
+  bash scripts/run_graphbit_predictor_free_flow.sh
+```
+
+Smoke result, seed 42, `p8heavy` budget:
+
+| Method | Reuse | P8 | P6 | P4 | Cost/Cycles Proxy | Drop |
+|---|---:|---:|---:|---:|---:|---:|
+| FullP8-miss | 29.4% | 70.6% | 0.0% | 0.0% | 0.707 | 1.60% |
+| Random static P8/P6/P4 | 29.4% | 56.5% | 14.1% | 0.0% | 0.672 | 2.27% |
+| Degree static P8/P6/P4 | 29.4% | 56.5% | 14.1% | 0.0% | 0.672 | 2.18% |
+| Degree predictor-free EarlyStop | 29.4% | 56.5% | 14.1% | 0.0% | 0.663 | 2.18% |
+
+This confirms the new wiring: learned-gate rejected hits are counted as misses, and Degree Graph-Bit is applied only to the remaining encoder-executed nodes.
+
+The Graph-Bit tables below that mention `h8_54_T40` are historical support-split baselines. They remain useful for NPU datapath validation and cost accounting, but they should not be presented as the latest learned-gate full-stack result.
 
 The `FullP8` row below still includes reuse. It means "reuse hits use direct/residual, all misses use P8". It is the correct baseline for measuring how much extra error Graph-Bit adds on top of the reuse subsystem.
 
-### Cora / LLaMA-7B, fixed `h8_54_T40`, three-depth Graph-Bit
+### Historical Cora / LLaMA-7B, fixed `h8_54_T40`, three-depth Graph-Bit
 
 This is the current Cora full-stack main table.  It fixes the residual reuse front-end to the common robust setting:
 

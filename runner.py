@@ -2050,11 +2050,23 @@ def build_active_residual_mask(trace, correction_mask, min_dist, device):
     return active
 
 
-def apply_residual_precision_depth_trace(trace, selected_raw, reference_raw, residual_raw, residual_mask):
+def apply_residual_precision_depth_trace(
+    trace,
+    selected_raw,
+    reference_raw,
+    residual_raw,
+    residual_mask,
+    accepted_hit_mask=None,
+):
     """Compose direct reuse, residual reuse, and precision-depth miss execution."""
     final_raw = selected_raw.clone()
     device = selected_raw.device
-    hit_mask = trace["hit_mask"].to(device=device, dtype=torch.bool)
+    trace_hit_mask = trace["hit_mask"].to(device=device, dtype=torch.bool)
+    hit_mask = (
+        trace_hit_mask
+        if accepted_hit_mask is None
+        else accepted_hit_mask.to(device=device, dtype=torch.bool) & trace_hit_mask
+    )
     source_ids = trace["source_ids"].to(device=device, dtype=torch.long)
     source_ok = source_ids >= 0
     residual_mask = residual_mask.to(device=device, dtype=torch.bool) & hit_mask & source_ok
@@ -2075,10 +2087,16 @@ def summarize_residual_precision_depth_execution(
     args,
     fp_embs,
     final_embs,
+    accepted_hit_mask=None,
 ):
     total = max(1, int(actions.numel()))
     device = actions.device
-    hit_mask = trace["hit_mask"].to(device=device, dtype=torch.bool)
+    trace_hit_mask = trace["hit_mask"].to(device=device, dtype=torch.bool)
+    hit_mask = (
+        trace_hit_mask
+        if accepted_hit_mask is None
+        else accepted_hit_mask.to(device=device, dtype=torch.bool) & trace_hit_mask
+    )
     source_ok = trace["source_ids"].to(device=device, dtype=torch.long) >= 0
     residual_mask = residual_mask.to(device=device, dtype=torch.bool) & hit_mask & source_ok
     direct_mask = hit_mask & source_ok & ~residual_mask
@@ -2769,34 +2787,136 @@ def run_residual_precision_depth_experiment(args):
                     max_pairs=residual_fit_cfg["max_pairs"],
                     correction_mask=correction_mask,
                     min_dist=run_args.residual_min_dist,
+                    controller=controller,
+                    hash_route_features=route_bundle["hash_route_features"],
+                    extra_anchors_per_node=run_args.residual_offline_extra_anchors_per_node,
+                    extra_query_nodes=run_args.residual_offline_extra_query_nodes,
+                    positive_error_max=run_args.residual_positive_error_max,
+                    extra_negative_anchors_per_node=run_args.residual_offline_negative_anchors_per_node,
+                    negative_error_min=run_args.residual_negative_error_min,
+                    negative_gate_weight=run_args.residual_negative_gate_weight,
+                    adapter_type=run_args.residual_adapter_type,
+                    accept_mode=run_args.residual_accept_mode,
+                    hidden_dim=run_args.residual_hidden_dim,
+                    hidden_layers=run_args.residual_hidden_layers,
+                    dropout=run_args.residual_dropout,
+                    cosine_weight=run_args.residual_loss_cosine_weight,
+                    mse_weight=run_args.residual_loss_mse_weight,
+                    delta_weight=run_args.residual_loss_delta_weight,
+                    bucket_mode=run_args.residual_bucket_mode,
+                    gate_loss_weight=run_args.residual_gate_loss_weight,
+                    accept_loss_weight=run_args.residual_accept_loss_weight,
+                    gate_error_scale=run_args.residual_gate_error_scale,
+                    gate_error_max=run_args.residual_gate_error_max,
+                    gate_sparsity_weight=run_args.residual_gate_sparsity_weight,
                 )
 
-                if adapter is not None and float(run_args.residual_alpha) < 0.0:
-                    alpha_grid = resolve_residual_alpha_grid(run_args, residual_fit_cfg)
+                if adapter is not None:
+                    support_alpha_enabled = bool(run_args.residual_support_aware_alpha)
+                    full_bucket_values = compute_bucket_values_from_trace(
+                        trace,
+                        torch.arange(trace["hit_mask"].numel(), device=device),
+                        bucket_mode=run_args.residual_bucket_mode,
+                        device=device,
+                    )
+                    support_hits = compute_bucket_values_from_trace(
+                        trace,
+                        correction_mask.nonzero(as_tuple=False).view(-1),
+                        bucket_mode=run_args.residual_bucket_mode,
+                        device=device,
+                    )
+                    alpha_grid = (
+                        resolve_residual_alpha_grid(run_args, residual_fit_cfg)
+                        if float(run_args.residual_alpha) < 0.0
+                        else [max(0.0, float(run_args.residual_alpha))]
+                    )
+                    gate_grid = (
+                        sorted(float(value) for value in run_args.residual_gate_accept_grid)
+                        if float(run_args.residual_gate_accept_threshold) < 0.0
+                        else [max(0.0, float(run_args.residual_gate_accept_threshold))]
+                    )
                     selected_alpha = float(alpha_grid[0])
+                    selected_gate_threshold = float(gate_grid[0])
                     selected_val_acc = -1.0
                     for alpha in alpha_grid:
-                        candidate_raw, _candidate_info = apply_residual_adapter(
-                            direct_embeddings=direct_raw,
-                            target_embeddings=reference_raw,
-                            verify_features=verify_features,
-                            edge_index=data.edge_index,
-                            trace=trace,
-                            adapter=adapter,
-                            risk_scores=controller.node_risk_scores,
-                            alpha=alpha,
-                            min_dist=run_args.residual_min_dist,
-                            correction_mask=correction_mask,
+                        for gate_threshold in gate_grid:
+                            candidate_raw, _candidate_info = apply_residual_adapter(
+                                direct_embeddings=direct_raw,
+                                target_embeddings=reference_raw,
+                                verify_features=verify_features,
+                                edge_index=data.edge_index,
+                                trace=trace,
+                                adapter=adapter,
+                                risk_scores=controller.node_risk_scores,
+                                alpha=alpha,
+                                gate_accept_threshold=gate_threshold,
+                                min_dist=run_args.residual_min_dist,
+                                correction_mask=correction_mask,
+                            )
+                            val_acc = evaluate_raw_node_features(model, data, candidate_raw, mask=data.val_mask)
+                            if val_acc > selected_val_acc + 1e-12:
+                                selected_val_acc = val_acc
+                                selected_alpha = float(alpha)
+                                selected_gate_threshold = float(gate_threshold)
+                    if support_alpha_enabled:
+                        alpha_by_support = {}
+                        support_note_parts = []
+                        active_supports = sorted(int(v) for v in support_hits.detach().cpu().unique().tolist())
+                        for support_value in active_supports:
+                            support_mask = correction_mask & (full_bucket_values == int(support_value))
+                            val_support_mask = data.val_mask.to(device=device, dtype=torch.bool) & support_mask
+                            best_alpha = float(selected_alpha)
+                            best_val_acc = -1.0
+                            if int(val_support_mask.sum().item()) > 0:
+                                for alpha in alpha_grid:
+                                    candidate_raw, _candidate_info = apply_residual_adapter(
+                                        direct_embeddings=direct_raw,
+                                        target_embeddings=reference_raw,
+                                        verify_features=verify_features,
+                                        edge_index=data.edge_index,
+                                        trace=trace,
+                                        adapter=adapter,
+                                        risk_scores=controller.node_risk_scores,
+                                        alpha=alpha,
+                                        gate_accept_threshold=selected_gate_threshold,
+                                        min_dist=run_args.residual_min_dist,
+                                        correction_mask=support_mask,
+                                    )
+                                    val_acc = evaluate_raw_node_features(
+                                        model,
+                                        data,
+                                        candidate_raw,
+                                        mask=val_support_mask,
+                                    )
+                                    if val_acc > best_val_acc + 1e-12:
+                                        best_val_acc = val_acc
+                                        best_alpha = float(alpha)
+                            alpha_by_support[int(support_value)] = float(best_alpha)
+                            bucket_label = format_bucket_label(int(support_value), run_args.residual_bucket_mode)
+                            if best_val_acc >= 0.0:
+                                support_note_parts.append(f"{bucket_label}={float(best_alpha):.3f}@{best_val_acc:.4f}")
+                            else:
+                                support_note_parts.append(f"{bucket_label}={float(best_alpha):.3f}@na")
+                        alpha_for_apply = {"default": float(selected_alpha), "by_support": alpha_by_support}
+                        alpha_note = (
+                            f"support-auto(global={selected_val_acc:.4f}; "
+                            + ", ".join(support_note_parts)
+                            + ")"
                         )
-                        val_acc = evaluate_raw_node_features(model, data, candidate_raw, mask=data.val_mask)
-                        if val_acc > selected_val_acc + 1e-12:
-                            selected_val_acc = val_acc
-                            selected_alpha = alpha
-                    alpha_for_apply = selected_alpha
-                    alpha_note = f"auto(val_acc={selected_val_acc:.4f})"
+                    else:
+                        alpha_for_apply = float(selected_alpha)
+                        alpha_note = f"auto(val_acc={selected_val_acc:.4f})"
+                    gate_threshold_for_apply = float(selected_gate_threshold)
+                    gate_note = (
+                        f"auto({selected_val_acc:.4f}, tau={selected_gate_threshold:.3f})"
+                        if float(run_args.residual_gate_accept_threshold) < 0.0
+                        else "fixed"
+                    )
                 else:
                     alpha_for_apply = max(0.0, float(run_args.residual_alpha))
                     alpha_note = "fixed"
+                    gate_threshold_for_apply = max(0.0, float(run_args.residual_gate_accept_threshold))
+                    gate_note = "fixed"
 
                 residual_raw, apply_info = apply_residual_adapter(
                     direct_embeddings=direct_raw,
@@ -2807,6 +2927,7 @@ def run_residual_precision_depth_experiment(args):
                     adapter=adapter,
                     risk_scores=controller.node_risk_scores,
                     alpha=alpha_for_apply,
+                    gate_accept_threshold=gate_threshold_for_apply,
                     min_dist=run_args.residual_min_dist,
                     correction_mask=correction_mask,
                 )
@@ -2815,6 +2936,12 @@ def run_residual_precision_depth_experiment(args):
                     if adapter is not None
                     else torch.zeros(int(data.num_nodes), dtype=torch.bool, device=device)
                 )
+                accepted_hit_mask = hit_mask.clone()
+                rejected_nodes = apply_info.get("rejected_nodes", None)
+                if rejected_nodes is not None and int(rejected_nodes.numel()) > 0:
+                    active_residual_mask[rejected_nodes] = False
+                    accepted_hit_mask[rejected_nodes] = False
+                effective_miss_mask = ~accepted_hit_mask
                 log_important(
                     "[ResidualFit] "
                     f"candidates={correction_info['residual_candidates']} | "
@@ -2822,7 +2949,10 @@ def run_residual_precision_depth_experiment(args):
                     f"train_pairs={int(train_info['train_pairs'])} | "
                     f"loss={float(train_info['loss']):.6f} | "
                     f"alpha={float(apply_info['alpha']):.3f} ({alpha_note}) | "
-                    f"corrected={int(apply_info['corrected'])}"
+                    f"gate={float(apply_info.get('accept_gate', 1.0)):.3f}/{gate_note} | "
+                    f"corrected={int(apply_info['corrected'])} | "
+                    f"accepted={int(apply_info.get('accepted', 0))} | "
+                    f"rejected={int(apply_info.get('rejected', 0))}"
                 )
 
                 oracle_priority = errors_by_bit[int(bits[0])]
@@ -2853,7 +2983,7 @@ def run_residual_precision_depth_experiment(args):
                         bits,
                         seed,
                         device,
-                        eligible_mask=miss_mask,
+                        eligible_mask=effective_miss_mask,
                         oracle_priority=oracle_priority,
                         predictor_priority=predictor_priority,
                     )
@@ -2864,6 +2994,7 @@ def run_residual_precision_depth_experiment(args):
                         reference_raw,
                         residual_raw,
                         active_residual_mask,
+                        accepted_hit_mask=accepted_hit_mask,
                     )
                     with torch.no_grad():
                         final_embs = model.encoder(final_raw)
@@ -2878,6 +3009,7 @@ def run_residual_precision_depth_experiment(args):
                         run_args,
                         ref_embs,
                         final_embs,
+                        accepted_hit_mask=accepted_hit_mask,
                     )
 
                     results[name]["reuse"].append(stats["reuse_rate"])

@@ -76,8 +76,25 @@ See [SHARED_ONLINE_RESIDUAL_REUSE_RESULT.md](docs/results/SHARED_ONLINE_RESIDUAL
 
 For LLaMA-7B full-stack experiments, the front-end must first pass the
 `FullP8-miss` sanity check: accepted hits use direct/residual reuse, while all
-misses still run P8.  Cora remains stable with `h8_54_T40`; PubMed/LLaMA needs a
-stricter split:
+misses still run P8.  The latest Cora/LLaMA residual-gate front-end is:
+
+```text
+h8_53_T30 + shared accept gate
+8 heads x 16 bits
+radius R = 2
+score threshold T = 30
+support >= 5   -> direct reuse
+support = 3..4 -> residual candidate
+support < 3    -> encoder / Graph-Bit
+gate_accept_threshold = 0.60
+```
+
+This uses LLaMA W4A8 embeddings as the residual target rather than the ST/data.x
+target.  PubMed/LLaMA still needs a stricter split/gate validation before it can
+be treated as final.
+
+Older PubMed/LLaMA support-split checks showed that a stricter no-gate split can
+be used as a safe fallback:
 
 ```text
 h8_76_T40
@@ -393,39 +410,15 @@ fuzzy hit      -> residual correction
 reject / miss  -> Graph-Bit P8/P6/P5/P4
 ```
 
-Recommended Cora smoke run:
+Recommended Cora smoke run with the current LLaMA-aware learned gate:
 
 ```bash
-python -m GraphhopSimhash \
-  --datasets cora \
-  --runs 1 \
-  --experiment_suite residual_precision_depth \
-  --real_quant_model_name llama2_7b \
-  --precision_depth_reference_tag W4A8 \
-  --precision_depth_tags W4A6 W4A4 \
-  --precision_depth_bits 6 4 \
-  --precision_depth_reference_bits 8 \
-  --precision_depth_high_ratio 0.20 \
-  --precision_depth_mid_ratio 0.50 \
-  --precision_depth_low_ratio 0.30 \
-  --radius 2 \
-  --learned_hash_epochs 10 \
-  --learned_hash_dim 128 \
-  --hamming_only_acceptor \
-  --enable_score_gate \
-  --score_reuse_threshold 40 \
-  --main_hash_head_bits 16 16 16 16 16 16 16 16 \
-  --residual_fit_profile llama \
-  --residual_hard_min_support_hits 5 \
-  --residual_soft_min_support_hits 4 \
-  --residual_rank 64 \
-  --residual_epochs 120 \
-  --residual_max_train_pairs 4096 \
-  --residual_min_dist 1.0 \
-  --residual_alpha_grid 0 0.125 0.25 0.5
+DATASET=cora RUNS=1 RUN_ALGO=1 RUN_ONNXIM=0 BUDGET=p8heavy \
+  bash scripts/run_graphbit_predictor_free_flow.sh
 ```
 
-Current Cora h8_54_T40 10-run result:
+Historical Cora `h8_54_T40` 10-run result before the learned accept gate was
+wired into `residual_precision_depth`:
 
 ```text
 FullP8 miss baseline:
@@ -612,11 +605,12 @@ Do not claim without further simulator evidence:
 
 ## Recommended Next Experiments
 
-1. Use `h8_54_T40` for Cora/LLaMA and `h8_76_T40` for PubMed/LLaMA full-stack tables.
-2. Add dynamic-depth accuracy validation for predictor-free early stop.
-3. Sweep `min_depth/tolerance` for Cora first, then PubMed.
-4. Extend ONNXim reporting with PE utilization / active-lane compaction proxy.
-5. Prepare the final paper figures:
+1. Rerun Cora/LLaMA full-stack with `h8_53_T30`, shared learned gate, and `p8heavy` Graph-Bit.
+2. Validate a PubMed/LLaMA learned-gate front-end before running expensive Graph-Bit sweeps.
+3. Add dynamic-depth accuracy validation for predictor-free early stop.
+4. Sweep `min_depth/tolerance` for Cora first, then PubMed.
+5. Extend ONNXim reporting with PE utilization / active-lane compaction proxy.
+6. Prepare the final paper figures:
    - reuse vs drop curve
    - Graph-Bit cost/drop curve
    - ONNXim cycles/traffic/energy table

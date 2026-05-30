@@ -250,11 +250,17 @@ def fmt_num(value: float | None, digits: int = 3) -> str:
 
 def write_compact(rows: list[dict[str, Any]], path: Path, args: argparse.Namespace) -> None:
     title_dataset = str(args.dataset).upper()
+    if args.soft_support >= args.hard_support:
+        residual_support_text = f">={args.soft_support}"
+    elif args.soft_support + 1 == args.hard_support:
+        residual_support_text = f"=={args.soft_support}"
+    else:
+        residual_support_text = f"={args.soft_support}..{args.hard_support - 1}"
     lines = [
         f"{title_dataset} Graph-Bit predictor-free main table",
         (
             f"Fixed front-end: {args.frontend_id}, R=2, "
-            f"hard>={args.hard_support}, residual support=={args.soft_support}."
+            f"hard>={args.hard_support}, residual support{residual_support_text}."
         ),
         "Drop is inherited from the static embedding proxy; bounded row estimates extra NPU bit-plane savings.",
         "",
