@@ -13,11 +13,12 @@
 
 - [GRAPH_BIT_NPU_DESIGN.md](npu/GRAPH_BIT_NPU_DESIGN.md): Graph-Bit NPU 主线设计，包含 datapath、scheduler、buffer、cost model。
 - [GRAPH_BIT_END_TO_END_THEORY.md](npu/GRAPH_BIT_END_TO_END_THEORY.md): Graph-Bit 端到端算法、prediction-free bound、变 bit-depth 计算、W tile reuse 和 speedup 数值推导。
+- [GRAPH_BIT_FULLSTACK_REPRODUCTION_GUIDE.md](npu/GRAPH_BIT_FULLSTACK_REPRODUCTION_GUIDE.md): Graph-Bit full-stack 复现实验流程、调参入口、输出文件和结果解读。
 - [GRAPH_BIT_EARLY_STOP_IMPLEMENTATION.md](npu/GRAPH_BIT_EARLY_STOP_IMPLEMENTATION.md): bit-plane early stop 从 CLI、runner、ONNXim/GemmWS 到 trace replay 的代码级实现说明。
 - [GRAPH_BIT_TRACE_DRIVEN_SCHEDULER.md](npu/GRAPH_BIT_TRACE_DRIVEN_SCHEDULER.md): per-node trace 导出、bucket scheduler replay、真实 W tile load / Wscale 统计。
 - [GRAPH_BIT_PROXY_EXPERIMENTS.md](npu/GRAPH_BIT_PROXY_EXPERIMENTS.md): Graph-Bit 的 embedding-pool proxy 实验、precision-depth ablation 和命令。
 
-已删除/合并早期探索文档：partial-depth / token budget / FFN channel gating，以及 Graph-Bit 的 demand-fetch、bound、bucket、dataflow 分散文档。主线内容已合并到 [GRAPH_BIT_NPU_DESIGN.md](npu/GRAPH_BIT_NPU_DESIGN.md)、[GRAPH_BIT_END_TO_END_THEORY.md](npu/GRAPH_BIT_END_TO_END_THEORY.md)、[GRAPH_BIT_EARLY_STOP_IMPLEMENTATION.md](npu/GRAPH_BIT_EARLY_STOP_IMPLEMENTATION.md) 和 [GRAPH_BIT_TRACE_DRIVEN_SCHEDULER.md](npu/GRAPH_BIT_TRACE_DRIVEN_SCHEDULER.md)。
+已删除/合并早期探索文档：partial-depth / token budget / FFN channel gating，以及 Graph-Bit 的 demand-fetch、bound、bucket、dataflow 分散文档。主线内容已合并到 [GRAPH_BIT_NPU_DESIGN.md](npu/GRAPH_BIT_NPU_DESIGN.md)、[GRAPH_BIT_END_TO_END_THEORY.md](npu/GRAPH_BIT_END_TO_END_THEORY.md)、[GRAPH_BIT_FULLSTACK_REPRODUCTION_GUIDE.md](npu/GRAPH_BIT_FULLSTACK_REPRODUCTION_GUIDE.md)、[GRAPH_BIT_EARLY_STOP_IMPLEMENTATION.md](npu/GRAPH_BIT_EARLY_STOP_IMPLEMENTATION.md) 和 [GRAPH_BIT_TRACE_DRIVEN_SCHEDULER.md](npu/GRAPH_BIT_TRACE_DRIVEN_SCHEDULER.md)。
 
 ## Results
 
