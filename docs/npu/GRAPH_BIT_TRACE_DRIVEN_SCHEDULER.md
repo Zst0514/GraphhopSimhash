@@ -19,7 +19,7 @@ ONNXim component-cycle simulation
     + trace-driven bucket scheduler replay
 ```
 
-这样可以避免“手工乘一个 Wscale”的质疑。
+该层输出 `Wloads`、`Wscale`、`tail utilization`、`cycles`、`traffic` 和 `energy`，用于描述 bucket scheduler 在真实节点 trace 上的执行结果。
 
 ## 1. Trace 内容
 
@@ -154,7 +154,7 @@ RiskBucket-b64:
     Wscale = 33 / 123 = 0.268
 ```
 
-因此这里的 Wscale 不是手填系数，而是由真实 miss-node trace 和 batch scheduler 数出来的。
+这里的 `Wscale` 由 miss-node trace replay 得到，计算方式为 `Wloads / baseline_wloads`。
 
 `OriginalOrder` 的作用是说明为什么需要 risk-bucket：
 
@@ -180,7 +180,7 @@ RiskBucket:
 4. ONNXim component cost lookup
 ```
 
-这比之前的 `component simulation + Wscale feasibility model` 更扎实。后续如果要继续增强，可以把 replay 层进一步下沉到更细粒度的 ONNXim per-tile event trace，但当前已经足以说明：
+当前实现将 workload-level accuracy profile、per-node stop-depth trace 和 ONNXim component cost lookup 连接起来。后续如果要继续增强，可以把 replay 层进一步下沉到更细粒度的 ONNXim per-tile event trace。
 
 ```text
 Graph risk is not only an accuracy proxy;

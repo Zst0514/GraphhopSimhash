@@ -330,7 +330,7 @@ GraphBit-now:
     说明只停低位 bit-plane 不足以显著降低总体 cycles。
 
 RiskBucket-b32 / b64:
-    Wloads 由真实 trace replay 得到，不是手工缩放。
+    Wloads 由 per-node trace replay 统计得到。
     b32: 63 / 123 = 0.512
     b64: 33 / 123 = 0.268
 ```
@@ -353,7 +353,7 @@ ONNXim component-cycle simulation
 + trace-driven bucket scheduler replay
 ```
 
-这已经比手工 cost model 更扎实，但仍有边界：
+当前仿真仍有边界：
 
 ```text
 1. 没有完整模拟整个 LLaMA encoder graph 的所有 operator overlap。

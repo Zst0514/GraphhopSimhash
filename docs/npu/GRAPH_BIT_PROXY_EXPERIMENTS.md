@@ -242,7 +242,7 @@ Precision-depth execution 是值得保留的 NPU 路径。
 
 ```text
 1. 不同 backend 的 bit-depth profile 不一定单调，必须实际测量。
-2. 图风险分数能带来小幅收益，尤其用于证明 graph risk 可以控制 arithmetic effort。
+2. 图风险分数能带来小幅收益，对应 graph risk 与 arithmetic effort 分配之间的相关性。
 3. Predictor/Oracle 只作为 debug/oracle 上界，不进入主线结论。
 ```
 
