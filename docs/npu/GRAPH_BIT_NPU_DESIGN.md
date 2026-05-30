@@ -872,6 +872,72 @@ Bounded cycles = predictor-free bounded early termination 进一步允许 P6/P4 
 
 注意：上面的 workload-level proxy 仍然有用，因为它负责组合 direct/residual/P8/P6/P4 的全栈比例；但 ONNXim internal path 已经把 P8/P6/P4 下沉到 GemmWS/SystolicWS 内部。后续要做的是把 workload profile 自动映射成多次 internal ONNXim run 并汇总，而不是只在 Python 后处理里缩放。
 
+### 9.3 Demand-Fetch and Utilization Model
+
+最新建模已经把 Graph-Bit 从“位宽 cost proxy”进一步拆成四个硬件层级：
+
+```text
+compute-mask only:
+    PE 跳过低位 MAC，但 activation 仍按完整 A8 读取。
+
+demand-fetch:
+    activation 采用 bit-plane-major layout，被 early-stop 跳过的低位 bit-plane 不再发起读取。
+
+random-mixed batching:
+    不同风险节点混在一个 bit-serial micro-batch，batch 执行深度被最深节点拖到 P8。
+
+risk-bucket batching:
+    high/mid/low risk nodes 分桶执行，使 useful depth 真正变成 executed depth。
+```
+
+建模脚本：
+
+```bash
+bash scripts/run_graphbit_demand_fetch_model.sh
+```
+
+默认输出：
+
+```text
+output/graphbit_predictor_free/cora_h8_53_T30/demand_fetch_model/
+```
+
+历史 balanced 前端复现实验：
+
+```bash
+WORKLOAD=/home/zhangshangtong/Transformer/OFA/output/graphbit_predictor_free/cora_h8_54_T40/predictor_free_workload.json \
+OUT_DIR=/home/zhangshangtong/Transformer/OFA/output/graphbit_predictor_free/cora_h8_54_T40/demand_fetch_model \
+bash scripts/run_graphbit_demand_fetch_model.sh
+```
+
+关键结果：
+
+| Workload | Method | UsefulD | ExecD | BitComp | ActRd | Full cycles | Full traffic | Drop |
+|---|---|---:|---:|---:|---:|---:|---:|---:|
+| h8_53_T30 p8heavy | Degree compute-mask only | 7.60 | 7.60 | 0.950 | 1.000 | 0.707 | 0.707 | 2.18% |
+| h8_53_T30 p8heavy | Degree demand-fetch | 7.60 | 7.60 | 0.950 | 0.950 | 0.700 | 0.703 | 2.18% |
+| h8_54_T40 balanced | Degree compute-mask only | 5.80 | 5.80 | 0.726 | 1.000 | 0.601 | 0.602 | 2.39% |
+| h8_54_T40 balanced | Degree random-mixed | 6.10 | 8.00 | 1.000 | 1.000 | 0.601 | 0.602 | 2.39% |
+| h8_54_T40 balanced | Degree demand-fetch | 6.10 | 6.10 | 0.764 | 0.762 | 0.576 | 0.583 | 2.39% |
+
+这张表给出当前最重要的硬件判断：
+
+```text
+1. 只做 compute mask 不够，cycles/traffic 不会自动下降。
+2. 只做 demand-fetch 也不够，若 batch 随机混合风险等级，会被 P8 节点拖回 full-depth。
+3. Graph-Bit 必须同时包含：
+       bit-plane-major demand fetch
+       predictor-free early-stop
+       risk-bucket scheduler
+   才能把 graph risk 变成 NPU 可见的 cycle/traffic 收益。
+```
+
+完整公式和可靠性边界见：
+
+```text
+docs/npu/GRAPH_BIT_DEMAND_FETCH_MODEL.md
+```
+
 ## 10. 当前验证结果
 
 LLaMA-7B / Arxiv，10 runs：

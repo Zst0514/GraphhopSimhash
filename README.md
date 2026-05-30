@@ -177,6 +177,28 @@ predictor-free early stop:
 
 In the predictor-free version, P6/P4 are not fixed datatypes. They are safety floors / validation anchors.
 
+The current hardware model separates four effects:
+
+```text
+bit-plane compute:
+    PE work saved by early stopping low activation bits
+
+activation demand fetch:
+    bit-plane-major layout avoids fetching skipped low-bit planes
+
+risk-bucket batching:
+    high/mid/low risk nodes are scheduled separately so one P8 node does not drag a whole batch to P8
+
+fixed traffic:
+    weight reads and output writes remain unless a separate weight-stationary / fused-FFN design attacks them
+```
+
+The demand-fetch model is documented in:
+
+```text
+docs/npu/GRAPH_BIT_DEMAND_FETCH_MODEL.md
+```
+
 ## Repository Layout
 
 ```text
@@ -480,6 +502,45 @@ They mean "start at P8, stop dynamically by bit-bound".
 
 The drop is currently inherited from the static Degree proxy as a conservative accuracy estimate. A stricter next step is to generate dynamic-depth embeddings or nearest-depth conservative mappings for exact dynamic-depth accuracy.
 
+### 5. Bit-Plane Demand-Fetch Modeling
+
+The early-stop flow now has a demand-fetch model that distinguishes:
+
+```text
+compute-mask only:
+    low bit MACs are masked, but A8 activations are still fetched
+
+demand-fetch:
+    skipped low bit-planes are not fetched
+
+random-mixed batching:
+    mixed-risk batches execute to the max depth in the batch
+
+risk-bucket batching:
+    high/mid/low risk nodes are batched separately
+```
+
+Run the default Cora/LLaMA learned-gate model:
+
+```bash
+bash GraphhopSimhash/scripts/run_graphbit_demand_fetch_model.sh
+```
+
+Historical balanced comparison:
+
+```bash
+WORKLOAD=/home/zhangshangtong/Transformer/OFA/output/graphbit_predictor_free/cora_h8_54_T40/predictor_free_workload.json \
+OUT_DIR=/home/zhangshangtong/Transformer/OFA/output/graphbit_predictor_free/cora_h8_54_T40/demand_fetch_model \
+bash GraphhopSimhash/scripts/run_graphbit_demand_fetch_model.sh
+```
+
+Key conclusion:
+
+```text
+compute-mask only saves bit-plane arithmetic but not cycles/traffic;
+demand-fetch + risk-bucket scheduling is required to turn early stop into NPU-visible savings.
+```
+
 ## ONNXim Integration
 
 ONNXim is integrated under:
@@ -605,12 +666,11 @@ Do not claim without further simulator evidence:
 
 ## Recommended Next Experiments
 
-1. Rerun Cora/LLaMA full-stack with `h8_53_T30`, shared learned gate, and `p8heavy` Graph-Bit.
-2. Validate a PubMed/LLaMA learned-gate front-end before running expensive Graph-Bit sweeps.
-3. Add dynamic-depth accuracy validation for predictor-free early stop.
-4. Sweep `min_depth/tolerance` for Cora first, then PubMed.
-5. Extend ONNXim reporting with PE utilization / active-lane compaction proxy.
-6. Prepare the final paper figures:
+1. Validate a PubMed/LLaMA learned-gate front-end before running expensive Graph-Bit sweeps.
+2. Add dynamic-depth accuracy validation for predictor-free early stop.
+3. Sweep `min_depth/tolerance` for Cora first, then PubMed.
+4. Add a weight-stationary / FFN-fusion model to attack the fixed weight/output traffic that demand-fetch cannot reduce.
+5. Prepare the final paper figures:
    - reuse vs drop curve
    - Graph-Bit cost/drop curve
    - ONNXim cycles/traffic/energy table

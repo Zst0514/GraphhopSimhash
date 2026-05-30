@@ -539,6 +539,68 @@ Takeaway:
 - Degree-risk buckets allow the NPU to realize the intended bit-depth reduction.
 - Random-risk buckets have the same hardware cost as degree-risk buckets but worse accuracy, so the graph proxy matters for precision protection.
 
+## Bit-Plane Demand-Fetch Model
+
+The miss-only breakdown shows that bit-plane compute and activation reads can fall, but it does not by itself explain how much full-stack cycles/traffic improve.  We therefore added a demand-fetch model that separates:
+
+```text
+BitComp:
+    bit-plane MAC work inside the PE array
+
+ActRd:
+    activation bit-plane reads
+
+WgtRd / OutWr:
+    fixed weight reads and output writes
+
+Sched:
+    whether the NPU executes risk buckets separately or randomly mixes risks
+```
+
+Command:
+
+```bash
+bash GraphhopSimhash/scripts/run_graphbit_demand_fetch_model.sh
+```
+
+Default output:
+
+```text
+output/graphbit_predictor_free/cora_h8_53_T30/demand_fetch_model/demand_fetch_model.txt
+```
+
+Historical balanced frontend output:
+
+```bash
+WORKLOAD=/home/zhangshangtong/Transformer/OFA/output/graphbit_predictor_free/cora_h8_54_T40/predictor_free_workload.json \
+OUT_DIR=/home/zhangshangtong/Transformer/OFA/output/graphbit_predictor_free/cora_h8_54_T40/demand_fetch_model \
+bash GraphhopSimhash/scripts/run_graphbit_demand_fetch_model.sh
+```
+
+Key Cora/LLaMA results:
+
+| Frontend | Method | Sched | UsefulD | ExecD | BitComp | ActRd | WgtRd | Full cycles | Full traffic | Drop |
+|---|---|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| h8_53_T30 p8heavy | FullP8-miss | risk bucket | 8.00 | 8.00 | 1.000 | 1.000 | 1.000 | 0.707 | 0.707 | 1.60% |
+| h8_53_T30 p8heavy | Degree demand-fetch | risk bucket | 7.60 | 7.60 | 0.950 | 0.950 | 1.000 | 0.700 | 0.703 | 2.18% |
+| h8_54_T40 balanced | FullP8-miss | risk bucket | 8.00 | 8.00 | 1.000 | 1.000 | 1.000 | 0.601 | 0.602 | 1.53% |
+| h8_54_T40 balanced | Degree compute-mask only | risk bucket | 5.80 | 5.80 | 0.726 | 1.000 | 1.000 | 0.601 | 0.602 | 2.39% |
+| h8_54_T40 balanced | Degree random-mixed | random mixed | 6.10 | 8.00 | 1.000 | 1.000 | 1.000 | 0.601 | 0.602 | 2.39% |
+| h8_54_T40 balanced | Degree demand-fetch | risk bucket | 6.10 | 6.10 | 0.764 | 0.762 | 1.000 | 0.576 | 0.583 | 2.39% |
+
+Takeaway:
+
+- `compute-mask only` saves bit-plane arithmetic but does not lower full-stack cycles/traffic.
+- `random-mixed` loses the benefit because one high-risk node can force the whole bit-serial batch to P8.
+- `Degree demand-fetch` is the actual NPU dataflow target: bit-plane-major activation layout plus risk-bucket scheduling.
+- The latest `p8heavy` frontend is accuracy-first, so savings are small; the historical balanced frontend is useful for showing the hardware mechanism more clearly.
+
+Detailed model:
+
+```text
+docs/npu/GRAPH_BIT_DEMAND_FETCH_MODEL.md
+```
+
 ## FFN Block-Gating Hardware Probe
 
 Activation bit-plane early-stop does not reduce weight reads.  As a next-stage Graph-Bit+ candidate, we probed FFN intermediate block gating in ONNXim:
