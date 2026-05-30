@@ -1,6 +1,6 @@
 # Graph-Bit Full-Stack Hardware Table
 
-本文档记录当前 Graph-Bit NPU 的最终硬件合成表。它把三类信息合在一起：
+本文档记录当前 Graph-Bit NPU 的硬件合成表。它把三类信息合在一起：
 
 ```text
 1. residual / reuse workload profile
@@ -9,9 +9,11 @@
 2. ONNXim stop-depth trace
    每个 P8 / P6 / P5 / P4 bucket 在 bit-serial early-stop datapath 下的 cycles、traffic、AvgDepth、DepthHist。
 
-3. bucket scheduler feasibility
+3. bucket scheduler feasibility / trace replay
    同风险 miss nodes 是否足够形成 32 / 64 级别 micro-batch，以及 SRAM 是否能容纳 W tile + activation plane buffer + psum。
 ```
+
+更新：更严格的 per-node trace replay 已加入 [GRAPH_BIT_TRACE_DRIVEN_SCHEDULER.md](GRAPH_BIT_TRACE_DRIVEN_SCHEDULER.md)。后续论文主表建议优先引用 trace-driven replay 的 `Wloads / Wscale`，而不是只引用 feasibility 模型。
 
 归一化口径：
 

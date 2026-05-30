@@ -838,6 +838,25 @@ def build_parser():
         default=128,
         help="Reduction tile size used by the bound estimator.",
     )
+    parser.add_argument(
+        "--precision_depth_trace_export_dir",
+        type=str,
+        default="",
+        help=(
+            "Optional directory for per-node residual+Graph-Bit replay traces. "
+            "Only metadata and routing/action fields are exported, not embeddings."
+        ),
+    )
+    parser.add_argument(
+        "--precision_depth_trace_export_configs",
+        type=str,
+        nargs="+",
+        default=["DegBound"],
+        help=(
+            "Config names to export when --precision_depth_trace_export_dir is set. "
+            "Use 'all' to export every precision-depth config."
+        ),
+    )
     parser.add_argument("--token_compaction_reference_tag", type=str, default="W4A16")
     parser.add_argument("--token_compaction_full_tag", type=str, default="W4A8")
     parser.add_argument(

@@ -1,4 +1,5 @@
 import os
+import json
 from copy import deepcopy
 
 import numpy as np
@@ -2217,6 +2218,106 @@ def summarize_residual_precision_depth_execution(
     }
 
 
+def export_residual_precision_depth_node_trace(
+    path,
+    *,
+    dataset,
+    seed,
+    config_name,
+    policy,
+    actions,
+    trace,
+    accepted_hit_mask,
+    direct_mask,
+    residual_mask,
+    scores,
+    args,
+):
+    """Export a per-node Graph-Bit replay trace.
+
+    The trace is intentionally small: one JSON object per graph node with the
+    online reuse decision and the miss-node precision-depth action.  It does not
+    include embeddings.
+    """
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    device = actions.device
+    num_nodes = int(actions.numel())
+    accepted_hit_mask = accepted_hit_mask.to(device=device, dtype=torch.bool)
+    direct_mask = direct_mask.to(device=device, dtype=torch.bool)
+    residual_mask = residual_mask.to(device=device, dtype=torch.bool)
+    source_ids = trace["source_ids"].to(device=device, dtype=torch.long)
+    best_dists = trace["best_dists"].to(device=device, dtype=torch.long)
+    route_hits = trace["route_hit_counts"].to(device=device, dtype=torch.long)
+    base_hits = trace["base_route_hit_counts"].to(device=device, dtype=torch.long)
+    winning_hits = trace.get("winning_base_table_hit_counts", base_hits)
+    winning_hits = winning_hits.to(device=device, dtype=torch.long)
+    hit_kinds = list(trace.get("hit_kinds", ["none"] * num_nodes))
+    ref_bit = int(args.precision_depth_reference_bits)
+    bucket_by_bit = {ref_bit: "p8", 8: "p8", 6: "p6", 5: "p5", 4: "p4"}
+    priority = str(policy.get("priority", ""))
+    ratios = {
+        "high": float(getattr(args, "precision_depth_high_ratio", 0.0)),
+        "mid": float(getattr(args, "precision_depth_mid_ratio", 0.0)),
+        "low": float(getattr(args, "precision_depth_low_ratio", 0.0)),
+    }
+    meta = {
+        "schema": "graphbit_node_trace.v1",
+        "dataset": str(dataset),
+        "seed": int(seed),
+        "config": str(config_name),
+        "policy": dict(policy),
+        "priority": priority,
+        "reference_bit": ref_bit,
+        "ratios": ratios,
+        "bound": {
+            "enabled": bool(getattr(args, "precision_depth_bound_enable", False)),
+            "high_min_depth": int(getattr(args, "precision_depth_bound_high_min_depth", ref_bit)),
+            "mid_min_depth": int(getattr(args, "precision_depth_bound_mid_min_depth", 6)),
+            "low_min_depth": int(getattr(args, "precision_depth_bound_low_min_depth", 4)),
+            "high_tolerance": float(getattr(args, "precision_depth_bound_high_tolerance", 0.0)),
+            "mid_tolerance": float(getattr(args, "precision_depth_bound_mid_tolerance", 0.02)),
+            "low_tolerance": float(getattr(args, "precision_depth_bound_low_tolerance", 0.04)),
+            "scale": float(getattr(args, "precision_depth_bound_scale", 1.0)),
+            "tile_k": int(getattr(args, "precision_depth_bound_tile_k", 128)),
+        },
+    }
+    score_tensors = {
+        "degree_q": scores["propagation_q"].to(device=device, dtype=torch.float32),
+        "tser_q": scores["sensitivity_q"].to(device=device, dtype=torch.float32),
+        "context_q": scores["graph_context_q"].to(device=device, dtype=torch.float32),
+        "low_unique_q": scores["low_degree_unique_q"].to(device=device, dtype=torch.float32),
+    }
+    with open(path, "w", encoding="utf-8") as handle:
+        handle.write(json.dumps({"meta": meta}, sort_keys=True) + "\n")
+        for node_id in range(num_nodes):
+            bit = int(actions[node_id].item())
+            if bool(direct_mask[node_id].item()):
+                role = "direct"
+            elif bool(residual_mask[node_id].item()):
+                role = "residual"
+            elif bool(accepted_hit_mask[node_id].item()):
+                role = "reuse_other"
+            else:
+                role = "miss"
+            row = {
+                "node_id": int(node_id),
+                "role": role,
+                "is_miss": role == "miss",
+                "source_id": int(source_ids[node_id].item()),
+                "hit_kind": str(hit_kinds[node_id]) if node_id < len(hit_kinds) else "none",
+                "best_dist": int(best_dists[node_id].item()),
+                "route_hits": int(route_hits[node_id].item()),
+                "base_hits": int(base_hits[node_id].item()),
+                "support_hits": int(winning_hits[node_id].item()),
+                "action_bit": bit,
+                "depth_bucket": bucket_by_bit.get(bit, f"p{bit}"),
+                "stop_depth": bit if role == "miss" else 0,
+            }
+            for key, tensor in score_tensors.items():
+                row[key] = float(tensor[node_id].item())
+            handle.write(json.dumps(row, sort_keys=True) + "\n")
+
+
 def fit_precision_depth_damage_predictor(ds_key, scores, data, target, args, seed, device):
     original_samples = getattr(args, "graph_eager_predictor_calib_samples", None)
     original_ridge = getattr(args, "graph_eager_predictor_ridge", None)
@@ -3140,6 +3241,29 @@ def run_residual_precision_depth_experiment(args):
                         f"| Drop={drop:.2%} | FinalErr={stats['final_avg_error']:.5f} "
                         f"| MissErr={stats['miss_avg_selected_error']:.5f}"
                     )
+                    trace_export_dir = str(getattr(run_args, "precision_depth_trace_export_dir", "") or "")
+                    export_configs = [
+                        str(item)
+                        for item in getattr(run_args, "precision_depth_trace_export_configs", ["DegBound"])
+                    ]
+                    if trace_export_dir and ("all" in export_configs or name in export_configs):
+                        trace_name = f"{ds_key}_seed{seed}_{name}.jsonl"
+                        trace_path = os.path.join(trace_export_dir, trace_name)
+                        export_residual_precision_depth_node_trace(
+                            trace_path,
+                            dataset=ds_key,
+                            seed=seed,
+                            config_name=name,
+                            policy=policy,
+                            actions=actions,
+                            trace=trace,
+                            accepted_hit_mask=accepted_hit_mask,
+                            direct_mask=direct_mask,
+                            residual_mask=residual_mask,
+                            scores=scores,
+                            args=run_args,
+                        )
+                        log_important(f"[GraphBitTrace] wrote {trace_path}")
 
             log_important(f"\n{'=' * 72}")
             log_important(f"FINAL RESIDUAL + GRAPH-BIT SUMMARY ({args.runs} Runs) | {ds_key.upper()}")

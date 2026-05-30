@@ -18,6 +18,7 @@ set -euo pipefail
 #   RESIDUAL_GATE_THRESHOLD=0.60   fixed soft-hit accept threshold
 #   RUN_ALGO=1      rerun residual_precision_depth even if a log exists
 #   BOUND_ENABLE=1  use graph-conditioned runtime-bound depth policies
+#   TRACE_EXPORT=1  export per-node Graph-Bit replay traces
 #   RUN_ONNXIM=1    rerun ONNXim LLaMA GEMM microbenchmarks
 #   BUILD_ONNXIM=1  try to build ONNXim before running microbenchmarks
 
@@ -56,6 +57,9 @@ BOUND_MID_TOL="${BOUND_MID_TOL:-0.02}"
 BOUND_LOW_TOL="${BOUND_LOW_TOL:-0.04}"
 BOUND_SCALE="${BOUND_SCALE:-1.0}"
 BOUND_TILE_K="${BOUND_TILE_K:-128}"
+TRACE_EXPORT="${TRACE_EXPORT:-0}"
+TRACE_EXPORT_DIR="${TRACE_EXPORT_DIR:-${OUT_DIR}/node_traces}"
+TRACE_EXPORT_CONFIGS=(${TRACE_EXPORT_CONFIGS:-DegBound})
 
 case "${BUDGET}" in
   p8heavy)
@@ -122,6 +126,13 @@ run_algo() {
       --precision_depth_bound_tile_k "${BOUND_TILE_K}"
     )
   fi
+  local trace_args=()
+  if [[ "${TRACE_EXPORT}" == "1" ]]; then
+    trace_args=(
+      --precision_depth_trace_export_dir "${TRACE_EXPORT_DIR}"
+      --precision_depth_trace_export_configs "${TRACE_EXPORT_CONFIGS[@]}"
+    )
+  fi
   echo "[$(timestamp)] [Algo] running ${DATASET} ${FRONTEND_ID} residual + Graph-Bit, runs=${RUNS}"
   set +e
   "${PYTHON_BIN}" -m GraphhopSimhash \
@@ -139,6 +150,7 @@ run_algo() {
     --precision_depth_cost_scale 0.50 \
     --precision_depth_fixed_cost 0.15 \
     "${bound_args[@]}" \
+    "${trace_args[@]}" \
     --radius 2 \
     --hash_heads_per_route 8 \
     --main_hash_head_bits "${head_bits[@]}" \
