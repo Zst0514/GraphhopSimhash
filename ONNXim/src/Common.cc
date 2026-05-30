@@ -150,6 +150,26 @@ SimulationConfig initialize_config(json config) {
     parsed_config.graphbit_bound_scale = config["graphbit_bound_scale"];
   if (config.contains("graphbit_memory_scale"))
     parsed_config.graphbit_memory_scale = config["graphbit_memory_scale"];
+  if (config.contains("graphbit_activation_layout"))
+    parsed_config.graphbit_activation_layout = config["graphbit_activation_layout"];
+  if (config.contains("graphbit_plane_group_bits"))
+    parsed_config.graphbit_plane_group_bits = config["graphbit_plane_group_bits"];
+  if (config.contains("graphbit_issue_gate"))
+    parsed_config.graphbit_issue_gate = config["graphbit_issue_gate"];
+  if (config.contains("graphbit_weight_rf_gate"))
+    parsed_config.graphbit_weight_rf_gate = config["graphbit_weight_rf_gate"];
+  if (config.contains("graphbit_psum_gate"))
+    parsed_config.graphbit_psum_gate = config["graphbit_psum_gate"];
+  if (config.contains("graphbit_risk_bucket_enable"))
+    parsed_config.graphbit_risk_bucket_enable = config["graphbit_risk_bucket_enable"];
+  if (config.contains("graphbit_weight_stationary_enable"))
+    parsed_config.graphbit_weight_stationary_enable = config["graphbit_weight_stationary_enable"];
+  if (config.contains("graphbit_baseline_weight_tile_batch"))
+    parsed_config.graphbit_baseline_weight_tile_batch = config["graphbit_baseline_weight_tile_batch"];
+  if (config.contains("graphbit_weight_stationary_tile_batch"))
+    parsed_config.graphbit_weight_stationary_tile_batch = config["graphbit_weight_stationary_tile_batch"];
+  if (config.contains("graphbit_weight_memory_scale"))
+    parsed_config.graphbit_weight_memory_scale = config["graphbit_weight_memory_scale"];
 
   if (config.contains("partition")) {
     for (int i=0; i<parsed_config.num_cores; i++) {

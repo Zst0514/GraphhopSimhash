@@ -16,6 +16,10 @@ class SystolicWS : public Core {
   uint64_t _stat_graphbit_bound_stop_count = 0;
   uint64_t _stat_graphbit_effective_bitplanes = 0;
   uint64_t _stat_graphbit_saved_bitplanes = 0;
+  uint64_t _stat_graphbit_fetch_bitplanes = 0;
+  uint64_t _stat_graphbit_issue_bitplanes = 0;
+  uint64_t _stat_graphbit_weight_bitplanes = 0;
+  uint64_t _stat_graphbit_psum_bitplanes = 0;
   double _stat_graphbit_effective_compute_cycles = 0;
   double _stat_graphbit_raw_compute_cycles = 0;
   cycle_type get_inst_raw_compute_cycles(std::unique_ptr<Instruction>& inst);

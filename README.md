@@ -652,6 +652,19 @@ python GraphhopSimhash/scripts/onnxim_graphbit_microbench.py \
   --log-level info
 ```
 
+Datapath mechanism suite:
+
+```bash
+SEQ_LEN=8 bash GraphhopSimhash/scripts/run_onnxim_graphbit_datapath_suite.sh
+```
+
+It separates byte-major mask-only, plane-group demand fetch, risk-bucket issue
+gating, W RF/psum gating, and weight-stationary reuse.  The compact result is:
+
+```text
+output/onnxim_graphbit/datapath_suite_s8/datapath_summary.txt
+```
+
 Guide:
 
 ```text

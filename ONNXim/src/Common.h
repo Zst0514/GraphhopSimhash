@@ -100,8 +100,14 @@ typedef struct
   uint32_t graphbit_full_depth = 8;
   uint32_t graphbit_config_depth = 8;
   uint32_t graphbit_effective_depth = 8;
+  uint32_t graphbit_fetch_depth = 8;
+  uint32_t graphbit_issue_depth = 8;
+  uint32_t graphbit_weight_depth = 8;
+  uint32_t graphbit_psum_depth = 8;
   double graphbit_remaining_bound = 0.0;
   uint32_t graphbit_original_size = 0;
+  uint32_t graphbit_original_weight_size = 0;
+  double graphbit_weight_hbm_scale = 1.0;
   std::string to_string();
 } Instruction;
 

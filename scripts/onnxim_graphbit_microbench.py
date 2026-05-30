@@ -159,6 +159,16 @@ def write_graphbit_config(base_config: Path, workspace: Path, args: argparse.Nam
             "graphbit_bound_tolerance": float(args.graphbit_bound_tolerance),
             "graphbit_bound_scale": float(args.graphbit_bound_scale),
             "graphbit_memory_scale": float(args.graphbit_memory_scale),
+            "graphbit_activation_layout": args.graphbit_activation_layout,
+            "graphbit_plane_group_bits": int(args.graphbit_plane_group_bits),
+            "graphbit_issue_gate": not args.disable_graphbit_issue_gate,
+            "graphbit_weight_rf_gate": bool(args.graphbit_weight_rf_gate),
+            "graphbit_psum_gate": bool(args.graphbit_psum_gate),
+            "graphbit_risk_bucket_enable": not args.disable_graphbit_risk_bucket,
+            "graphbit_weight_stationary_enable": bool(args.graphbit_weight_stationary),
+            "graphbit_baseline_weight_tile_batch": int(args.graphbit_baseline_weight_tile_batch),
+            "graphbit_weight_stationary_tile_batch": int(args.graphbit_weight_stationary_tile_batch),
+            "graphbit_weight_memory_scale": float(args.graphbit_weight_memory_scale),
         }
     )
     config_dir = workspace / "generated_configs"
@@ -200,6 +210,15 @@ def parse_log(path: Path) -> dict[str, Any]:
         r"RawComputeCycles\s+([0-9.eE+-]+)",
         text,
     )
+    graphbit_dataflow_matches = re.findall(
+        r"GraphBitDataflow AvgFetchDepth\s+([0-9.]+)\s+AvgIssueDepth\s+([0-9.]+)\s+"
+        r"AvgWeightRFDepth\s+([0-9.]+)\s+AvgPsumDepth\s+([0-9.]+)",
+        text,
+    )
+    graphbit_memory_matches = re.findall(
+        r"GraphBitMemory ReadWeightActual\s+(\d+)\s+ReadWeightOriginal\s+(\d+)",
+        text,
+    )
 
     bw_reads = sum(int(r) for r, _ in avg_bw_matches)
     bw_writes = sum(int(w) for _, w in avg_bw_matches)
@@ -219,8 +238,13 @@ def parse_log(path: Path) -> dict[str, Any]:
     graphbit_bound_stops = sum(int(v[1]) for v in graphbit_matches)
     graphbit_effective_compute_cycles = sum(float(v[0]) for v in graphbit_compute_matches)
     graphbit_raw_compute_cycles = sum(float(v[1]) for v in graphbit_compute_matches)
+    mem_read_weight_original = sum(int(v[1]) for v in graphbit_memory_matches)
     graphbit_avg_depth = None
     graphbit_avg_saved = None
+    graphbit_avg_fetch_depth = None
+    graphbit_avg_issue_depth = None
+    graphbit_avg_weight_rf_depth = None
+    graphbit_avg_psum_depth = None
     if graphbit_inst:
         graphbit_avg_depth = (
             sum(int(inst) * float(avg) for inst, _, avg, _ in graphbit_matches)
@@ -230,6 +254,12 @@ def parse_log(path: Path) -> dict[str, Any]:
             sum(int(inst) * float(avg) for inst, _, _, avg in graphbit_matches)
             / graphbit_inst
         )
+    if graphbit_dataflow_matches:
+        count = len(graphbit_dataflow_matches)
+        graphbit_avg_fetch_depth = sum(float(v[0]) for v in graphbit_dataflow_matches) / count
+        graphbit_avg_issue_depth = sum(float(v[1]) for v in graphbit_dataflow_matches) / count
+        graphbit_avg_weight_rf_depth = sum(float(v[2]) for v in graphbit_dataflow_matches) / count
+        graphbit_avg_psum_depth = sum(float(v[3]) for v in graphbit_dataflow_matches) / count
 
     return {
         "cycles": int(cycle_matches[-1]) if cycle_matches else None,
@@ -243,12 +273,17 @@ def parse_log(path: Path) -> dict[str, Any]:
         "avg_bw_read_requests": bw_reads,
         "avg_bw_write_requests": bw_writes,
         **mem_breakdown,
+        "mem_read_weight_original": mem_read_weight_original or mem_breakdown["mem_read_weight"],
         "graphbit_inst": graphbit_inst,
         "graphbit_bound_stops": graphbit_bound_stops,
         "graphbit_effective_compute_cycles": graphbit_effective_compute_cycles,
         "graphbit_raw_compute_cycles": graphbit_raw_compute_cycles,
         "graphbit_avg_depth": graphbit_avg_depth,
         "graphbit_avg_saved_bitplanes": graphbit_avg_saved,
+        "graphbit_avg_fetch_depth": graphbit_avg_fetch_depth,
+        "graphbit_avg_issue_depth": graphbit_avg_issue_depth,
+        "graphbit_avg_weight_rf_depth": graphbit_avg_weight_rf_depth,
+        "graphbit_avg_psum_depth": graphbit_avg_psum_depth,
         "log": str(path),
     }
 
@@ -293,6 +328,7 @@ def write_summary(specs: list[GemmSpec], workspace: Path, layers: int) -> dict[s
             "mem_read_input_actual": weighted("mem_read_input_actual"),
             "mem_read_input_original": weighted("mem_read_input_original"),
             "mem_read_weight": weighted("mem_read_weight"),
+            "mem_read_weight_original": weighted("mem_read_weight_original"),
             "mem_read_other": weighted("mem_read_other"),
             "mem_write_output": weighted("mem_write_output"),
             "mem_write_other": weighted("mem_write_other"),
@@ -322,9 +358,23 @@ def write_summary(specs: list[GemmSpec], workspace: Path, layers: int) -> dict[s
             )
             / graphbit_inst
         )
+        for key in (
+            "graphbit_avg_fetch_depth",
+            "graphbit_avg_issue_depth",
+            "graphbit_avg_weight_rf_depth",
+            "graphbit_avg_psum_depth",
+        ):
+            aggregate["per_layer"][key] = (
+                sum((row[key] or 0.0) * row["graphbit_inst"] * row["count_per_layer"] for row in rows)
+                / graphbit_inst
+            )
     else:
         aggregate["per_layer"]["graphbit_avg_depth"] = None
         aggregate["per_layer"]["graphbit_avg_saved_bitplanes"] = None
+        aggregate["per_layer"]["graphbit_avg_fetch_depth"] = None
+        aggregate["per_layer"]["graphbit_avg_issue_depth"] = None
+        aggregate["per_layer"]["graphbit_avg_weight_rf_depth"] = None
+        aggregate["per_layer"]["graphbit_avg_psum_depth"] = None
     aggregate["encoder"] = {
         key: value * layers for key, value in aggregate["per_layer"].items()
         if isinstance(value, (int, float))
@@ -333,6 +383,13 @@ def write_summary(specs: list[GemmSpec], workspace: Path, layers: int) -> dict[s
     aggregate["encoder"]["graphbit_avg_saved_bitplanes"] = aggregate["per_layer"][
         "graphbit_avg_saved_bitplanes"
     ]
+    for key in (
+        "graphbit_avg_fetch_depth",
+        "graphbit_avg_issue_depth",
+        "graphbit_avg_weight_rf_depth",
+        "graphbit_avg_psum_depth",
+    ):
+        aggregate["encoder"][key] = aggregate["per_layer"][key]
 
     aggregate_path = workspace / "aggregate.json"
     with aggregate_path.open("w") as handle:
@@ -367,6 +424,16 @@ def main() -> None:
     parser.add_argument("--graphbit-bound-tolerance", type=float, default=0.0)
     parser.add_argument("--graphbit-bound-scale", type=float, default=1.0)
     parser.add_argument("--graphbit-memory-scale", type=float, default=1.0)
+    parser.add_argument("--graphbit-activation-layout", choices=["plane_group", "byte_major"], default="plane_group")
+    parser.add_argument("--graphbit-plane-group-bits", type=int, default=1)
+    parser.add_argument("--disable-graphbit-issue-gate", action="store_true")
+    parser.add_argument("--graphbit-weight-rf-gate", action="store_true")
+    parser.add_argument("--graphbit-psum-gate", action="store_true")
+    parser.add_argument("--disable-graphbit-risk-bucket", action="store_true")
+    parser.add_argument("--graphbit-weight-stationary", action="store_true")
+    parser.add_argument("--graphbit-baseline-weight-tile-batch", type=int, default=1)
+    parser.add_argument("--graphbit-weight-stationary-tile-batch", type=int, default=1)
+    parser.add_argument("--graphbit-weight-memory-scale", type=float, default=1.0)
     parser.add_argument("--action", choices=["generate", "run", "summarize", "all"], default="all")
     parser.add_argument("--log-level", default="info")
     args = parser.parse_args()

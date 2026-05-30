@@ -85,6 +85,16 @@ struct SimulationConfig {
   float graphbit_bound_tolerance = 0.0f;
   float graphbit_bound_scale = 1.0f;
   float graphbit_memory_scale = 1.0f;
+  std::string graphbit_activation_layout = "plane_group";
+  uint32_t graphbit_plane_group_bits = 1;
+  bool graphbit_issue_gate = true;
+  bool graphbit_weight_rf_gate = false;
+  bool graphbit_psum_gate = false;
+  bool graphbit_risk_bucket_enable = true;
+  bool graphbit_weight_stationary_enable = false;
+  uint32_t graphbit_baseline_weight_tile_batch = 1;
+  uint32_t graphbit_weight_stationary_tile_batch = 1;
+  float graphbit_weight_memory_scale = 1.0f;
 
   /*
    * This map stores the partition information: <partition_id, core_id>

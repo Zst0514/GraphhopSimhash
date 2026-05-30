@@ -74,11 +74,23 @@ void SystolicWS::cycle() {
         uint32_t full_depth = std::max(1u, front->graphbit_full_depth);
         uint32_t effective_depth =
             std::min(front->graphbit_effective_depth, full_depth);
+        uint32_t fetch_depth =
+            std::min(front->graphbit_fetch_depth, full_depth);
+        uint32_t issue_depth =
+            std::min(front->graphbit_issue_depth, full_depth);
+        uint32_t weight_depth =
+            std::min(front->graphbit_weight_depth, full_depth);
+        uint32_t psum_depth =
+            std::min(front->graphbit_psum_depth, full_depth);
         cycle_type raw_cycles = get_inst_raw_compute_cycles(front);
         cycle_type effective_cycles = get_inst_compute_cycles(front);
         _stat_graphbit_inst_count++;
         _stat_graphbit_effective_bitplanes += effective_depth;
         _stat_graphbit_saved_bitplanes += (full_depth - effective_depth);
+        _stat_graphbit_fetch_bitplanes += fetch_depth;
+        _stat_graphbit_issue_bitplanes += issue_depth;
+        _stat_graphbit_weight_bitplanes += weight_depth;
+        _stat_graphbit_psum_bitplanes += psum_depth;
         _stat_graphbit_raw_compute_cycles += raw_cycles;
         _stat_graphbit_effective_compute_cycles += effective_cycles;
         if (front->graphbit_remaining_bound <=
@@ -149,11 +161,11 @@ cycle_type SystolicWS::get_inst_compute_cycles(std::unique_ptr<Instruction>& ins
     return raw_cycles;
   }
   uint32_t full_depth = std::max(1u, inst->graphbit_full_depth);
-  uint32_t effective_depth =
-      std::max(1u, std::min(inst->graphbit_effective_depth, full_depth));
+  uint32_t issue_depth =
+      std::max(1u, std::min(inst->graphbit_issue_depth, full_depth));
   cycle_type scaled_cycles = static_cast<cycle_type>(
       std::ceil(static_cast<double>(raw_cycles) *
-                static_cast<double>(effective_depth) /
+                static_cast<double>(issue_depth) /
                 static_cast<double>(full_depth)));
   return std::max<cycle_type>(1, scaled_cycles);
 }
@@ -169,11 +181,11 @@ cycle_type SystolicWS::get_inst_issue_spacing(std::unique_ptr<Instruction>& inst
     return raw_spacing;
   }
   uint32_t full_depth = std::max(1u, inst->graphbit_full_depth);
-  uint32_t effective_depth =
-      std::max(1u, std::min(inst->graphbit_effective_depth, full_depth));
+  uint32_t issue_depth =
+      std::max(1u, std::min(inst->graphbit_issue_depth, full_depth));
   cycle_type scaled_spacing = static_cast<cycle_type>(
       std::ceil(static_cast<double>(raw_spacing) *
-                static_cast<double>(effective_depth) /
+                static_cast<double>(issue_depth) /
                 static_cast<double>(full_depth)));
   return std::max<cycle_type>(1, scaled_spacing);
 }
@@ -232,11 +244,27 @@ void SystolicWS::print_stats() {
     double avg_saved =
         static_cast<double>(_stat_graphbit_saved_bitplanes) /
         static_cast<double>(_stat_graphbit_inst_count);
+    double avg_fetch =
+        static_cast<double>(_stat_graphbit_fetch_bitplanes) /
+        static_cast<double>(_stat_graphbit_inst_count);
+    double avg_issue =
+        static_cast<double>(_stat_graphbit_issue_bitplanes) /
+        static_cast<double>(_stat_graphbit_inst_count);
+    double avg_weight =
+        static_cast<double>(_stat_graphbit_weight_bitplanes) /
+        static_cast<double>(_stat_graphbit_inst_count);
+    double avg_psum =
+        static_cast<double>(_stat_graphbit_psum_bitplanes) /
+        static_cast<double>(_stat_graphbit_inst_count);
     spdlog::info(
         "Core [{}] : GraphBit Inst {} BoundStops {} AvgDepth {:.2f} "
         "AvgSavedBitplanes {:.2f} EffectiveComputeCycles {:.0f} RawComputeCycles {:.0f}",
         _id, _stat_graphbit_inst_count, _stat_graphbit_bound_stop_count,
         avg_depth, avg_saved, _stat_graphbit_effective_compute_cycles,
         _stat_graphbit_raw_compute_cycles);
+    spdlog::info(
+        "Core [{}] : GraphBitDataflow AvgFetchDepth {:.2f} AvgIssueDepth {:.2f} "
+        "AvgWeightRFDepth {:.2f} AvgPsumDepth {:.2f}",
+        _id, avg_fetch, avg_issue, avg_weight, avg_psum);
   }
 }

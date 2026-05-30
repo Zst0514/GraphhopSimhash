@@ -61,8 +61,80 @@ namespace
     return config_depth;
   }
 
+  uint32_t graphbit_grouped_depth(uint32_t depth,
+                                  const SimulationConfig &config)
+  {
+    uint32_t full_depth = std::max(1u, config.graphbit_full_depth);
+    uint32_t group_bits = std::max(1u, config.graphbit_plane_group_bits);
+    depth = std::min(depth, full_depth);
+    uint32_t grouped = ((depth + group_bits - 1) / group_bits) * group_bits;
+    return std::min(grouped, full_depth);
+  }
+
+  uint32_t graphbit_issue_depth(uint32_t effective_depth,
+                                const SimulationConfig &config)
+  {
+    uint32_t full_depth = std::max(1u, config.graphbit_full_depth);
+    if (!config.graphbit_enable || !config.graphbit_issue_gate ||
+        !config.graphbit_risk_bucket_enable)
+    {
+      return full_depth;
+    }
+    return std::max(1u, std::min(effective_depth, full_depth));
+  }
+
+  uint32_t graphbit_fetch_depth(uint32_t effective_depth,
+                                const SimulationConfig &config)
+  {
+    uint32_t full_depth = std::max(1u, config.graphbit_full_depth);
+    if (!config.graphbit_enable || !config.graphbit_risk_bucket_enable ||
+        config.graphbit_activation_layout == "byte_major")
+    {
+      return full_depth;
+    }
+    return graphbit_grouped_depth(effective_depth, config);
+  }
+
+  uint32_t graphbit_weight_depth(uint32_t issue_depth,
+                                 const SimulationConfig &config)
+  {
+    uint32_t full_depth = std::max(1u, config.graphbit_full_depth);
+    if (!config.graphbit_enable || !config.graphbit_weight_rf_gate)
+    {
+      return full_depth;
+    }
+    return std::max(1u, std::min(issue_depth, full_depth));
+  }
+
+  uint32_t graphbit_psum_depth(uint32_t issue_depth,
+                               const SimulationConfig &config)
+  {
+    uint32_t full_depth = std::max(1u, config.graphbit_full_depth);
+    if (!config.graphbit_enable || !config.graphbit_psum_gate)
+    {
+      return full_depth;
+    }
+    return std::max(1u, std::min(issue_depth, full_depth));
+  }
+
+  double graphbit_weight_hbm_scale(const SimulationConfig &config)
+  {
+    if (!config.graphbit_enable || !config.graphbit_weight_stationary_enable)
+    {
+      return 1.0;
+    }
+    double baseline = static_cast<double>(
+        std::max(1u, config.graphbit_baseline_weight_tile_batch));
+    double stationary = static_cast<double>(
+        std::max(1u, config.graphbit_weight_stationary_tile_batch));
+    double batch_scale = std::min(1.0, baseline / stationary);
+    double explicit_scale =
+        std::max(0.0f, std::min(1.0f, config.graphbit_weight_memory_scale));
+    return std::max(0.0, std::min(1.0, batch_scale * explicit_scale));
+  }
+
   std::vector<addr_type> make_graphbit_src_addrs(const std::set<addr_type> &src,
-                                                 uint32_t effective_depth,
+                                                 uint32_t fetch_depth,
                                                  const SimulationConfig &config)
   {
     std::vector<addr_type> addrs(src.begin(), src.end());
@@ -71,13 +143,29 @@ namespace
       return addrs;
     }
     uint32_t full_depth = std::max(1u, config.graphbit_full_depth);
-    effective_depth = std::min(effective_depth, full_depth);
+    fetch_depth = std::min(fetch_depth, full_depth);
     double depth_scale =
-        static_cast<double>(effective_depth) / static_cast<double>(full_depth);
+        static_cast<double>(fetch_depth) / static_cast<double>(full_depth);
     double memory_scale =
         std::max(0.0f, std::min(1.0f, config.graphbit_memory_scale));
     size_t reduced_size = static_cast<size_t>(
         std::ceil(addrs.size() * depth_scale * memory_scale));
+    reduced_size = std::max<size_t>(1, std::min(reduced_size, addrs.size()));
+    addrs.resize(reduced_size);
+    return addrs;
+  }
+
+  std::vector<addr_type> make_graphbit_weight_addrs(const std::set<addr_type> &src,
+                                                    const SimulationConfig &config)
+  {
+    std::vector<addr_type> addrs(src.begin(), src.end());
+    if (!config.graphbit_enable || addrs.empty())
+    {
+      return addrs;
+    }
+    double scale = graphbit_weight_hbm_scale(config);
+    size_t reduced_size =
+        static_cast<size_t>(std::ceil(addrs.size() * scale));
     reduced_size = std::max<size_t>(1, std::min(reduced_size, addrs.size()));
     addrs.resize(reduced_size);
     return addrs;
@@ -96,8 +184,15 @@ namespace
     inst.graphbit_config_depth =
         clamp_graphbit_depth(config.graphbit_precision_depth, config);
     inst.graphbit_effective_depth = effective_depth;
+    inst.graphbit_fetch_depth = graphbit_fetch_depth(effective_depth, config);
+    inst.graphbit_issue_depth = graphbit_issue_depth(effective_depth, config);
+    inst.graphbit_weight_depth =
+        graphbit_weight_depth(inst.graphbit_issue_depth, config);
+    inst.graphbit_psum_depth =
+        graphbit_psum_depth(inst.graphbit_issue_depth, config);
     inst.graphbit_remaining_bound =
         estimate_graphbit_remaining_bound(effective_depth, tile_k, config);
+    inst.graphbit_weight_hbm_scale = graphbit_weight_hbm_scale(config);
   }
 
 } // namespace
@@ -275,14 +370,20 @@ void GemmWS::initialize_instructions(Tile *tile, Mapping mapping)
               second_addr + make_address(index, weight_shape_2d));
         }
       }
-      tile->instructions.push_back(std::make_unique<Instruction>(Instruction{
+      std::vector<addr_type> weight_addrs =
+          make_graphbit_weight_addrs(weight_set, _config);
+      Instruction weight_inst = Instruction{
           .opcode = Opcode::MOVIN,
           .dest_addr = weight_sp_addr,
-          .size = (uint32_t)weight_set.size(),
-          .src_addrs = std::vector<addr_type>(weight_set.begin(), weight_set.end()),
+          .size = (uint32_t)weight_addrs.size(),
+          .src_addrs = weight_addrs,
           .operand_id = _INPUT_OPERAND + 1,
           .tile_m = mapping.tile_in_loop.M,
-          .tile_k = mapping.tile_in_loop.C}));
+          .tile_k = mapping.tile_in_loop.C,
+          .graphbit_original_weight_size = (uint32_t)weight_set.size()};
+      annotate_graphbit(weight_inst, static_cast<uint32_t>(mapping.tile_in_loop.C), _config);
+      tile->instructions.push_back(std::make_unique<Instruction>(Instruction{
+          weight_inst}));
 
       for (int Ns = 0; Ns < mapping.tile_in_loop.N; Ns += loop_size)
       {
@@ -322,20 +423,18 @@ void GemmWS::initialize_instructions(Tile *tile, Mapping mapping)
           uint32_t graphbit_tile_k = static_cast<uint32_t>(
               std::min(static_cast<uint32_t>(c_in_loop),
                        _config.core_config[target_core].core_height));
-          uint32_t effective_depth =
-              select_graphbit_effective_depth(graphbit_tile_k, _config);
-          std::vector<addr_type> input_addrs =
-              make_graphbit_src_addrs(input_set, effective_depth, _config);
           Instruction inst = Instruction{
               .opcode = Opcode::MOVIN,
               .dest_addr = act_sp_addr,
-              .size = (uint32_t)input_addrs.size(),
-              .src_addrs = input_addrs,
               .operand_id = _INPUT_OPERAND,
               .tile_k = graphbit_tile_k,
               .tile_n = static_cast<unsigned int>(n_loop),
               .graphbit_original_size = (uint32_t)input_set.size()};
           annotate_graphbit(inst, graphbit_tile_k, _config);
+          std::vector<addr_type> input_addrs =
+              make_graphbit_src_addrs(input_set, inst.graphbit_fetch_depth, _config);
+          inst.size = (uint32_t)input_addrs.size();
+          inst.src_addrs = input_addrs;
           tile->instructions.push_back(std::make_unique<Instruction>(Instruction{
               inst}));
         }

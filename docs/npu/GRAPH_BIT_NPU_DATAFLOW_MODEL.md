@@ -312,17 +312,87 @@ PubMed 和 Cora 的趋势一致：
 4. P5 是 dynamic-depth proxy，不代表必须有 5-bit ISA。
 ```
 
-## 11. 下一步
+## 11. ONNXim / GemmWS 下沉实现
 
-下一步应该把该模型中的三个机制接入更底层仿真：
+当前已经把组件级模型下沉到 ONNXim 的 `GemmWS` / `SystolicWS`：
 
 ```text
-1. ONNXim GemmWS 中显式模拟 plane-group activation fetch；
-2. 在 GemmWS tile loop 中加入 bit-plane issue gating 和 psum gating；
-3. 在 model-level scheduler 中模拟 risk-bucket batching 与 W tile reuse。
+ONNXim/src/operations/GemmWS.cc
+    1. 为 activation MOVIN 显式生成 plane-group fetch depth；
+    2. 为 weight MOVIN 显式建模 weight-stationary HBM amortization；
+    3. 给 GEMM instruction 标注 effective / fetch / issue / WRF / psum depth。
+
+ONNXim/src/SystolicWS.cc
+    1. 用 issue depth 缩放 bit-plane issue cycles；
+    2. 统计 fetch / issue / WRF / psum 的平均 bit-depth；
+    3. 输出 GraphBitDataflow 日志。
+
+ONNXim/src/Core.cc
+    1. 保留原 MemoryBreakdown 格式；
+    2. 新增 GraphBitMemory，记录 weight actual/original request。
 ```
 
-如果要进一步走 RTL，不需要一开始写完整 LLaMA encoder，只需要实现：
+也就是说，现在不只是外部 Python proxy，而是 ONNXim 内部已经能区分：
+
+```text
+1. byte-major 只 mask，不减少 activation fetch；
+2. plane-group-major demand fetch，减少 activation request；
+3. bit-plane issue gating，减少 PE issue depth；
+4. W RF / broadcast gating，减少片上权重广播深度；
+5. psum update gating，减少低位 partial-sum 更新；
+6. risk-bucket disabled 时，低风险节点被 P8 batch 拖住；
+7. weight-stationary reuse 时，降低 weight HBM actual request。
+```
+
+### 11.1 Microbench 运行方式
+
+```bash
+SEQ_LEN=8 bash GraphhopSimhash/scripts/run_onnxim_graphbit_datapath_suite.sh
+```
+
+输出：
+
+```text
+output/onnxim_graphbit/datapath_suite_s8/datapath_summary.txt
+output/onnxim_graphbit/datapath_suite_s8/datapath_summary.tsv
+```
+
+### 11.2 快速验证结果
+
+`seq_len=8` 的 sanity-check 结果如下。这里重点看机制是否按预期改变 counter，而不是把这个小规模数值当最终论文数字：
+
+| Case | Cycles | Act/orig | W/orig | Fetch | Issue | WRF | Psum | Meaning |
+|---|---:|---:|---:|---:|---:|---:|---:|---|
+| full_p8 | 37.65M | 1.000 | 1.000 | - | - | - | - | 完整 P8 baseline |
+| byte_major_mask_only_p6 | 37.65M | 1.000 | 1.000 | 8.0 | 8.0 | 8.0 | 8.0 | 只 mask，基本无收益 |
+| byte_major_issue_rf_psum_p6 | 37.63M | 1.000 | 1.000 | 8.0 | 6.0 | 6.0 | 6.0 | 少发 PE/WRF/Psum，但 Aread 不变 |
+| plane_group2_issue_rf_psum_p6 | 37.23M | 0.750 | 1.000 | 6.0 | 6.0 | 6.0 | 6.0 | activation demand fetch 生效 |
+| plane_group2_bound_low | 37.22M | 0.750 | 1.000 | 6.0 | 5.0 | 5.0 | 5.0 | predictor-free bound early stop 生效 |
+| no_risk_bucket_p6 | 37.65M | 1.000 | 1.000 | 8.0 | 8.0 | 8.0 | 8.0 | 无 risk bucket 时被 P8 batch 拖住 |
+| plane_group2_ws_p6 | 15.09M | 0.750 | 0.250 | 6.0 | 6.0 | 6.0 | 6.0 | weight-stationary HBM reuse 生效 |
+
+这个结果说明：
+
+```text
+1. 单纯“少算低位”不够；
+2. byte-major layout 无法减少 activation fetch；
+3. plane-group layout 能把 Aread 降到 6/8；
+4. risk-bucket batching 是让低风险节点真的停在低 depth 的必要条件；
+5. weight-stationary batching 是把 W HBM 也降下来的关键。
+```
+
+### 11.3 下一步
+
+下一步不是再证明组件存在，而是把这个 ONNXim datapath counter 接回 full-stack workload：
+
+```text
+reuse/residual 输出 node path ratio
+Graph-Bit 输出 high/mid/low miss-node ratio
+ONNXim datapath suite 输出 per-path cycles/traffic
+最终合成端到端 cycles / traffic / energy proxy
+```
+
+如果要进一步走 RTL，不需要一开始写完整 LLaMA encoder，只需要实现一个 `A8 x W4 GEMM tile` 微内核：
 
 ```text
 bit-plane activation buffer
@@ -332,5 +402,3 @@ weight RF gated broadcast
 psum gated update
 risk-bucket queue
 ```
-
-先做一个 `A8 x W4 GEMM tile` 微内核就够支撑硬件机制验证。

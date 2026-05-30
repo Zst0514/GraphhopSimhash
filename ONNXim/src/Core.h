@@ -74,6 +74,7 @@ class Core {
   uint64_t _stat_mem_read_input_requests = 0;
   uint64_t _stat_mem_read_input_original_requests = 0;
   uint64_t _stat_mem_read_weight_requests = 0;
+  uint64_t _stat_mem_read_weight_original_requests = 0;
   uint64_t _stat_mem_read_other_requests = 0;
   uint64_t _stat_mem_write_output_requests = 0;
   uint64_t _stat_mem_write_other_requests = 0;

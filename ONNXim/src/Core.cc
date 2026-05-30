@@ -237,6 +237,10 @@ void Core::print_stats() {
       _stat_mem_read_input_original_requests, _stat_mem_read_weight_requests,
       _stat_mem_read_other_requests, _stat_mem_write_output_requests,
       _stat_mem_write_other_requests);
+  spdlog::info(
+      "Core [{}] : GraphBitMemory ReadWeightActual {} ReadWeightOriginal {}",
+      _id, _stat_mem_read_weight_requests,
+      _stat_mem_read_weight_original_requests);
 }
 
 void Core::print_current_stats() {
@@ -369,6 +373,10 @@ void Core::handle_ld_inst_queue() {
                                           : actual_requests;
       } else if (front->operand_id == 101) {
         _stat_mem_read_weight_requests += actual_requests;
+        _stat_mem_read_weight_original_requests +=
+            front->graphbit_original_weight_size
+                ? front->graphbit_original_weight_size
+                : actual_requests;
       } else {
         _stat_mem_read_other_requests += actual_requests;
       }
