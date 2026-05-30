@@ -264,8 +264,8 @@ def write_compact(rows: list[dict[str, Any]], path: Path, args: argparse.Namespa
         ),
         "Drop is inherited from the static embedding proxy; bounded row estimates extra NPU bit-plane savings.",
         "",
-        "Method                         Reuse   P8     P6     P4     AvgBit Saved  Cycles Traffic Energy Drop",
-        "-----------------------------------------------------------------------------------------------",
+        "Method                         Reuse   P8     P6     P5     P4     AvgBit Saved  Cycles Traffic Energy Drop",
+        "------------------------------------------------------------------------------------------------------",
     ]
     for row in rows:
         lines.append(
@@ -273,6 +273,7 @@ def write_compact(rows: list[dict[str, Any]], path: Path, args: argparse.Namespa
             f"{fmt_pct(row['reuse']):>6} "
             f"{fmt_pct(row['p8']):>6} "
             f"{fmt_pct(row['p6']):>6} "
+            f"{fmt_pct(row['p5']):>6} "
             f"{fmt_pct(row['p4']):>6} "
             f"{row['avg_miss_depth']:>6.2f} "
             f"{row['saved_bitplanes']:>5.2f} "

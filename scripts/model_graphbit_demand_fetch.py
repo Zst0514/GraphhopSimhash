@@ -5,7 +5,7 @@ This script turns the current Graph-Bit workload profile into a hardware-facing
 breakdown.  It separates four effects:
 
 1. Graph/reuse front-end: direct/residual hits skip the encoder.
-2. Precision-depth assignment: miss nodes are assigned to P8/P6/P4.
+2. Precision-depth assignment: miss nodes are assigned to P8/P6/P5/P4.
 3. Bit-plane demand fetch: lower activation bit-planes are not requested after
    early-stop.
 4. Micro-batch utilization: random mixed risk classes execute to the maximum
@@ -108,6 +108,42 @@ def load_agg(path: Path, name: str, base: dict[str, Any] | None = None, fallback
         ),
         bitcomp=bitcomp(enc, depth_f),
     )
+
+
+def interpolate_agg(name: str, lo: Agg, hi: Agg, depth: float) -> Agg:
+    """Linearly interpolate an aggregate when an exact microbench is absent."""
+
+    span = hi.depth - lo.depth
+    ratio = 0.0 if abs(span) < 1e-12 else (depth - lo.depth) / span
+
+    def mix(a: float, b: float) -> float:
+        return a + ratio * (b - a)
+
+    return Agg(
+        name=name,
+        depth=depth,
+        cycles=mix(lo.cycles, hi.cycles),
+        traffic=mix(lo.traffic, hi.traffic),
+        act_read=mix(lo.act_read, hi.act_read),
+        weight_read=mix(lo.weight_read, hi.weight_read),
+        out_write=mix(lo.out_write, hi.out_write),
+        bitcomp=mix(lo.bitcomp, hi.bitcomp),
+    )
+
+
+def load_optional_depth_agg(
+    microbench_dir: Path,
+    seq_len: int,
+    bit: int,
+    name: str,
+    base_payload: dict[str, Any],
+    lower: Agg,
+    upper: Agg,
+) -> Agg:
+    path = microbench_dir / f"microbench_s{seq_len}_internal_p{bit}" / "aggregate.json"
+    if path.exists():
+        return load_agg(path, name, base=base_payload, fallback_depth=float(bit))
+    return interpolate_agg(name, lo=lower, hi=upper, depth=float(bit))
 
 
 def choose_profile(workload: dict[str, Any], contains: str) -> dict[str, Any]:
@@ -399,6 +435,15 @@ def main() -> None:
         base=base_payload,
         fallback_depth=4.0,
     )
+    p5 = load_optional_depth_agg(
+        args.microbench_dir,
+        args.seq_len,
+        5,
+        "p5",
+        base_payload,
+        lower=p4,
+        upper=p6,
+    )
     mid_early = load_agg(
         args.microbench_dir / f"microbench_s{args.seq_len}_internal_bound_mid_min6_t0p02" / "aggregate.json",
         "p6_early",
@@ -412,8 +457,8 @@ def main() -> None:
         fallback_depth=5.0,
     )
 
-    static_aggs = {"p8": full, "p6": p6, "p5": p6, "p4": p4}
-    early_aggs = {"p8": full, "p6": mid_early, "p5": mid_early, "p4": low_early}
+    static_aggs = {"p8": full, "p6": p6, "p5": p5, "p4": p4}
+    early_aggs = {"p8": full, "p6": mid_early, "p5": p5, "p4": low_early}
 
     full_profile = choose_profile(workload, args.full_profile_match)
     degree_profile = choose_profile(workload, args.degree_profile_match)

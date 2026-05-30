@@ -541,6 +541,44 @@ compute-mask only saves bit-plane arithmetic but not cycles/traffic;
 demand-fetch + risk-bucket scheduling is required to turn early stop into NPU-visible savings.
 ```
 
+One-command closure suite:
+
+```bash
+bash GraphhopSimhash/scripts/run_graphbit_closure_suite.sh
+```
+
+This produces:
+
+```text
+output/graphbit_closure/cora/closure_table.txt
+```
+
+It compares `FullP8-miss`, `compute-mask only`, `random-mixed`, and `demand-fetch + risk-bucket` on the same Cora workload.
+
+Dynamic P5 proxy for predictor-free early stop:
+
+```bash
+RUNS=3 bash GraphhopSimhash/scripts/run_cora_graphbit_dynamic_depth_accuracy.sh
+```
+
+This treats P5 as a conservative proxy for nodes that dynamically stop between P6 and P4:
+
+```text
+output/graphbit_predictor_free/cora_h8_54_T40_dynp5/
+```
+
+PubMed lightweight hardware replay:
+
+```bash
+bash GraphhopSimhash/scripts/run_pubmed_graphbit_demand_fetch_model.sh
+```
+
+This reuses an existing workload and reruns only the demand-fetch model:
+
+```text
+output/graphbit_predictor_free/pubmed_h8_76_T40/demand_fetch_model/
+```
+
 ## ONNXim Integration
 
 ONNXim is integrated under:
@@ -596,6 +634,15 @@ output/residual_graphbit_main/cora_h8_54_T40/
 
 output/graphbit_predictor_free/cora_h8_54_T40/
     Cora ONNXim-backed predictor-free early-stop flow
+
+output/graphbit_predictor_free/cora_h8_54_T40_dynp5/
+    Cora dynamic-depth P5 proxy flow
+
+output/graphbit_closure/cora/
+    Cora demand-fetch closure table
+
+output/graphbit_predictor_free/pubmed_h8_76_T40/demand_fetch_model/
+    PubMed lightweight demand-fetch replay
 
 output/llama7b_precision_depth_budget_sweep/
     LLaMA-7B precision-depth budget sweep

@@ -43,6 +43,8 @@ RESIDUAL_ACCEPT_MODE="${RESIDUAL_ACCEPT_MODE:-shared}"
 RESIDUAL_GATE_THRESHOLD="${RESIDUAL_GATE_THRESHOLD:-0.60}"
 RESIDUAL_EPOCHS="${RESIDUAL_EPOCHS:-200}"
 RESIDUAL_ALPHA_GRID=(${RESIDUAL_ALPHA_GRID:-0 0.03125 0.0625 0.125 0.25 0.5})
+PRECISION_DEPTH_TAGS=(${PRECISION_DEPTH_TAGS:-W4A6 W4A4})
+PRECISION_DEPTH_BITS=(${PRECISION_DEPTH_BITS:-6 4})
 
 case "${BUDGET}" in
   p8heavy)
@@ -102,8 +104,8 @@ run_algo() {
     --experiment_suite residual_precision_depth \
     --real_quant_model_name llama2_7b \
     --precision_depth_reference_tag W4A8 \
-    --precision_depth_tags W4A6 W4A4 \
-    --precision_depth_bits 6 4 \
+    --precision_depth_tags "${PRECISION_DEPTH_TAGS[@]}" \
+    --precision_depth_bits "${PRECISION_DEPTH_BITS[@]}" \
     --precision_depth_reference_bits 8 \
     --precision_depth_high_ratio "${HIGH_RATIO}" \
     --precision_depth_mid_ratio "${MID_RATIO}" \

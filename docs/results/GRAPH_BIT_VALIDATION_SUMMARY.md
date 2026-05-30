@@ -601,6 +601,103 @@ Detailed model:
 docs/npu/GRAPH_BIT_DEMAND_FETCH_MODEL.md
 ```
 
+## Closure Suite And Dynamic-Depth Follow-Up
+
+The closure suite is the current shortest end-to-end check for the hardware story:
+
+```bash
+bash scripts/run_graphbit_closure_suite.sh
+```
+
+Output:
+
+```text
+output/graphbit_closure/cora/closure_table.txt
+```
+
+It compares the same Cora workload under four hardware interpretations:
+
+```text
+FullP8-miss:
+    reuse/residual hits skip the encoder; all misses run P8.
+
+compute-mask only:
+    low-bit MACs are masked, but full A8 activations are still fetched.
+
+random-mixed:
+    low-depth nodes exist, but risk levels are mixed in the same bit-serial batch.
+
+demand-fetch:
+    low-bit activation planes are not fetched, and risk buckets are batched separately.
+```
+
+Key rows:
+
+| Frontend | Budget | Method | UsefulD | ExecD | ActRd | FullC | FullT | Drop | Cycle Save |
+|---|---|---|---:|---:|---:|---:|---:|---:|---:|
+| h8_53_T30 | p8heavy | FullP8-miss | 8.00 | 8.00 | 1.000 | 0.707 | 0.707 | 1.60% | 0.0% |
+| h8_53_T30 | p8heavy | Degree demand-fetch | 7.60 | 7.60 | 0.950 | 0.700 | 0.703 | 2.18% | 0.9% |
+| h8_54_T40 | balanced | FullP8-miss | 8.00 | 8.00 | 1.000 | 0.601 | 0.602 | 1.53% | 0.0% |
+| h8_54_T40 | balanced | Degree compute-mask only | 5.80 | 5.80 | 1.000 | 0.601 | 0.602 | 2.39% | 0.0% |
+| h8_54_T40 | balanced | Degree random-mixed | 6.10 | 8.00 | 1.000 | 0.601 | 0.602 | 2.39% | 0.0% |
+| h8_54_T40 | balanced | Degree demand-fetch | 6.10 | 6.10 | 0.762 | 0.576 | 0.583 | 2.39% | 4.1% |
+
+This is the main proof point for the NPU dataflow:
+
+```text
+Graph-Bit needs both bit-plane-major demand fetch and graph-risk bucket scheduling.
+Otherwise the bit-depth decision does not translate into visible cycles/traffic savings.
+```
+
+### Dynamic P5 Proxy
+
+True predictor-free early stop should not be forced to stop exactly at P6 or P4. Many low-risk nodes can stop around P5. The conservative proxy below maps the low-depth bucket to W4A5:
+
+```bash
+RUNS=3 bash scripts/run_cora_graphbit_dynamic_depth_accuracy.sh
+```
+
+Output:
+
+```text
+output/graphbit_predictor_free/cora_h8_54_T40_dynp5/
+```
+
+3-run result:
+
+| Method | Reuse | P8 | P6 | P5 | P4 | Cost | Drop |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| FullP8 | 28.9% | 71.1% | 0.0% | 0.0% | 0.0% | 0.356 | 1.08% |
+| Random | 28.9% | 14.2% | 35.5% | 21.3% | 0.0% | 0.284 | 2.30% |
+| Degree | 28.9% | 14.2% | 35.5% | 21.3% | 0.0% | 0.284 | 1.93% |
+
+This improves over the older P4 low-risk bucket, where Degree drop was about `2.39%`. It supports treating P6/P5/P4 as validation anchors for dynamic early stop rather than hard final datatypes.
+
+### PubMed Lightweight Replay
+
+For hardware-model changes, PubMed can be replayed from an existing workload without rerunning the expensive residual/GNN path:
+
+```bash
+bash scripts/run_pubmed_graphbit_demand_fetch_model.sh
+```
+
+Output:
+
+```text
+output/graphbit_predictor_free/pubmed_h8_76_T40/demand_fetch_model/demand_fetch_model.txt
+```
+
+Key rows:
+
+| Method | Reuse | UsefulD | ExecD | ActRd | FullC | FullT | Drop | Cycle Save |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| FullP8-miss | 22.3% | 8.00 | 8.00 | 1.000 | 0.778 | 0.779 | 1.26% | 0.0% |
+| Degree compute-mask only | 22.3% | 5.80 | 5.80 | 1.000 | 0.777 | 0.778 | 2.54% | 0.1% |
+| Degree random-mixed | 22.3% | 6.10 | 8.00 | 1.000 | 0.777 | 0.778 | 2.54% | 0.1% |
+| Degree demand-fetch | 22.3% | 6.10 | 6.10 | 0.762 | 0.745 | 0.753 | 2.54% | 4.2% |
+
+The PubMed replay agrees with Cora: compute-mask alone gives almost no system-level benefit, while risk-bucket demand-fetch exposes the bit-plane savings as cycle/traffic reduction.
+
 ## FFN Block-Gating Hardware Probe
 
 Activation bit-plane early-stop does not reduce weight reads.  As a next-stage Graph-Bit+ candidate, we probed FFN intermediate block gating in ONNXim:

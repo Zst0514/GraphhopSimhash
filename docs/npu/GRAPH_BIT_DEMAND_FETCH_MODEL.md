@@ -336,3 +336,174 @@ Graph-Bit demand-fetch reduces activation bit-plane work for remaining misses;
 risk-bucket scheduling protects utilization;
 weight-stationary and FFN bypass attack the remaining fixed memory cost.
 ```
+
+## 8. Cora Closure Suite
+
+一键复现：
+
+```bash
+bash scripts/run_graphbit_closure_suite.sh
+```
+
+输出：
+
+```text
+output/graphbit_closure/cora/closure_table.txt
+```
+
+当前核心表：
+
+| Frontend | Budget | Method | UsefulD | ExecD | BitC | ActRd | FullC | FullT | Drop | SaveC |
+|---|---|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| h8_53_T30 | p8heavy | FullP8-miss | 8.00 | 8.00 | 1.000 | 1.000 | 0.707 | 0.707 | 1.60% | 0.0% |
+| h8_53_T30 | p8heavy | Degree demand-fetch | 7.60 | 7.60 | 0.950 | 0.950 | 0.700 | 0.703 | 2.18% | 0.9% |
+| h8_54_T40 | balanced | FullP8-miss | 8.00 | 8.00 | 1.000 | 1.000 | 0.601 | 0.602 | 1.53% | 0.0% |
+| h8_54_T40 | balanced | Degree compute-mask only | 5.80 | 5.80 | 0.726 | 1.000 | 0.601 | 0.602 | 2.39% | 0.0% |
+| h8_54_T40 | balanced | Degree random-mixed | 6.10 | 8.00 | 1.000 | 1.000 | 0.601 | 0.602 | 2.39% | 0.0% |
+| h8_54_T40 | balanced | Degree demand-fetch | 6.10 | 6.10 | 0.764 | 0.762 | 0.576 | 0.583 | 2.39% | 4.1% |
+
+这张表完成第一层闭环：
+
+```text
+compute-mask only:
+    证明只少算 MAC 不会带来系统收益。
+
+random-mixed:
+    证明不做 risk-bucket 调度会被 P8 节点拖回 full-depth。
+
+demand-fetch + risk-bucket:
+    证明 bit-plane layout 和 scheduler 是 Graph-Bit NPU 的必要组成。
+```
+
+## 9. Dynamic-Depth Accuracy Proxy
+
+真正的 predictor-free early-stop 不应该永远固定到 P4；很多低风险节点可能停在 P5 左右。因此补了一个保守软件验证：
+
+```bash
+RUNS=3 bash scripts/run_cora_graphbit_dynamic_depth_accuracy.sh
+```
+
+设置：
+
+```text
+miss high 20% -> P8
+miss mid  50% -> P6
+miss low  30% -> P5
+miss rest  0% -> P4
+```
+
+输出：
+
+```text
+output/graphbit_predictor_free/cora_h8_54_T40_dynp5/
+```
+
+3-run 结果：
+
+| Method | Reuse | P8 | P6 | P5 | P4 | Cost | Drop |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| FullP8 | 28.9% | 71.1% | 0.0% | 0.0% | 0.0% | 0.356 | 1.08% |
+| Rand | 28.9% | 14.2% | 35.5% | 21.3% | 0.0% | 0.284 | 2.30% |
+| Deg | 28.9% | 14.2% | 35.5% | 21.3% | 0.0% | 0.284 | 1.93% |
+
+解释：
+
+```text
+旧 balanced 低风险桶使用 P4，Degree drop 约 2.39%。
+动态 P5 proxy 把低风险桶映射到 P5，Degree drop 降到 1.93%。
+这说明 predictor-free early-stop 如果停在 P5 附近，精度比硬压到 P4 更合理。
+```
+
+注意：这仍然是 discrete pool proxy，不是真正逐 bit-plane 数值 kernel。它适合回答“P5 附近停位是否值得”，不能替代最终 dynamic numerical validation。
+
+## 10. PubMed Lightweight Replay
+
+PubMed 不需要每次重跑昂贵的 residual/GNN 实验。已有 workload 可以直接过 demand-fetch model：
+
+```bash
+bash scripts/run_pubmed_graphbit_demand_fetch_model.sh
+```
+
+默认读取：
+
+```text
+output/graphbit_predictor_free/pubmed_h8_76_T40/predictor_free_workload.json
+```
+
+当前结果：
+
+| Method | Reuse | UsefulD | ExecD | BitC | ActRd | FullC | FullT | Drop | SaveC |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| FullP8-miss | 22.3% | 8.00 | 8.00 | 1.000 | 1.000 | 0.778 | 0.779 | 1.26% | 0.0% |
+| Degree compute-mask only | 22.3% | 5.80 | 5.80 | 0.726 | 1.000 | 0.777 | 0.778 | 2.54% | 0.1% |
+| Degree random-mixed | 22.3% | 6.10 | 8.00 | 1.000 | 1.000 | 0.777 | 0.778 | 2.54% | 0.1% |
+| Degree demand-fetch | 22.3% | 6.10 | 6.10 | 0.763 | 0.762 | 0.745 | 0.753 | 2.54% | 4.2% |
+
+PubMed 结论和 Cora 一致：
+
+```text
+compute-mask only 几乎没有系统收益；
+risk-bucket demand-fetch 可以把 bit-plane 节省转成约 4% cycles proxy；
+Degree 仍比 Random 更稳地保护精度。
+```
+
+## 11. Memory-Side Model
+
+当前 demand-fetch 只减少：
+
+```text
+BitComp
+ActRd
+```
+
+不会自动减少：
+
+```text
+WgtRd
+OutWr
+```
+
+ONNXim batch-size amortization 说明 weight traffic 可以通过更大的同风险 micro-batch 摊薄：
+
+| Micro-batch | Cyc/Node | Traffic/Node | Weight/Node |
+|---:|---:|---:|---:|
+| 8 | 1.000 | 1.000 | 1.000 |
+| 16 | 0.507 | 0.510 | 0.500 |
+| 32 | 0.266 | 0.265 | 0.250 |
+| 64 | 0.143 | 0.143 | 0.125 |
+| 128 | 0.080 | 0.082 | 0.062 |
+
+因此 Graph-Bit scheduler 有两个硬件职责：
+
+```text
+1. 按 risk bucket 分批，避免 P8 节点拖累低风险节点。
+2. 尽量组成较大的同风险 micro-batch，提高 weight tile reuse。
+```
+
+## 12. Hardware Overhead Model
+
+Graph-Bit 不需要完整新阵列，新增的是小控制逻辑：
+
+| Module | Function | State / Logic | Expected overhead |
+|---|---|---|---|
+| RiskBucketScheduler | miss nodes 分到 high/mid/low 队列 | node id FIFO + bucket counters | KB 级 SRAM/FIFO |
+| BitPlaneFetchAddrGen | 根据 effective depth 生成 bit-plane fetch mask/address | 3-bit depth + 8-bit mask + address offset | 小组合逻辑 |
+| BoundEstimator | predictor-free remaining-bit bound 判断 | shift/add/compare | 每 tile 少量 ALU |
+| BitplaneScoreboard | 记录当前 tile depth、stop 状态 | per active tile state | 小寄存器阵列 |
+| ActivePlaneMask | gating PE bit-plane issue | 8-bit mask broadcast | 小控制线 |
+
+成本边界：
+
+```text
+不会增加大矩阵存储；
+不会改变 W4 weight format；
+不会改变 GNN 后端接口；
+主要额外开销是调度 FIFO 和 bit-plane 控制。
+```
+
+因此论文里最稳的说法是：
+
+```text
+Graph-Bit adds lightweight control to a bit-serial W4A8 NPU,
+and uses graph risk to decide activation bit-plane demand.
+```
