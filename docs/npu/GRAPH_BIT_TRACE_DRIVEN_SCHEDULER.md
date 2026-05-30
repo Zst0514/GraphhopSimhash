@@ -122,6 +122,7 @@ bash GraphhopSimhash/scripts/run_graphbit_predictor_free_flow.sh
 
 ```text
 output/graphbit_trace_replay/cora_h8_54_T40_boundclean_quick/replay/cora_seed42_DegBound_trace_replay.txt
+output/graphbit_trace_replay/cora_h8_54_T40_boundclean_quick/replay/cora_seed42_DegBound_component_lookup.tsv
 ```
 
 结果：
@@ -136,6 +137,30 @@ output/graphbit_trace_replay/cora_h8_54_T40_boundclean_quick/replay/cora_seed42_
 | RiskBucket-b64 | 27.8% | 72.2% | 0.289 | 0.189 | 0.239 | 2.13% | 6.10 | D5:30.0%, D6:50.0%, D8:20.0% | 33 | 0.268 |
 
 ## 4. 如何解读
+
+`component_lookup.tsv` 展开第 3 步的 ONNXim cost lookup。每一行对应一个 ONNXim component case：
+
+```text
+full_p8
+p8_now / p6_now / p5_now / p4_now
+p8_ws_b32 / p6_ws_b32 / ...
+p8_ws_b64 / p6_ws_b64 / ...
+```
+
+字段含义：
+
+```text
+cycles_norm:
+    相对于 full_p8 component 的 cycles。
+
+traffic_norm:
+    相对于 full_p8 component 的 DRAM read + write request。
+
+energy_norm:
+    0.5 * cycles_norm + 0.5 * traffic_norm。
+```
+
+trace replay 主表中的 `Cycles / Traffic / Energy` 就是按真实 miss node depth histogram 和调度方式，从这些 component rows 组合出来的。
 
 这张表最重要的不是单个 cycles 数字，而是 `Wloads / Wscale / AvgD` 已经由真实 trace replay 得到：
 

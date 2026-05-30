@@ -162,6 +162,40 @@ def load_components(root: Path) -> tuple[dict[str, Any], dict[str, dict[str, Any
     return base, components
 
 
+def component_lookup_rows(base: dict[str, Any], components: dict[str, dict[str, Any]]) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+
+    def add_row(case: str, row: dict[str, Any]) -> None:
+        parts = case.split("_")
+        depth = parts[0].upper() if case != "full_p8" else "P8"
+        mode = "full" if case == "full_p8" else ("ws" if "ws" in parts else "now")
+        batch = "-"
+        for part in parts:
+            if part.startswith("b") and part[1:].isdigit():
+                batch = part[1:]
+        cycles_norm = norm(row, base, "cycles")
+        traff_norm = traffic_norm(row, base)
+        rows.append(
+            {
+                "case": case,
+                "depth": depth,
+                "mode": mode,
+                "batch": batch,
+                "cycles_norm": cycles_norm,
+                "traffic_norm": traff_norm,
+                "energy_norm": 0.5 * cycles_norm + 0.5 * traff_norm,
+                "cycles": float(row.get("cycles", 0.0) or 0.0),
+                "dram_read_requests": float(row.get("dram_read_requests", 0.0) or 0.0),
+                "dram_write_requests": float(row.get("dram_write_requests", 0.0) or 0.0),
+            }
+        )
+
+    add_row("full_p8", base)
+    for case in sorted(components):
+        add_row(case, components[case])
+    return rows
+
+
 def compose_from_exec_counts(
     *,
     exec_counts: dict[str, int],
@@ -409,7 +443,9 @@ def main() -> None:
     tsv_path = args.output_dir / f"{prefix}_trace_replay.tsv"
     txt_path = args.output_dir / f"{prefix}_trace_replay.txt"
     json_path = args.output_dir / f"{prefix}_trace_replay.json"
-    payload = {"meta": meta, "rows": out_rows}
+    component_rows = component_lookup_rows(base, components)
+    component_path = args.output_dir / f"{prefix}_component_lookup.tsv"
+    payload = {"meta": meta, "rows": out_rows, "component_lookup": component_rows}
     json_path.write_text(json.dumps(payload, indent=2) + "\n")
 
     fieldnames = [
@@ -441,9 +477,38 @@ def main() -> None:
             out["drop"] = f"{float(out['drop']):.3f}"
             writer.writerow(out)
 
+    component_fields = [
+        "case",
+        "depth",
+        "mode",
+        "batch",
+        "cycles_norm",
+        "traffic_norm",
+        "energy_norm",
+        "cycles",
+        "dram_read_requests",
+        "dram_write_requests",
+    ]
+    with component_path.open("w", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=component_fields, delimiter="\t")
+        writer.writeheader()
+        for row in component_rows:
+            out = dict(row)
+            for key in (
+                "cycles_norm",
+                "traffic_norm",
+                "energy_norm",
+                "cycles",
+                "dram_read_requests",
+                "dram_write_requests",
+            ):
+                out[key] = f"{float(out[key]):.6f}"
+            writer.writerow(out)
+
     lines = [
         "Graph-Bit trace-driven scheduler replay",
         f"trace: {args.trace}",
+        f"components: {args.components_root}",
         f"dataset={meta.get('dataset')} | seed={meta.get('seed')} | config={meta.get('config')} | priority={meta.get('priority')}",
         f"nodes={total_nodes} | reuse={fmt_pct(reuse_count/total_nodes)} | miss={fmt_pct(miss_count/total_nodes)} | max_sram_batch={buffers.max_batch()}",
         "",
@@ -464,6 +529,20 @@ def main() -> None:
     lines.extend(
         [
             "",
+            "ONNXim component lookup",
+            f"component_tsv: {component_path}",
+            f"{'Case':<14s} {'Depth':>5s} {'Mode':>5s} {'Batch':>5s} {'Cycles':>8s} {'Traffic':>8s} {'Energy':>8s}",
+            "-" * 62,
+        ]
+    )
+    for row in component_rows:
+        lines.append(
+            f"{row['case']:<14s} {row['depth']:>5s} {row['mode']:>5s} {str(row['batch']):>5s} "
+            f"{row['cycles_norm']:8.3f} {row['traffic_norm']:8.3f} {row['energy_norm']:8.3f}"
+        )
+    lines.extend(
+        [
+            "",
             "Reading guide:",
             "- FullP8-miss replays the same miss set but forces every miss to D8.",
             "- GraphBit-now uses the real per-node stop depth, without larger W tile reuse.",
@@ -474,6 +553,7 @@ def main() -> None:
     txt_path.write_text("\n".join(lines) + "\n")
     print(txt_path.read_text())
     print(f"[GraphBitTraceReplay] wrote {tsv_path}")
+    print(f"[GraphBitTraceReplay] wrote {component_path}")
     print(f"[GraphBitTraceReplay] wrote {json_path}")
 
 
