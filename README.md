@@ -32,7 +32,7 @@ Reuse decides whether a node can skip the encoder. Graph-Bit decides how much bi
 
 The system builds graph-context-aware hash signatures and uses multi-head SimHash/CAM lookup to find reusable anchor nodes.
 
-Current stable front-end:
+Earlier ST/data.x residual-reuse support-split front-end:
 
 ```text
 h8_54_T40
@@ -44,11 +44,49 @@ support == 4 -> residual correction
 support < 4  -> encoder / Graph-Bit
 ```
 
-This front-end is the default for full-stack experiments because it is the best common point found across Cora and PubMed:
+This front-end was the best common point found before adding the learned residual accept gate:
 
 ```text
 Cora:   reuse 25.7%, drop 0.45%
 PubMed: reuse 50.3%, drop 2.52%
+```
+
+The current pure residual-reuse recommendation adds an online shared support
+split plus a learned accept gate inside the residual path:
+
+```text
+8 heads x 16 bits
+radius R = 2
+score threshold T = 30
+support >= 5   -> direct reuse
+support = 3..4 -> residual candidate
+support < 3    -> compute
+gate_accept_threshold = 0.575
+```
+
+With dataset-specific offline residual/gate training and the same online control
+flow, the 3-run result is:
+
+```text
+Cora:   reuse 46.5%, drop 0.93%
+PubMed: reuse 42.3%, drop 1.96%
+```
+
+See [SHARED_ONLINE_RESIDUAL_REUSE_RESULT.md](docs/results/SHARED_ONLINE_RESIDUAL_REUSE_RESULT.md).
+
+For LLaMA-7B full-stack experiments, the front-end must first pass the
+`FullP8-miss` sanity check: accepted hits use direct/residual reuse, while all
+misses still run P8.  Cora remains stable with `h8_54_T40`; PubMed/LLaMA needs a
+stricter split:
+
+```text
+h8_76_T40
+8 heads x 16 bits
+radius R = 2
+score threshold T = 40
+support >= 7 -> direct reuse
+support == 6 -> residual correction
+support < 6  -> encoder / Graph-Bit
 ```
 
 ### 2. TSER Score Gate
@@ -574,7 +612,7 @@ Do not claim without further simulator evidence:
 
 ## Recommended Next Experiments
 
-1. Run PubMed with the fixed `h8_54_T40` front-end and Degree Graph-Bit.
+1. Use `h8_54_T40` for Cora/LLaMA and `h8_76_T40` for PubMed/LLaMA full-stack tables.
 2. Add dynamic-depth accuracy validation for predictor-free early stop.
 3. Sweep `min_depth/tolerance` for Cora first, then PubMed.
 4. Extend ONNXim reporting with PE utilization / active-lane compaction proxy.

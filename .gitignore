@@ -17,3 +17,8 @@ cache_data/
 data/
 models/
 ONNXim/compile_commands.json
+ONNXim/ext/
+ONNXim/extern/booksim/
+ONNXim/extern/onnx/
+ONNXim/extern/protobuf/
+ONNXim/extern/ramulator2/

@@ -71,6 +71,13 @@ class Core {
   double _stat_matmul_cycle = 0;
   double _stat_tot_matmul_cycle = 0;
 
+  uint64_t _stat_mem_read_input_requests = 0;
+  uint64_t _stat_mem_read_input_original_requests = 0;
+  uint64_t _stat_mem_read_weight_requests = 0;
+  uint64_t _stat_mem_read_other_requests = 0;
+  uint64_t _stat_mem_write_output_requests = 0;
+  uint64_t _stat_mem_write_other_requests = 0;
+
   int _running_layer;
   uint32_t tile_rr = 0;
   std::deque<std::unique_ptr<Tile>> _tiles;

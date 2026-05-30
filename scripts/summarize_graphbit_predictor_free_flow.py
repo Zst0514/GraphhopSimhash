@@ -248,10 +248,14 @@ def fmt_num(value: float | None, digits: int = 3) -> str:
     return f"{value:.{digits}f}"
 
 
-def write_compact(rows: list[dict[str, Any]], path: Path) -> None:
+def write_compact(rows: list[dict[str, Any]], path: Path, args: argparse.Namespace) -> None:
+    title_dataset = str(args.dataset).upper()
     lines = [
-        "Cora Graph-Bit predictor-free main table",
-        "Fixed front-end: h8_54_T40, R=2, hard>=5, residual support==4.",
+        f"{title_dataset} Graph-Bit predictor-free main table",
+        (
+            f"Fixed front-end: {args.frontend_id}, R=2, "
+            f"hard>={args.hard_support}, residual support=={args.soft_support}."
+        ),
         "Drop is inherited from the static embedding proxy; bounded row estimates extra NPU bit-plane savings.",
         "",
         "Method                         Reuse   P8     P6     P4     AvgBit Saved  Cycles Traffic Energy Drop",
@@ -283,7 +287,7 @@ def write_workload(rows: list[dict[str, Any]], args: argparse.Namespace, path: P
                 "dataset": args.dataset,
                 "model": "llama2_7b",
                 "route": {
-                    "frontend": "h8_54_T40",
+                    "frontend": args.frontend_id,
                     "method": row["method"],
                     "config": row["config"],
                     "budget": args.budget,
@@ -332,6 +336,9 @@ def main() -> None:
     parser.add_argument("--threshold", type=int, default=40)
     parser.add_argument("--budget", default="balanced")
     parser.add_argument("--runs", type=int, default=None)
+    parser.add_argument("--frontend-id", default="h8_54_T40")
+    parser.add_argument("--hard-support", type=int, default=5)
+    parser.add_argument("--soft-support", type=int, default=4)
     parser.add_argument("--bounded-save-p6", type=float, default=0.50)
     parser.add_argument("--bounded-save-p5", type=float, default=0.35)
     parser.add_argument("--bounded-save-p4", type=float, default=0.25)
@@ -367,7 +374,7 @@ def main() -> None:
     txt_path = args.output_dir / "predictor_free_main.txt"
     json_path = args.output_dir / "predictor_free_workload.json"
     write_tsv(out_rows, tsv_path)
-    write_compact(out_rows, txt_path)
+    write_compact(out_rows, txt_path, args)
     write_workload(out_rows, args, json_path)
 
     print(f"[GraphBitPF] wrote {tsv_path}")

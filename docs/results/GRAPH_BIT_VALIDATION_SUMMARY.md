@@ -238,7 +238,7 @@ support < 4      -> Graph-Bit P8/P6/P5/P4
 high-risk miss   -> P8 through the same budget router
 ```
 
-The default reuse front-end for later Graph-Bit experiments is now fixed to:
+Before the learned accept gate was added, the support-split reuse front-end for Graph-Bit experiments was:
 
 ```text
 R = 2
@@ -249,7 +249,7 @@ residual correction: support heads == 4
 compute / Graph-Bit: support heads < 4
 ```
 
-This is the `h8_54_T40` operating point from the residual reuse sweep:
+This is the `h8_54_T40` operating point from the earlier residual reuse sweep:
 
 ```text
 Cora:   reuse = 25.7%, drop = 0.45%
@@ -257,6 +257,25 @@ PubMed: reuse = 50.3%, drop = 2.52%
 ```
 
 It is preferred over `h8_64_T40` because both have the same reuse, but routing support=5 hits to direct reuse gives lower PubMed drop than forcing them through residual correction.
+
+The current pure residual-reuse front-end is stronger after adding the learned accept gate:
+
+```text
+T = 30
+support >= 5   -> hard direct reuse
+support = 3..4 -> residual candidate
+support < 3    -> compute
+gate_accept_threshold = 0.575
+```
+
+3-run result:
+
+| Dataset | Reuse | Drop |
+|---|---:|---:|
+| Cora | 46.5% | 0.93% |
+| PubMed | 42.3% | 1.96% |
+
+See `docs/results/SHARED_ONLINE_RESIDUAL_REUSE_RESULT.md`.  The Graph-Bit full-stack tables below were generated with the older support-split front-end; they remain useful for the NPU datapath validation, but final paper tables should be rerun with the learned accept gate wired into `residual_precision_depth`.
 
 The `FullP8` row below still includes reuse. It means "reuse hits use direct/residual, all misses use P8". It is the correct baseline for measuring how much extra error Graph-Bit adds on top of the reuse subsystem.
 
@@ -351,6 +370,29 @@ Degree Graph-Bit:
 
 At the same reuse set, Degree-based Graph-Bit is better than Random (`2.39%` vs `2.79%` drop) and gives about `23%` extra cost reduction relative to FullP8-miss (`0.301 -> 0.231`).  This supports the current design direction: reuse controls whether a node executes the encoder, and graph-risk-controlled bit-depth reduces NPU arithmetic effort for the remaining miss nodes.
 
+### PubMed/LLaMA Support-Split Follow-Up
+
+The ST residual-reuse sweep selected `h8_54_T40` as a good common front-end.
+However, LLaMA-7B full-stack evaluation is stricter: the first check must be
+`FullP8-miss`, where accepted hits use direct/residual reuse and all misses still
+run P8. If `FullP8-miss` is already above the target drop, Graph-Bit cannot fix
+the run because Graph-Bit only changes miss-node bit-depth.
+
+PubMed/LLaMA, 3 runs, `T=40`, `R=2`, 8 heads:
+
+| Front-end | Hard / Residual | Reuse | FullP8 Cost | FullP8 Drop | Degree Cost | Degree Drop | PF AvgBit | PF Cycles | PF Traffic | PF Energy |
+|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| `h8_54_T40` | `>=5 / ==4` | 74.9% | 0.127 | 5.34% | 0.098 | 5.76% | 5.47 | 0.173 | 0.226 | 0.197 |
+| `h8_65_T40` | `>=6 / ==5` | 50.6% | 0.249 | 3.62% | 0.191 | 4.56% | 5.48 | 0.340 | 0.443 | 0.386 |
+| `h8_76_T40` | `>=7 / ==6` | 22.3% | 0.389 | 1.26% | 0.298 | 2.54% | 5.47 | 0.532 | 0.692 | 0.604 |
+
+Current interpretation:
+
+- `h8_54_T40` is still useful as the ST/data.x residual-reuse common point, but it is too loose for PubMed/LLaMA full-stack.
+- `h8_76_T40` is the current PubMed/LLaMA robust point: `FullP8-miss` is safe (`1.26%` drop), and Degree Graph-Bit stays under `3%` (`2.54%`).
+- At this safe point, Degree is better than Random (`2.54%` vs `2.75%`), and predictor-free early stop reduces the NPU proxy from static Degree `cycles=0.563, traffic=0.703, energy=0.626` to `cycles=0.532, traffic=0.692, energy=0.604`.
+- Therefore, Graph-Bit should be evaluated only after the reuse/residual front-end keeps `FullP8-miss` below the desired accuracy budget.
+
 ### LLaMA-7B, T = 20
 
 | Dataset | Reuse | Direct | Residual | FullP8 Cost | FullP8 Drop | Graph-Bit Cost | Random | Degree | TSER | Context | LowUnique |
@@ -399,3 +441,134 @@ For the full stack, reuse and Graph-Bit should be evaluated as two coupled but s
 
 - reuse gate decides whether a node can skip encoder execution,
 - Graph-Bit decides how deeply the NPU computes bit-planes for nodes that still execute the encoder.
+
+## ONNXim Miss-Only Breakdown
+
+To isolate whether predictor-free Graph-Bit actually saves NPU-internal bit-plane work, we also report a miss-only ONNXim breakdown:
+
+```text
+output/graphbit_predictor_free/cora_h8_54_T40/earlystop_sweep/miss_only_breakdown.txt
+```
+
+This table ignores direct reuse and residual reuse, and only evaluates nodes that must execute the encoder.
+
+| Method | AvgD | BitComp | ActRd | ActSave | Traffic |
+|---|---:|---:|---:|---:|---:|
+| FullP8-miss | 8.00 | 1.000 | 1.000 | 0.0% | 1.000 |
+| Static Degree P8/P6/P4 | 5.80 | 0.726 | 0.725 | 27.5% | 0.964 |
+| EarlyStop conservative | 6.90 | 0.864 | 0.862 | 13.8% | 0.982 |
+| EarlyStop balanced | 6.10 | 0.764 | 0.763 | 23.7% | 0.969 |
+| EarlyStop aggressive | 5.80 | 0.726 | 0.725 | 27.5% | 0.964 |
+
+Conclusion:
+
+- Balanced early-stop reduces miss-node effective bit-serial compute to `76.4%` of FullP8.
+- Activation/input reads also fall to `76.3%`, so the bit-plane mechanism is working.
+- Total traffic only drops to `96.9%` because weight reads and output writes are unchanged.
+- Therefore, full-stack cycle/traffic gains are modest because the NPU still pays fixed weight/output costs and because reuse already removes part of the encoder workload.
+
+## Risk-Bucket Batching
+
+A Graph-Bit NPU also needs graph-aware batching.  If high/mid/low risk miss nodes are randomly mixed inside the same bit-serial micro-batch, the shared bit-plane controller must execute to the maximum depth in that batch.
+
+Command:
+
+```bash
+bash GraphhopSimhash/scripts/run_cora_graphbit_risk_bucket_batching.sh
+```
+
+Output:
+
+```text
+output/graphbit_predictor_free/cora_h8_54_T40/risk_bucket_batching/risk_bucket_batching.txt
+```
+
+Cora `h8_54_T40`, batch size 64:
+
+| Method | Assign | Schedule | Mode | UsefulD | ExecD | Util | Waste | Cycles | BitComp | ActRd | Traffic | Drop |
+|---|---|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| RandomOrder Static | Degree | random mixed | static | 5.80 | 8.00 | 72.5% | 27.5% | 1.000 | 1.000 | 1.000 | 1.000 | 2.39% |
+| DegreeBucket Static | Degree | risk bucket | static | 5.80 | 5.80 | 100.0% | 0.0% | 0.957 | 0.726 | 0.725 | 0.964 | 2.39% |
+| RandomRisk Bucket | Random | risk bucket | static | 5.80 | 5.80 | 100.0% | 0.0% | 0.957 | 0.726 | 0.725 | 0.964 | 2.79% |
+| RandomOrder EarlyStop | Degree | random mixed | early-stop | 6.10 | 8.00 | 76.3% | 23.7% | 1.000 | 1.000 | 1.000 | 1.000 | 2.39% |
+| DegreeBucket EarlyStop | Degree | risk bucket | early-stop | 6.10 | 6.10 | 100.0% | 0.0% | 0.959 | 0.764 | 0.763 | 0.969 | 2.39% |
+
+Takeaway:
+
+- Random ordering can erase the arithmetic savings, because a single high-risk node can force the whole micro-batch to P8.
+- Degree-risk buckets allow the NPU to realize the intended bit-depth reduction.
+- Random-risk buckets have the same hardware cost as degree-risk buckets but worse accuracy, so the graph proxy matters for precision protection.
+
+## FFN Block-Gating Hardware Probe
+
+Activation bit-plane early-stop does not reduce weight reads.  As a next-stage Graph-Bit+ candidate, we probed FFN intermediate block gating in ONNXim:
+
+```bash
+bash GraphhopSimhash/scripts/run_onnxim_ffn_block_gating_microbench.sh
+```
+
+Output:
+
+```text
+output/onnxim_graphbit/ffn_block_gating/ffn_block_gating.txt
+```
+
+| Keep | Intermediate | Cycles | MatMul | Traffic | InRead | WeightRd | OutWr | GFLOPs |
+|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| 74% | 8192 | 0.826 | 0.829 | 0.830 | 0.834 | 0.829 | 0.867 | 0.829 |
+| 50% | 5504 | 0.629 | 0.654 | 0.669 | 0.687 | 0.666 | 0.741 | 0.666 |
+
+This is hardware-only.  It shows that FFN block gating can reduce the weight bandwidth that activation bit-depth control cannot touch.  It is not yet an accuracy-safe policy; the next step is to validate whether low-risk nodes can tolerate a conservative FFN block keep ratio such as `74%`.
+
+This FFN block-gating probe is not part of the current mainline.  The mainline Graph-Bit NPU uses predictor-free bit-serial early-stop and risk-bucket batching.
+
+## Memory Dataflow Breakdown
+
+To separate compute reduction from traffic reduction:
+
+```bash
+bash GraphhopSimhash/scripts/run_cora_graphbit_memory_dataflow.sh
+```
+
+Output:
+
+```text
+output/graphbit_predictor_free/cora_h8_54_T40/memory_dataflow/memory_dataflow.txt
+```
+
+| Method | AvgD | BitComp | Cycles | ActRd | WeightRd | OutWr | Traffic | Drop |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| FullP8 miss | 8.00 | 1.000 | 1.000 | 1.000 | 1.000 | 1.000 | 1.000 | 1.53% |
+| EarlyStop compute-only | 6.10 | 0.764 | 1.000 | 1.000 | 1.000 | 1.000 | 1.000 | 2.39% |
+| EarlyStop + ActPack | 6.10 | 0.764 | 0.959 | 0.763 | 1.000 | 1.000 | 0.969 | 2.39% |
+| EarlyStop + ActPack + FFNBypass | 6.10 | 0.764 | 0.959 | 0.763 | 1.000 | 1.000 | 0.938 | 2.39% |
+
+Takeaway:
+
+- Compute-only early stop is not enough if activations are still fetched as A8.
+- Activation bit-plane packing is required to translate bit-depth reduction into memory reduction.
+- FFNBypass is an exact dataflow upper bound: keeping FFN intermediate on chip can reduce traffic further without changing the model function.
+
+## Batch-Size Amortization
+
+Risk-bucket scheduling also helps weight-stationary reuse.  Larger same-risk micro-batches amortize weight reads across more node tokens:
+
+```bash
+bash GraphhopSimhash/scripts/run_onnxim_batch_amortization.sh
+```
+
+Output:
+
+```text
+output/onnxim_graphbit/batch_amortization/batch_amortization.txt
+```
+
+| Micro-batch | Cyc/Node norm | Traffic/Node norm | Weight/Node norm | Input/Node norm |
+|---:|---:|---:|---:|---:|
+| 8 | 1.000 | 1.000 | 1.000 | 1.000 |
+| 16 | 0.507 | 0.510 | 0.500 | 1.000 |
+| 32 | 0.266 | 0.265 | 0.250 | 1.000 |
+| 64 | 0.143 | 0.143 | 0.125 | 1.000 |
+| 128 | 0.080 | 0.082 | 0.062 | 1.000 |
+
+This supports the scheduler design: grouping miss nodes into degree-risk buckets enables both bit-depth coherence and weight-tile amortization.

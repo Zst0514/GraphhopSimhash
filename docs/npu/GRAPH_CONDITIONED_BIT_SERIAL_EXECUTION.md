@@ -663,6 +663,100 @@ EarlyStop:
 4. Drop 当前仍沿用静态 Degree proxy 的 embedding 结果；它用于精度保守估计。若要精确评估动态 AvgD=6.10，需要后续生成动态深度 embedding 或用 nearest-depth conservative mapping。
 ```
 
+### 8.3.1 Miss-only breakdown
+
+上面的 full-stack 表会被 reuse/residual 比例、weight read、output write 等因素稀释。为了确认 Graph-Bit 是否真的节省了 NPU 内部 bit-plane 计算，ONNXim 现在额外输出 miss-only 分解统计：
+
+```text
+output/graphbit_predictor_free/cora_h8_54_T40/earlystop_sweep/miss_only_breakdown.txt
+```
+
+该表只看必须执行 encoder 的 miss nodes，不再把 direct reuse / residual reuse 混进分母。
+
+| Method | AvgD | Saved | Cycles | MatMul | BitComp | ActRd | ActSave | WeightRd | OutWr | Traffic |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| FullP8-miss | 8.00 | 0.00 | 1.000 | 1.000 | 1.000 | 1.000 | 0.0% | 1.000 | 1.000 | 1.000 |
+| Static Degree P8/P6/P4 | 5.80 | 2.20 | 0.957 | 1.000 | 0.726 | 0.725 | 27.5% | 1.000 | 1.000 | 0.964 |
+| EarlyStop conservative | 6.90 | 1.10 | 0.978 | 1.000 | 0.864 | 0.862 | 13.8% | 1.000 | 1.000 | 0.982 |
+| EarlyStop balanced | 6.10 | 1.90 | 0.959 | 1.000 | 0.764 | 0.763 | 23.7% | 1.000 | 1.000 | 0.969 |
+| EarlyStop aggressive | 5.80 | 2.20 | 0.957 | 1.000 | 0.726 | 0.725 | 27.5% | 1.000 | 1.000 | 0.964 |
+
+字段解释：
+
+```text
+AvgD:
+    miss-node GEMM 平均执行的 activation bit-depth。
+
+BitComp:
+    Graph-Bit effective bit-serial compute cycles / raw full-depth compute cycles。
+    这是判断 bit-plane 算术是否真的下降的主指标。
+
+ActRd:
+    activation/input read requests，相对 FullP8-miss 归一化。
+
+ActSave:
+    相比 full-depth activation input requests 的节省比例。
+
+WeightRd / OutWr:
+    weight read 和 output write。当前 Graph-Bit 不压缩这两项，所以保持 1.000。
+
+Traffic:
+    总 DRAM read+write requests，相对 FullP8-miss 归一化。
+```
+
+关键结论：
+
+```text
+1. Balanced early-stop 把 AvgD 从 8.00 降到 6.10。
+2. BitComp 从 1.000 降到 0.764，说明 miss-only bit-serial 算术量约降 23.6%。
+3. ActRd 从 1.000 降到 0.763，activation bit-plane 读取约降 23.7%。
+4. Traffic 只降到 0.969，是因为 weight read 和 output write 不随 activation bit-depth 下降。
+5. 因此机制本身是有效的；full-stack 总收益较小主要来自 weight/output/static scheduling 的稀释。
+```
+
+### 8.3.2 Risk-bucket batching
+
+Bit-serial early-stop 还需要 scheduler 配合。若 high/mid/low risk miss nodes 随机混在一个 micro-batch，硬件通常必须跑到该 batch 的最大 bit-depth。低风险节点的省算会被同 batch 的高风险节点抵消。
+
+新增脚本：
+
+```bash
+bash GraphhopSimhash/scripts/run_cora_graphbit_risk_bucket_batching.sh
+```
+
+输出：
+
+```text
+output/graphbit_predictor_free/cora_h8_54_T40/risk_bucket_batching/risk_bucket_batching.txt
+```
+
+在 Cora `h8_54_T40` 下，miss nodes 内部风险比例为：
+
+```text
+high-risk P8 floor: 20%
+mid-risk  P6 floor: 50%
+low-risk  P4 floor: 30%
+```
+
+micro-batch size 64 的核心结果：
+
+| Method | Schedule | UsefulD | ExecD | Util | Cycles | BitComp | ActRd | Traffic | Drop |
+|---|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| RandomOrder Static | random mixed | 5.80 | 8.00 | 72.5% | 1.000 | 1.000 | 1.000 | 1.000 | 2.39% |
+| DegreeBucket Static | risk bucket | 5.80 | 5.80 | 100.0% | 0.957 | 0.726 | 0.725 | 0.964 | 2.39% |
+| RandomRisk Bucket | risk bucket | 5.80 | 5.80 | 100.0% | 0.957 | 0.726 | 0.725 | 0.964 | 2.79% |
+| RandomOrder EarlyStop | random mixed | 6.10 | 8.00 | 76.3% | 1.000 | 1.000 | 1.000 | 1.000 | 2.39% |
+| DegreeBucket EarlyStop | risk bucket | 6.10 | 6.10 | 100.0% | 0.959 | 0.764 | 0.763 | 0.969 | 2.39% |
+
+结论：
+
+```text
+1. Graph-Bit 不能只做 per-node depth decision，还必须做 risk-bucket batching。
+2. Random mixed batch 在 batch=64 时几乎退化回 P8，bit-plane saving 消失。
+3. DegreeBucket 让 executed depth 等于 useful depth，才真正把 bit-plane saving 映射到 NPU datapath。
+4. RandomRisk Bucket 硬件成本一样，但 drop 更高，说明 degree proxy 仍然有必要。
+```
+
 三组 early-stop 参数：
 
 | Name | Mid-risk | Low-risk |
@@ -762,8 +856,10 @@ low-risk:
 
 | Dataset | Frontend | Risk | Budget | Runs |
 |---|---|---|---|---:|
-| Cora | `h8_54_T40` | Random/Degree/TSER/Context | P8/P6/P4=20/50/30 | 10 |
-| PubMed | `h8_54_T40` | Random/Degree/TSER/Context | P8/P6/P4=20/50/30 | 3 then 10 |
+| Cora/LLaMA | `h8_54_T40` | Random/Degree/TSER/Context | P8/P6/P4=20/50/30 | 10 |
+| PubMed/LLaMA | `h8_76_T40` | Random/Degree/TSER/Context | P8/P6/P4=20/50/30 | 3 then 10 |
+
+这里特意把 Cora 和 PubMed 的 front-end 分开。`h8_54_T40` 是 ST/data.x residual-reuse 的共同参数，但 PubMed/LLaMA full-stack 下过宽，`FullP8-miss` 会先掉到 5% 以上。Graph-Bit 是 miss-node NPU 优化，不应该替过宽的 fuzzy reuse 背锅。因此 full-stack 表必须先保证 `FullP8-miss` 在精度预算内，再比较 Degree/Random/TSER 的 bit-plane routing。
 
 第二组，验证 degree threshold：
 

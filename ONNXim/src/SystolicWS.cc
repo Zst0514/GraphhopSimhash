@@ -74,9 +74,13 @@ void SystolicWS::cycle() {
         uint32_t full_depth = std::max(1u, front->graphbit_full_depth);
         uint32_t effective_depth =
             std::min(front->graphbit_effective_depth, full_depth);
+        cycle_type raw_cycles = get_inst_raw_compute_cycles(front);
+        cycle_type effective_cycles = get_inst_compute_cycles(front);
         _stat_graphbit_inst_count++;
         _stat_graphbit_effective_bitplanes += effective_depth;
         _stat_graphbit_saved_bitplanes += (full_depth - effective_depth);
+        _stat_graphbit_raw_compute_cycles += raw_cycles;
+        _stat_graphbit_effective_compute_cycles += effective_cycles;
         if (front->graphbit_remaining_bound <=
             _config.graphbit_bound_tolerance) {
           _stat_graphbit_bound_stop_count++;
@@ -140,9 +144,7 @@ bool SystolicWS::can_issue_compute(std::unique_ptr<Instruction>& inst) {
 }
 
 cycle_type SystolicWS::get_inst_compute_cycles(std::unique_ptr<Instruction>& inst) {
-  cycle_type raw_cycles =
-      _config.core_config[_id].core_height + _config.core_config[_id].core_width -
-      2 + MAX(inst->compute_size, 4);
+  cycle_type raw_cycles = get_inst_raw_compute_cycles(inst);
   if (!inst->graphbit_enabled) {
     return raw_cycles;
   }
@@ -154,6 +156,11 @@ cycle_type SystolicWS::get_inst_compute_cycles(std::unique_ptr<Instruction>& ins
                 static_cast<double>(effective_depth) /
                 static_cast<double>(full_depth)));
   return std::max<cycle_type>(1, scaled_cycles);
+}
+
+cycle_type SystolicWS::get_inst_raw_compute_cycles(std::unique_ptr<Instruction>& inst) {
+  return _config.core_config[_id].core_height + _config.core_config[_id].core_width -
+         2 + MAX(inst->compute_size, 4);
 }
 
 cycle_type SystolicWS::get_inst_issue_spacing(std::unique_ptr<Instruction>& inst) {
@@ -227,8 +234,9 @@ void SystolicWS::print_stats() {
         static_cast<double>(_stat_graphbit_inst_count);
     spdlog::info(
         "Core [{}] : GraphBit Inst {} BoundStops {} AvgDepth {:.2f} "
-        "AvgSavedBitplanes {:.2f}",
+        "AvgSavedBitplanes {:.2f} EffectiveComputeCycles {:.0f} RawComputeCycles {:.0f}",
         _id, _stat_graphbit_inst_count, _stat_graphbit_bound_stop_count,
-        avg_depth, avg_saved);
+        avg_depth, avg_saved, _stat_graphbit_effective_compute_cycles,
+        _stat_graphbit_raw_compute_cycles);
   }
 }

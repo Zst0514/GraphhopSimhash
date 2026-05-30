@@ -59,6 +59,21 @@ def reqs(agg: dict[str, Any]) -> float:
     return float(e.get("dram_read_requests", 0.0)) + float(e.get("dram_write_requests", 0.0))
 
 
+def metric(agg: dict[str, Any], key: str) -> float:
+    return float(enc(agg).get(key, 0.0) or 0.0)
+
+
+def safe_div(num: float, den: float) -> float:
+    return 0.0 if den == 0 else num / den
+
+
+def bitcomp_ratio(agg: dict[str, Any]) -> float:
+    raw = metric(agg, "graphbit_raw_compute_cycles")
+    if raw <= 0:
+        return 1.0
+    return metric(agg, "graphbit_effective_compute_cycles") / raw
+
+
 def fmt_pct(x: float) -> str:
     return f"{100 * x:.1f}%"
 
@@ -106,6 +121,10 @@ def main() -> None:
 
     base_cycles = float(enc(base)["cycles"])
     base_reqs = reqs(base)
+    base_matmul = metric(base, "matmul_active_cycles")
+    base_input = metric(base, "mem_read_input_actual")
+    base_weight = metric(base, "mem_read_weight")
+    base_output = metric(base, "mem_write_output")
 
     def class_agg(name: str) -> dict[str, Any]:
         return load_agg(args.microbench_dir / f"microbench_s{args.seq_len}_internal_{name}" / "aggregate.json")
@@ -158,6 +177,34 @@ def main() -> None:
         high = full
         mid = variant["mid"]
         low = variant["low"]
+        miss_total = max(1e-12, ratios["high"] + ratios["mid"] + ratios["low"])
+        miss_ratios = {
+            "high": ratios["high"] / miss_total,
+            "mid": ratios["mid"] / miss_total,
+            "low": ratios["low"] / miss_total,
+        }
+
+        def miss_weighted(key: str) -> float:
+            return (
+                miss_ratios["high"] * metric(high, key)
+                + miss_ratios["mid"] * metric(mid, key)
+                + miss_ratios["low"] * metric(low, key)
+            )
+
+        miss_cycles = miss_weighted("cycles")
+        miss_matmul = miss_weighted("matmul_active_cycles")
+        miss_bitcomp = (
+            miss_ratios["high"] * bitcomp_ratio(high)
+            + miss_ratios["mid"] * bitcomp_ratio(mid)
+            + miss_ratios["low"] * bitcomp_ratio(low)
+        )
+        miss_input_actual = miss_weighted("mem_read_input_actual")
+        miss_input_original = miss_weighted("mem_read_input_original")
+        miss_weight = miss_weighted("mem_read_weight")
+        miss_output = miss_weighted("mem_write_output")
+        miss_total_traffic = (
+            miss_weighted("dram_read_requests") + miss_weighted("dram_write_requests")
+        )
         cycle_norm = (
             ratios["direct"] * args.cache_compute_cost
             + ratios["residual"] * args.residual_compute_cost
@@ -200,6 +247,14 @@ def main() -> None:
                 "cycles_norm": cycle_norm,
                 "traffic_norm": traffic_norm,
                 "energy_proxy": 0.55 * cycle_norm + 0.45 * traffic_norm,
+                "miss_cycles_norm": safe_div(miss_cycles, base_cycles),
+                "miss_matmul_norm": safe_div(miss_matmul, base_matmul),
+                "miss_bitcomp_norm": miss_bitcomp,
+                "miss_input_read_norm": safe_div(miss_input_actual, base_input),
+                "miss_input_read_saved": 1.0 - safe_div(miss_input_actual, miss_input_original),
+                "miss_weight_read_norm": safe_div(miss_weight, base_weight),
+                "miss_output_write_norm": safe_div(miss_output, base_output),
+                "miss_traffic_norm": safe_div(miss_total_traffic, base_reqs),
                 "drop": variant["drop"],
                 "acc": variant["acc"],
                 "note": variant["note"],
@@ -209,10 +264,33 @@ def main() -> None:
     args.output_dir.mkdir(parents=True, exist_ok=True)
     tsv_path = args.output_dir / "earlystop_sweep.tsv"
     txt_path = args.output_dir / "earlystop_sweep.txt"
+    miss_tsv_path = args.output_dir / "miss_only_breakdown.tsv"
+    miss_txt_path = args.output_dir / "miss_only_breakdown.txt"
     with tsv_path.open("w", newline="") as handle:
         writer = csv.DictWriter(handle, fieldnames=list(rows[0].keys()), delimiter="\t")
         writer.writeheader()
         writer.writerows(rows)
+    miss_fields = [
+        "method",
+        "avg_miss_depth",
+        "saved_bitplanes",
+        "miss_cycles_norm",
+        "miss_matmul_norm",
+        "miss_bitcomp_norm",
+        "miss_input_read_norm",
+        "miss_input_read_saved",
+        "miss_weight_read_norm",
+        "miss_output_write_norm",
+        "miss_traffic_norm",
+        "bound_stop_rate",
+        "drop",
+        "note",
+    ]
+    with miss_tsv_path.open("w", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=miss_fields, delimiter="\t")
+        writer.writeheader()
+        for row in rows:
+            writer.writerow({key: row[key] for key in miss_fields})
 
     lines = [
         "Cora h8_54_T40 Graph-Bit predictor-free early-stop sweep",
@@ -239,9 +317,44 @@ def main() -> None:
         "extra dynamic-depth embedding pools."
     )
     txt_path.write_text("\n".join(lines) + "\n")
+
+    miss_lines = [
+        "Cora h8_54_T40 ONNXim miss-only Graph-Bit breakdown",
+        "Rows ignore reuse/residual ratios and evaluate only nodes that must execute the encoder.",
+        "",
+        "Method                     AvgD  Saved  Cycles MatMul BitComp ActRd ActSave WeightRd OutWr Traffic",
+        "---------------------------------------------------------------------------------------------------",
+    ]
+    for row in rows:
+        miss_lines.append(
+            f"{row['method']:<26} {row['avg_miss_depth']:>5.2f} "
+            f"{row['saved_bitplanes']:>6.2f} {row['miss_cycles_norm']:>7.3f} "
+            f"{row['miss_matmul_norm']:>6.3f} {row['miss_bitcomp_norm']:>7.3f} "
+            f"{row['miss_input_read_norm']:>5.3f} "
+            f"{fmt_pct(row['miss_input_read_saved']):>7} {row['miss_weight_read_norm']:>8.3f} "
+            f"{row['miss_output_write_norm']:>5.3f} {row['miss_traffic_norm']:>7.3f}"
+        )
+    miss_lines.extend(
+        [
+            "",
+            "Column meaning:",
+            "- AvgD: average executed activation bit-depth for miss-node GEMM tiles.",
+            "- Cycles: encoder-miss cycles normalized to FullP8 ONNXim microbench.",
+            "- MatMul: systolic matmul active cycles normalized to FullP8.",
+            "- BitComp: Graph-Bit effective bit-serial compute cycles divided by raw full-depth compute cycles.",
+            "- ActRd: activation/input read requests normalized to FullP8.",
+            "- ActSave: activation/input request reduction relative to original full-depth input requests.",
+            "- WeightRd and OutWr: weight read and output write requests normalized to FullP8.",
+            "- Traffic: total DRAM read+write requests normalized to FullP8.",
+        ]
+    )
+    miss_txt_path.write_text("\n".join(miss_lines) + "\n")
     print(f"[GraphBitEarlyStop] wrote {tsv_path}")
     print(f"[GraphBitEarlyStop] wrote {txt_path}")
+    print(f"[GraphBitEarlyStop] wrote {miss_tsv_path}")
+    print(f"[GraphBitEarlyStop] wrote {miss_txt_path}")
     print(txt_path.read_text())
+    print(miss_txt_path.read_text())
 
 
 if __name__ == "__main__":

@@ -726,7 +726,53 @@ h8_54_T40 maxDrop = 2.52%
 h8_64_T40 maxDrop = 2.70%
 ```
 
-后续 Graph-Bit / full-stack 实验默认沿用这一组统一复用前端参数。Graph-Bit 只负责 accepted miss nodes 的 P8/P6/P5/P4 precision-depth 路由，不再重新调 reuse gate。
+这组 `h8_54_T40` 是 learned accept gate 加入前的 support-split 共同点。它仍然是理解 CAM/support split 的重要 baseline，但现在已经不是纯 residual reuse 的最新最好结果。
+
+### 7.10 Shared Online Residual Gate Result
+
+远端 `origin/main` 新增了一套 residual MLP + learned accept gate，实现文档见：
+
+```text
+docs/results/SHARED_ONLINE_RESIDUAL_REUSE_RESULT.md
+```
+
+这组实验的关键变化是：在线控制流仍然共享，但 residual 路径内部多了一个 learned accept/reject gate。
+
+共享在线配置：
+
+```text
+8 heads x 16-bit
+R = 2
+T = 30
+score = 3 / 1 / 1
+
+support >= 5   -> hard direct reuse
+support = 3..4 -> residual candidate
+support < 3    -> compute
+
+gate_accept_threshold = 0.575
+```
+
+3-run 结果：
+
+| Dataset | Baseline Acc | ResidualReuse | Acc | Drop | TrainPairs | Alpha |
+|---|---:|---:|---:|---:|---:|---:|
+| Cora | 0.7200 | 46.5% | 0.7107 | 0.93% | 464.7 | 0.263 |
+| PubMed | 0.7587 | 42.3% | 0.7392 | 1.96% | 151.3 | 0.309 |
+
+为什么它比单纯 support split 更好：
+
+```text
+Cora:
+    soft hit 相对干净，separate accept gate 尽量保留 soft hit，
+    residual 主要负责把 embedding 拉回去。
+
+PubMed:
+    soft hit 更脏，shared accept gate 会拒绝更多不可靠候选，
+    复用率从 SoftDirect 的 69.5% 降到 42.3%，但 drop 从 4.48% 降到 1.96%。
+```
+
+因此，当前纯 residual reuse 推荐采用这组共享在线配置；Graph-Bit full-stack 仍需要下一步把这个 learned accept gate trace 接入 `residual_precision_depth` 后重跑，不能直接把旧的 Graph-Bit full-stack 表和这组结果混用。
 
 <!-- PUBMED_ST_SUPPORT_SPLIT_END -->
 
@@ -740,7 +786,7 @@ fuzzy hit      -> residual correction
 reject / miss  -> Graph-Bit P8/P6/P5/P4
 ```
 
-后续 Graph-Bit full-stack 默认使用上一节确定的统一复用前端：
+后续 Graph-Bit full-stack 先从上一节确定的统一复用前端开始：
 
 ```text
 R = 2
@@ -749,6 +795,21 @@ score threshold T = 40
 hard direct reuse: support heads >= 5
 residual correction: support heads == 4
 compute / Graph-Bit: support heads < 4
+```
+
+注意：这组 `h8_54_T40` 是 ST/data.x residual-reuse 的共同参数结论。LLaMA-7B full-stack 必须额外做 `FullP8-miss` sanity check：
+
+```text
+accepted hit -> direct / residual reuse
+miss         -> P8 encoder
+```
+
+如果 `FullP8-miss` 自身已经超过精度预算，说明 reuse 前端太松，Graph-Bit 只改 miss-node bit-depth，无法修复已经接受的 fuzzy hit。当前 PubMed/LLaMA 需要更严格的 `h8_76_T40`：
+
+```text
+hard direct reuse: support heads >= 7
+residual correction: support heads == 6
+compute / Graph-Bit: support heads < 6
 ```
 
 推荐复现实验命令：
@@ -813,6 +874,23 @@ output/residual_precision_depth_manual/cora_llama7b_T30_fullstack.log
 output/residual_precision_depth_manual/pubmed_llama7b_T30_fullstack.log
 output/residual_precision_depth_manual/cora_ST_T30_fullstack.log
 ```
+
+最新 PubMed/LLaMA support split follow-up：
+
+| Front-end | Hard / Residual | Reuse | FullP8-miss Drop | Degree Graph-Bit Drop |
+|---|---|---:|---:|---:|
+| `h8_54_T40` | `>=5 / ==4` | 74.9% | 5.34% | 5.76% |
+| `h8_65_T40` | `>=6 / ==5` | 50.6% | 3.62% | 4.56% |
+| `h8_76_T40` | `>=7 / ==6` | 22.3% | 1.26% | 2.54% |
+
+因此，当前建议是：
+
+```text
+Cora/LLaMA full-stack:   h8_54_T40
+PubMed/LLaMA full-stack: h8_76_T40
+```
+
+这并不改变 residual reuse 的机制，只说明 LLaMA/PubMed 的 accepted fuzzy hit 质量更敏感，需要更严格的 support split。
 
 ## 9. Current Limitations
 

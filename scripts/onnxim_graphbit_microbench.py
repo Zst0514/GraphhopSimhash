@@ -177,21 +177,48 @@ def parse_log(path: Path) -> dict[str, Any]:
     text = path.read_text(errors="replace")
     cycle_matches = re.findall(r"Simulation Finished at\s+(\d+)\s+cycle", text)
     compute_matches = re.findall(r"Total compute time\s+(\d+)", text)
+    matmul_matches = re.findall(
+        r"MatMul active cycle\s+([0-9.eE+-]+)\s+Vector active cycle\s+([0-9.eE+-]+)",
+        text,
+    )
     gflops_matches = re.findall(r"\[GemmWS\]: total\s+([0-9.eE+-]+)\s+GFLOPs,\s+([0-9.eE+-]+)\s+GB", text)
     read_matches = [int(v) for v in re.findall(r"total_num_read_requests:\s+(\d+)", text)]
     write_matches = [int(v) for v in re.findall(r"total_num_write_requests:\s+(\d+)", text)]
     avg_bw_matches = re.findall(r"avg BW utilization\s+\d+%\s+\((\d+)\s+reads,\s+(\d+)\s+writes\)", text)
+    mem_breakdown_matches = re.findall(
+        r"MemoryBreakdown ReadInputActual\s+(\d+)\s+ReadInputOriginal\s+(\d+)\s+"
+        r"ReadWeight\s+(\d+)\s+ReadOther\s+(\d+)\s+WriteOutput\s+(\d+)\s+WriteOther\s+(\d+)",
+        text,
+    )
     graphbit_matches = re.findall(
         r"GraphBit Inst\s+(\d+)\s+BoundStops\s+(\d+)\s+AvgDepth\s+([0-9.]+)\s+AvgSavedBitplanes\s+([0-9.]+)",
+        text,
+    )
+    graphbit_compute_matches = re.findall(
+        r"GraphBit Inst\s+\d+\s+BoundStops\s+\d+\s+AvgDepth\s+[0-9.]+\s+"
+        r"AvgSavedBitplanes\s+[0-9.]+\s+EffectiveComputeCycles\s+([0-9.eE+-]+)\s+"
+        r"RawComputeCycles\s+([0-9.eE+-]+)",
         text,
     )
 
     bw_reads = sum(int(r) for r, _ in avg_bw_matches)
     bw_writes = sum(int(w) for _, w in avg_bw_matches)
+    matmul_active_cycles = sum(float(m) for m, _ in matmul_matches)
+    vector_active_cycles = sum(float(v) for _, v in matmul_matches)
     gflops = sum(float(g) for g, _ in gflops_matches)
     gb = sum(float(gb) for _, gb in gflops_matches)
+    mem_breakdown = {
+        "mem_read_input_actual": sum(int(v[0]) for v in mem_breakdown_matches),
+        "mem_read_input_original": sum(int(v[1]) for v in mem_breakdown_matches),
+        "mem_read_weight": sum(int(v[2]) for v in mem_breakdown_matches),
+        "mem_read_other": sum(int(v[3]) for v in mem_breakdown_matches),
+        "mem_write_output": sum(int(v[4]) for v in mem_breakdown_matches),
+        "mem_write_other": sum(int(v[5]) for v in mem_breakdown_matches),
+    }
     graphbit_inst = sum(int(v[0]) for v in graphbit_matches)
     graphbit_bound_stops = sum(int(v[1]) for v in graphbit_matches)
+    graphbit_effective_compute_cycles = sum(float(v[0]) for v in graphbit_compute_matches)
+    graphbit_raw_compute_cycles = sum(float(v[1]) for v in graphbit_compute_matches)
     graphbit_avg_depth = None
     graphbit_avg_saved = None
     if graphbit_inst:
@@ -207,14 +234,19 @@ def parse_log(path: Path) -> dict[str, Any]:
     return {
         "cycles": int(cycle_matches[-1]) if cycle_matches else None,
         "compute_cycles_sum": sum(int(v) for v in compute_matches),
+        "matmul_active_cycles": matmul_active_cycles,
+        "vector_active_cycles": vector_active_cycles,
         "gflops": gflops,
         "gb": gb,
         "dram_read_requests": sum(read_matches) if read_matches else bw_reads,
         "dram_write_requests": sum(write_matches) if write_matches else bw_writes,
         "avg_bw_read_requests": bw_reads,
         "avg_bw_write_requests": bw_writes,
+        **mem_breakdown,
         "graphbit_inst": graphbit_inst,
         "graphbit_bound_stops": graphbit_bound_stops,
+        "graphbit_effective_compute_cycles": graphbit_effective_compute_cycles,
+        "graphbit_raw_compute_cycles": graphbit_raw_compute_cycles,
         "graphbit_avg_depth": graphbit_avg_depth,
         "graphbit_avg_saved_bitplanes": graphbit_avg_saved,
         "log": str(path),
@@ -252,12 +284,22 @@ def write_summary(specs: list[GemmSpec], workspace: Path, layers: int) -> dict[s
         "per_layer": {
             "cycles": weighted("cycles"),
             "compute_cycles_sum": weighted("compute_cycles_sum"),
+            "matmul_active_cycles": weighted("matmul_active_cycles"),
+            "vector_active_cycles": weighted("vector_active_cycles"),
             "gflops": weighted("gflops"),
             "gb": weighted("gb"),
             "dram_read_requests": weighted("dram_read_requests"),
             "dram_write_requests": weighted("dram_write_requests"),
+            "mem_read_input_actual": weighted("mem_read_input_actual"),
+            "mem_read_input_original": weighted("mem_read_input_original"),
+            "mem_read_weight": weighted("mem_read_weight"),
+            "mem_read_other": weighted("mem_read_other"),
+            "mem_write_output": weighted("mem_write_output"),
+            "mem_write_other": weighted("mem_write_other"),
             "graphbit_inst": weighted("graphbit_inst"),
             "graphbit_bound_stops": weighted("graphbit_bound_stops"),
+            "graphbit_effective_compute_cycles": weighted("graphbit_effective_compute_cycles"),
+            "graphbit_raw_compute_cycles": weighted("graphbit_raw_compute_cycles"),
         },
     }
     graphbit_inst = aggregate["per_layer"]["graphbit_inst"]

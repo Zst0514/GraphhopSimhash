@@ -230,6 +230,13 @@ void Core::print_stats() {
       _id, static_cast<float>(_stat_tot_systolic_active_cycle * 100) / _core_cycle,
       static_cast<float>(_stat_tot_matmul_cycle * 100) / _core_cycle,
       static_cast<float>(_stat_tot_vec_compute_cycle * 100) / _core_cycle, _core_cycle);
+  spdlog::info(
+      "Core [{}] : MemoryBreakdown ReadInputActual {} ReadInputOriginal {} "
+      "ReadWeight {} ReadOther {} WriteOutput {} WriteOther {}",
+      _id, _stat_mem_read_input_requests,
+      _stat_mem_read_input_original_requests, _stat_mem_read_weight_requests,
+      _stat_mem_read_other_requests, _stat_mem_write_output_requests,
+      _stat_mem_write_other_requests);
 }
 
 void Core::print_current_stats() {
@@ -354,6 +361,17 @@ void Core::handle_ld_inst_queue() {
                               .buffer_id = buffer_id});
         _request_queue.push(access);
       }
+      uint64_t actual_requests = front->src_addrs.size();
+      if (front->operand_id == 100) {
+        _stat_mem_read_input_requests += actual_requests;
+        _stat_mem_read_input_original_requests +=
+            front->graphbit_original_size ? front->graphbit_original_size
+                                          : actual_requests;
+      } else if (front->operand_id == 101) {
+        _stat_mem_read_weight_requests += actual_requests;
+      } else {
+        _stat_mem_read_other_requests += actual_requests;
+      }
       _ld_inst_queue.pop();
     } else {
       assert(0);
@@ -389,6 +407,12 @@ void Core::handle_st_inst_queue() {
                               .buffer_id = buffer_id};
           _waiting_write_reqs++;
           _request_queue.push(access);
+        }
+        uint64_t actual_requests = front->src_addrs.size();
+        if (front->operand_id == 200) {
+          _stat_mem_write_output_requests += actual_requests;
+        } else {
+          _stat_mem_write_other_requests += actual_requests;
         }
         if(front->last_inst) {
           spdlog::trace("Finished last store {}", front->spad_id);

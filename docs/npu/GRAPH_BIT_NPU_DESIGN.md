@@ -165,7 +165,7 @@ target path: P0/P1/P2/P3
 
 Graph-Bit 只处理 miss nodes，也就是仍然需要跑 encoder 的节点。
 
-当前主线的 reuse 前端固定为：
+当前 Cora/LLaMA 快速验证的 reuse 前端固定为：
 
 ```text
 R = 2
@@ -177,6 +177,31 @@ support < 4  -> Graph-Bit / full encoder
 ```
 
 因此 Graph-Bit 的输入集合不是全图节点，而是 support 小于 4 或被 score gate 拒绝、仍需执行 encoder 的节点。这个固定前端避免把 Graph-Bit 结果和 reuse 参数调优混在一起。
+
+但这个前端不是所有 backend/dataset 的无条件默认。LLaMA-7B full-stack 的第一原则是：
+
+```text
+先检查 FullP8-miss：
+    accepted hit -> direct/residual reuse
+    miss         -> P8 encoder
+
+只有 FullP8-miss drop 已经安全，
+才继续评估 Graph-Bit 对 miss nodes 的 bit-plane 省算。
+```
+
+当前结果中，Cora/LLaMA 可以用 `h8_54_T40`；PubMed/LLaMA 需要更严格的：
+
+```text
+h8_76_T40:
+    8 heads x 16-bit
+    R = 2
+    T = 40
+    support >= 7 -> direct reuse
+    support == 6 -> residual correction
+    support < 6  -> Graph-Bit / full encoder
+```
+
+这不是改变 NPU datapath，而是 scheduler 的安全阈值配置；Graph-Bit datapath 仍然相同。
 
 ### 4.2 Risk-to-depth Mapping
 
@@ -497,6 +522,242 @@ Degree predictor-free EarlyStop:
 ```
 
 这里的 `Cycles/Traffic/Energy` 是相对全图 Full-P8 encoder 的归一化硬件 proxy。`Drop` 仍来自静态 embedding proxy；bounded early-stop 的真实数值精度需要后续 bit-serial numerical kernel 或更细的 ONNXim numerical model 支撑。
+
+### 9.1.2 PubMed/LLaMA robust front-end
+
+PubMed/LLaMA 上，`h8_54_T40` 会让 reuse 命中过多，`FullP8-miss` 自身已经掉到 `5.34%`，因此不能作为 Graph-Bit 主线结果。按照同一套流程扫 support split 后，当前稳健点是：
+
+```text
+h8_76_T40:
+    hard direct: support >= 7
+    residual:    support == 6
+```
+
+3-run 结果：
+
+| Front-end | Reuse | FullP8 Cost | FullP8 Drop | Degree Cost | Degree Drop | PF AvgBit | PF Cycles | PF Traffic | PF Energy |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| `h8_54_T40` | 74.9% | 0.127 | 5.34% | 0.098 | 5.76% | 5.47 | 0.173 | 0.226 | 0.197 |
+| `h8_65_T40` | 50.6% | 0.249 | 3.62% | 0.191 | 4.56% | 5.48 | 0.340 | 0.443 | 0.386 |
+| `h8_76_T40` | 22.3% | 0.389 | 1.26% | 0.298 | 2.54% | 5.47 | 0.532 | 0.692 | 0.604 |
+
+结论：
+
+```text
+1. PubMed/LLaMA 的 residual hits 更脏，必须提高 support 门槛。
+2. h8_76_T40 下 FullP8-miss 已安全，Degree Graph-Bit 仍低于 3% drop。
+3. predictor-free early-stop 在同一精度 drop 下，把 static Degree 的
+   cycles/traffic/energy 从 0.563/0.703/0.626 降到 0.532/0.692/0.604。
+```
+
+Miss-only ONNXim 分解进一步确认了这个收益不是表面 cost model：
+
+```text
+output/graphbit_predictor_free/cora_h8_54_T40/earlystop_sweep/miss_only_breakdown.txt
+```
+
+核心结果：
+
+```text
+FullP8-miss:
+    AvgD=8.00, BitComp=1.000, ActRd=1.000, Traffic=1.000
+
+EarlyStop balanced:
+    AvgD=6.10, BitComp=0.764, ActRd=0.763, Traffic=0.969
+
+EarlyStop aggressive:
+    AvgD=5.80, BitComp=0.726, ActRd=0.725, Traffic=0.964
+```
+
+这里 `BitComp` 是 bit-serial effective compute cycles / raw full-depth compute cycles。它说明在只看 miss nodes 时，balanced early-stop 已经减少约 `23.6%` 的 bit-plane 算术量和约 `23.7%` 的 activation input reads。总 traffic 下降较小，是因为 weight read 和 output write 没有随 activation bit-depth 下降。
+
+### 9.1.2 Risk-bucket batching
+
+Miss-only 分解还暴露了另一个硬件问题：如果 high/mid/low risk 节点随机混在同一个 micro-batch 里，bit-serial 控制器通常必须跑到该 batch 的最大 bit-depth。这样低风险节点虽然被判为 P6/P4 或 early-stop，但实际会被同 batch 的 high-risk 节点拖回 P8。
+
+因此 Graph-Bit 需要一个简单但关键的 scheduler：
+
+```text
+1. reuse/residual 前端先筛掉 cache hit 节点；
+2. 对剩余 miss nodes 计算 degree risk；
+3. 按 high / mid / low risk 分桶；
+4. 每个桶单独形成 micro-batch；
+5. NPU 对每个 bucket 使用对应 min_depth / tolerance。
+```
+
+命令：
+
+```bash
+bash GraphhopSimhash/scripts/run_cora_graphbit_risk_bucket_batching.sh
+```
+
+结果文件：
+
+```text
+output/graphbit_predictor_free/cora_h8_54_T40/risk_bucket_batching/risk_bucket_batching.txt
+```
+
+Cora `h8_54_T40`，miss-node mix 为 `high=20% / mid=50% / low=30%`，micro-batch size 64：
+
+| Method | Assign | Schedule | Mode | UsefulD | ExecD | Util | Waste | Cycles | BitComp | ActRd | Traffic | Drop |
+|---|---|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| RandomOrder Static | degree | random mixed | static | 5.80 | 8.00 | 72.5% | 27.5% | 1.000 | 1.000 | 1.000 | 1.000 | 2.39% |
+| DegreeBucket Static | degree | risk bucket | static | 5.80 | 5.80 | 100.0% | 0.0% | 0.957 | 0.726 | 0.725 | 0.964 | 2.39% |
+| RandomRisk Bucket | random | risk bucket | static | 5.80 | 5.80 | 100.0% | 0.0% | 0.957 | 0.726 | 0.725 | 0.964 | 2.79% |
+| RandomOrder EarlyStop | degree | random mixed | early-stop | 6.10 | 8.00 | 76.3% | 23.7% | 1.000 | 1.000 | 1.000 | 1.000 | 2.39% |
+| DegreeBucket EarlyStop | degree | risk bucket | early-stop | 6.10 | 6.10 | 100.0% | 0.0% | 0.959 | 0.764 | 0.763 | 0.969 | 2.39% |
+
+解释：
+
+```text
+RandomOrder:
+    仍然使用 Degree assignment，但 high/mid/low 混在一个 batch。
+    batch=64 时几乎每个 batch 都包含 high-risk 节点，因此整批跑到 P8。
+
+DegreeBucket:
+    同样的 Degree assignment，但 high/mid/low 分桶执行。
+    useful depth 和 executed depth 对齐，bit-plane waste 变成 0。
+
+RandomRisk Bucket:
+    硬件 cost 和 DegreeBucket 一样，但风险分配随机，drop 更高。
+    这说明 graph proxy 不只是为了凑比例，而是真的保护了精度。
+```
+
+这个实验把 Graph-Bit 从“precision-depth policy”推进到更像硬件论文的 “graph-aware NPU scheduler/dataflow”：
+
+```text
+graph risk decides not only how many bit-planes to execute,
+but also how miss nodes are batched so the bit-serial array can realize that saving.
+```
+
+### 9.1.3 FFN block-gating hardware probe
+
+前面的结果说明 activation bit-plane early-stop 能省 `BitComp` 和 `ActRd`，但总 traffic 被 weight read / output write 稀释。要继续降低 weight traffic，需要让部分 FFN weight block 不被读取。
+
+这里先做硬件探针，不声明精度结论：
+
+```bash
+bash GraphhopSimhash/scripts/run_onnxim_ffn_block_gating_microbench.sh
+```
+
+输出：
+
+```text
+output/onnxim_graphbit/ffn_block_gating/ffn_block_gating.txt
+```
+
+ONNXim LLaMA-7B FFN intermediate block-gating 结果：
+
+| Keep | Intermediate | Cycles | MatMul | Traffic | InRead | WeightRd | OutWr | GFLOPs |
+|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| 74% | 8192 | 0.826 | 0.829 | 0.830 | 0.834 | 0.829 | 0.867 | 0.829 |
+| 50% | 5504 | 0.629 | 0.654 | 0.669 | 0.687 | 0.666 | 0.741 | 0.666 |
+
+解释：
+
+```text
+1. FFN block gating 改变 intermediate dimension，因此 weight read 会真实下降。
+2. keep≈74% 时，weight read 降到 82.9%，cycles 降到 82.6%。
+3. keep=50% 时，weight read 降到 66.6%，cycles 降到 62.9%。
+4. 这条线能解决 Graph-Bit early-stop 不降低 weight traffic 的问题。
+5. 但它会改变模型函数，必须单独做 embedding/GNN 精度验证后才能进入主线。
+```
+
+因此当前建议：
+
+```text
+主线:
+    Graph-Bit predictor-free bit-plane early-stop
+    + degree-risk bucket batching
+
+下一阶段 Graph-Bit+:
+    对低风险 miss nodes 进一步启用 FFN block gating，
+    用 accuracy proxy 验证 keep≈74% 是否能在 <3% drop 内换取 weight traffic 下降。
+```
+
+当前论文主线不依赖 FFN block gating。它只是一个硬件探针，用来说明如果未来要继续压 `WeightRd`，必须触及 FFN/block 级数据流；主线仍然是 predictor-free bit-serial early-stop 和 risk-bucket scheduler。
+
+### 9.1.4 Memory dataflow breakdown
+
+为了区分“算术省算”和“访存省流量”，新增 memory-dataflow 汇总：
+
+```bash
+bash GraphhopSimhash/scripts/run_cora_graphbit_memory_dataflow.sh
+```
+
+输出：
+
+```text
+output/graphbit_predictor_free/cora_h8_54_T40/memory_dataflow/memory_dataflow.txt
+```
+
+结果：
+
+| Method | AvgD | BitComp | Cycles | ActRd | WeightRd | OutWr | Traffic | Drop |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| FullP8 miss | 8.00 | 1.000 | 1.000 | 1.000 | 1.000 | 1.000 | 1.000 | 1.53% |
+| EarlyStop compute-only | 6.10 | 0.764 | 1.000 | 1.000 | 1.000 | 1.000 | 1.000 | 2.39% |
+| EarlyStop + ActPack | 6.10 | 0.764 | 0.959 | 0.763 | 1.000 | 1.000 | 0.969 | 2.39% |
+| EarlyStop + ActPack + FFNBypass | 6.10 | 0.764 | 0.959 | 0.763 | 1.000 | 1.000 | 0.938 | 2.39% |
+
+解释：
+
+```text
+compute-only:
+    只体现 bit-serial 算术省算；如果 activation 仍按 A8 存取，traffic 不变。
+
+ActPack:
+    当前 Graph-Bit 路径。activation bit-plane packed read 让 ActRd 降到 0.763。
+
+FFNBypass:
+    exact dataflow upper bound，不改变模型函数。
+    它假设 FFN intermediate 留在片上，避免 ffn_up output write 和 ffn_down input read。
+```
+
+结论：
+
+```text
+Graph-Bit 的主收益来自 BitComp / ActRd；
+若片上 SRAM 允许 FFN intermediate bypass，traffic 可从 0.969 进一步到 0.938。
+这不是 FFN channel gating，不改变权重或输出维度，只是减少中间结果往返 HBM。
+```
+
+### 9.1.5 Batch-size amortization
+
+risk-bucket scheduler 还有一个访存收益：同一个 risk bucket 连续处理时，weight tile 可以被更多 node tokens 复用。用 ONNXim 对 FullP8 GEMM 做 batch-size sweep：
+
+```bash
+bash GraphhopSimhash/scripts/run_onnxim_batch_amortization.sh
+```
+
+输出：
+
+```text
+output/onnxim_graphbit/batch_amortization/batch_amortization.txt
+```
+
+结果：
+
+| Seq / micro-batch | Cyc/Node norm | Traffic/Node norm | Weight/Node norm | Input/Node norm |
+|---:|---:|---:|---:|---:|
+| 8 | 1.000 | 1.000 | 1.000 | 1.000 |
+| 16 | 0.507 | 0.510 | 0.500 | 1.000 |
+| 32 | 0.266 | 0.265 | 0.250 | 1.000 |
+| 64 | 0.143 | 0.143 | 0.125 | 1.000 |
+| 128 | 0.080 | 0.082 | 0.062 | 1.000 |
+
+解释：
+
+```text
+Input/Node 基本不变：
+    每个 node token 都有自己的 activation。
+
+Weight/Node 随 micro-batch 近似按 1/B 摊薄：
+    权重 tile 被更多节点复用。
+
+这说明 risk-bucket scheduler 不只是为了避免 bit-depth divergence；
+它还把相同执行模式的 miss nodes 聚成大 batch，从而提高 weight-stationary 数据复用。
+```
 
 ### 9.2 Internal GemmWS Bit-Plane Execution
 
