@@ -93,8 +93,8 @@ This uses LLaMA W4A8 embeddings as the residual target rather than the ST/data.x
 target.  PubMed/LLaMA still needs a stricter split/gate validation before it can
 be treated as final.
 
-Older PubMed/LLaMA support-split checks showed that a stricter no-gate split can
-be used as a safe fallback:
+PubMed/LLaMA support-split checks show that a stricter no-gate split is the
+current safe fallback for Graph-Bit full-stack validation:
 
 ```text
 h8_76_T40
@@ -105,6 +105,20 @@ support >= 7 -> direct reuse
 support == 6 -> residual correction
 support < 6  -> encoder / Graph-Bit
 ```
+
+10-run result:
+
+```text
+FullP8-miss:
+    reuse = 8.2%, cost = 0.459, drop = 0.26%
+
+Degree runtime-bound:
+    reuse = 8.2%, cost = 0.367, drop = 1.24%
+```
+
+The looser `h8_54_T40` front-end reaches much higher PubMed/LLaMA reuse
+(`54.1%`) but is not safe for this backend because `FullP8-miss` already drops
+`3.01%`.
 
 ### 2. TSER Score Gate
 
@@ -800,11 +814,11 @@ Do not claim without further simulator evidence:
 
 ## Recommended Next Experiments
 
-1. Validate a PubMed/LLaMA learned-gate front-end before running expensive Graph-Bit sweeps.
-2. Add dynamic-depth accuracy validation for predictor-free early stop.
-3. Sweep `min_depth/tolerance` for Cora first, then PubMed.
-4. Add a weight-stationary / FFN-fusion model to attack the fixed weight/output traffic that demand-fetch cannot reduce.
-5. Prepare the final paper figures:
+1. Improve PubMed/LLaMA reuse front-end between the current extremes: `h8_54_T40`
+   is too loose, while `h8_76_T40` is safe but conservative.
+2. Sweep `min_depth/tolerance` for Cora first, then PubMed.
+3. Add a weight-stationary / FFN-fusion model to attack the fixed weight/output traffic that demand-fetch cannot reduce.
+4. Prepare the final paper figures:
    - reuse vs drop curve
    - Graph-Bit cost/drop curve
    - ONNXim cycles/traffic/energy table

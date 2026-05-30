@@ -107,6 +107,45 @@ Runtime-bound Degree:
 
 因此当前实现已经体现了核心机制：graph risk 配置安全下限和容忍度，实际 bit-depth 由 runtime bound 决定。
 
+### PubMed/LLaMA 10-run Validation
+
+PubMed/LLaMA 上复用前端比 Cora 更敏感，因此先检查 `FullP8-miss`：
+
+```text
+FullP8-miss:
+    accepted hits 走 direct/residual reuse
+    所有 miss 节点仍完整执行 P8
+```
+
+如果这一行已经超出精度预算，Graph-Bit 无法挽救，因为 Graph-Bit 只改变 miss 节点的 NPU bit-plane 深度。
+
+两组 10-run 结果：
+
+| Front-end | Hard / Residual | Reuse | FullP8 Drop | Degree Static Drop | Degree Bound Drop | Bound Cost |
+| --- | --- | ---: | ---: | ---: | ---: | ---: |
+| `h8_54_T40` | `>=5 / ==4` | 54.1% | 3.01% | 3.80% | 3.54% | 0.184 |
+| `h8_76_T40` | `>=7 / ==6` | 8.2% | 0.26% | 1.74% | 1.24% | 0.367 |
+
+解释：
+
+```text
+h8_54_T40:
+    reuse 高，但 PubMed/LLaMA 上太松；
+    FullP8-miss 已经掉 3.01%，因此不适合作为安全主线。
+
+h8_76_T40:
+    reuse 低，但很安全；
+    Degree runtime-bound 把 static P4 低风险桶提升到 P5，
+    drop 从 static Degree 的 1.74% 降到 1.24%。
+```
+
+对应日志：
+
+```text
+output/graphbit_bound_runtime/pubmed_h8_54_T40_boundclean_runs10/predictor_free_main.txt
+output/graphbit_bound_runtime/pubmed_h8_76_T40_boundclean_runs10/predictor_free_main.txt
+```
+
 ## 1. Motivation
 
 当前系统已经有三层：

@@ -418,20 +418,37 @@ However, LLaMA-7B full-stack evaluation is stricter: the first check must be
 run P8. If `FullP8-miss` is already above the target drop, Graph-Bit cannot fix
 the run because Graph-Bit only changes miss-node bit-depth.
 
-PubMed/LLaMA, 3 runs, `T=40`, `R=2`, 8 heads:
+PubMed/LLaMA, 10 runs, `T=40`, `R=2`, 8 heads:
 
-| Front-end | Hard / Residual | Reuse | FullP8 Cost | FullP8 Drop | Degree Cost | Degree Drop | PF AvgBit | PF Cycles | PF Traffic | PF Energy |
-|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
-| `h8_54_T40` | `>=5 / ==4` | 74.9% | 0.127 | 5.34% | 0.098 | 5.76% | 5.47 | 0.173 | 0.226 | 0.197 |
-| `h8_65_T40` | `>=6 / ==5` | 50.6% | 0.249 | 3.62% | 0.191 | 4.56% | 5.48 | 0.340 | 0.443 | 0.386 |
-| `h8_76_T40` | `>=7 / ==6` | 22.3% | 0.389 | 1.26% | 0.298 | 2.54% | 5.47 | 0.532 | 0.692 | 0.604 |
+| Front-end | Hard / Residual | Reuse | Direct | Residual | FullP8 Cost | FullP8 Drop | Degree Static Cost | Degree Static Drop | Degree Bound Cost | Degree Bound Drop | Bound AvgBit |
+|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| `h8_54_T40` | `>=5 / ==4` | 54.1% | 42.8% | 11.3% | 0.230 | 3.01% | 0.176 | 3.80% | 0.184 | 3.54% | 6.10 |
+| `h8_76_T40` | `>=7 / ==6` | 8.2% | 4.7% | 3.4% | 0.459 | 0.26% | 0.352 | 1.74% | 0.367 | 1.24% | 6.10 |
+
+Runtime-bound NPU proxy:
+
+| Front-end | Method | Cycles | Traffic | Energy | Saved AvgBit |
+|---|---|---:|---:|---:|---:|
+| `h8_54_T40` | FullP8-miss | 0.460 | 0.461 | 0.461 | 0.00 |
+| `h8_54_T40` | Degree static | 0.334 | 0.417 | 0.371 | 2.20 |
+| `h8_54_T40` | Degree runtime-bound | 0.351 | 0.423 | 0.383 | 1.90 |
+| `h8_76_T40` | FullP8-miss | 0.918 | 0.918 | 0.918 | 0.00 |
+| `h8_76_T40` | Degree static | 0.666 | 0.831 | 0.740 | 2.20 |
+| `h8_76_T40` | Degree runtime-bound | 0.701 | 0.843 | 0.765 | 1.90 |
 
 Current interpretation:
 
-- `h8_54_T40` is still useful as the ST/data.x residual-reuse common point, but it is too loose for PubMed/LLaMA full-stack.
-- `h8_76_T40` is the current PubMed/LLaMA robust point: `FullP8-miss` is safe (`1.26%` drop), and Degree Graph-Bit stays under `3%` (`2.54%`).
-- At this safe point, Degree is better than Random (`2.54%` vs `2.75%`), and predictor-free early stop reduces the NPU proxy from static Degree `cycles=0.563, traffic=0.703, energy=0.626` to `cycles=0.532, traffic=0.692, energy=0.604`.
+- `h8_54_T40` is still useful as the ST/data.x residual-reuse common point, but it is too loose for PubMed/LLaMA full-stack. Even when misses use full P8, drop is already `3.01%`.
+- `h8_76_T40` is the current PubMed/LLaMA robust point: `FullP8-miss` is very safe (`0.26%` drop), and Degree runtime-bound stays under `2%` (`1.24%`). Its drawback is low reuse (`8.2%`).
+- Runtime-bound behavior is visible in both front-ends: the low-risk bucket is not forced to P4; the bound pushes it to P5. This improves accuracy versus static Degree (`3.80% -> 3.54%` for `h8_54_T40`, `1.74% -> 1.24%` for `h8_76_T40`) at a small cost increase.
 - Therefore, Graph-Bit should be evaluated only after the reuse/residual front-end keeps `FullP8-miss` below the desired accuracy budget.
+
+Result files:
+
+```text
+output/graphbit_bound_runtime/pubmed_h8_54_T40_boundclean_runs10/predictor_free_main.txt
+output/graphbit_bound_runtime/pubmed_h8_76_T40_boundclean_runs10/predictor_free_main.txt
+```
 
 ### LLaMA-7B, T = 20
 
