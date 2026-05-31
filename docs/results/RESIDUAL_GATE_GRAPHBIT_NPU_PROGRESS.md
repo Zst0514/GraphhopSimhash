@@ -365,6 +365,8 @@ low-risk node:
 graph-conditioned predictor-free execution
 ```
 
+前期也测试过更粗粒度的 encoder 约简方式，例如只运行 LLaMA 的部分层并缓存 `L16 / L24` 等 partial-depth embedding。实验结果显示，这类“跳层 / 少跑层数”会造成明显精度掉点，不能稳定替代完整 encoder。因此当前主线不再从 layer depth 上截断模型，而是保留完整层结构，在每个 GEMM 内部做 variable activation-depth 执行。
+
 activation 逻辑上是 A8：
 
 ```text
