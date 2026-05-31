@@ -484,6 +484,59 @@ X:
     miss nodes 的 token rows。
 ```
 
+这里的 `W tile` 指的是从大权重矩阵中切出来的一小块，不是把整层甚至整模型权重都放进片上 SRAM。
+
+以 LLaMA-7B 为例，raw FP16 权重量级约为：
+
+```text
+7B parameters * 16 bit ~= 14 GB
+```
+
+raw W4 权重量级约为：
+
+```text
+7B parameters * 4 bit ~= 3.5 GB
+```
+
+实际存储还会包含 scale / zero-point / metadata，因此这个数字只是权重 payload 的量级。无论哪种情况，整模型权重都不可能整体常驻一个小片上 buffer。
+
+再看单个 Linear GEMM 的量级：
+
+```text
+projection / QKV / O:
+    X: [M, 4096]
+    W: [4096, 4096]
+    W4 size ~= 8 MB
+
+FFN gate / up:
+    X: [M, 4096]
+    W: [4096, 11008]
+    W4 size ~= 22 MB
+
+FFN down:
+    X: [M, 11008]
+    W: [11008, 4096]
+    W4 size ~= 22 MB
+```
+
+一个 LLaMA layer 内的 Q/K/V/O + FFN gate/up/down 这些 Linear 权重，在 W4 下仍然是约百 MB 级别。Graph-Bit 调度的基本单位是更小的 tile，例如：
+
+```text
+128 x 128 W4 tile
+    = 128 * 128 * 4 bit
+    = 65,536 bit
+    = 8 KB
+```
+
+因此，数据流里的 `load W tile into SRAM / RF` 更准确地说是：
+
+```text
+从 HBM / LLC 读取一个 8KB 量级的小 W tile，
+放入片上 SRAM / RF，
+让尽可能多的 token rows 连续消费这个 tile，
+再换出下一个 W tile。
+```
+
 数据流：
 
 ```text
@@ -507,6 +560,21 @@ for each layer:
    让同风险 miss nodes 连续消费同一个 W tile，
    减少 W tile reload。
 ```
+
+这里的 `b16 / b32 / b64` 表示 W tile 的 service window，不是 bit-width：
+
+```text
+b16:
+    一个 W tile 在换出前服务 16 个 token-row blocks。
+
+b32:
+    一个 W tile 在换出前服务 32 个 token-row blocks。
+
+b64:
+    一个 W tile 在换出前服务 64 个 token-row blocks。
+```
+
+service window 越大，单个 W tile 的 HBM 读取越能被更多 token rows 摊薄；但也要求 risk bucket 里有足够多的 miss-node token rows，并且片上 buffer / scheduler 能支撑更长的 tile 驻留时间。
 
 两类收益的定位不同：
 
