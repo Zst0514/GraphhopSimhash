@@ -3,6 +3,7 @@ from itertools import combinations
 
 import torch
 import torch.nn.functional as F
+from tqdm import tqdm
 
 from .features import _compute_neighbor_mean
 from .projections import build_hash_random_matrix
@@ -1225,7 +1226,14 @@ class PaperHashReuseController(HeatPlusPlus_NDP_Controller):
         winning_base_table_hit_counts = [0] * num_nodes
         indices_compute = []
 
-        for node_idx in range(num_nodes):
+        query_iter = tqdm(
+            range(num_nodes),
+            desc="[Adaptive] Query",
+            unit="node",
+            mininterval=5.0,
+            dynamic_ncols=True,
+        )
+        for node_idx in query_iter:
             query_hashes = [route_hashes[node_idx] for route_hashes in all_hashes]
             allowed_r = self.node_policies[node_idx].item()
 
