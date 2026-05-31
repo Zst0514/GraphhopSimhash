@@ -491,11 +491,7 @@ def _build_class_accept_targets(data, pair_tensors, split):
         return torch.ones(node_indices.numel(), 1, dtype=torch.float32, device=device), 0, 0
 
     targets = torch.ones(node_indices.numel(), 1, dtype=torch.float32, device=device)
-<<<<<<< HEAD
-    same_label = labels[node_indices[label_known]] == labels[safe_sources[label_known]]
-=======
     same_label = labels[node_indices[label_known]] == labels[source_ids[label_known]]
->>>>>>> e4c8ad7 (update)
     targets[label_known, 0] = same_label.to(dtype=torch.float32)
     labelled = int(label_known.sum().item())
     positives = int(same_label.sum().item())
