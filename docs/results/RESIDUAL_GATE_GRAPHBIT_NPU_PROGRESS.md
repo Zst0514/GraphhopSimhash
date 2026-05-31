@@ -195,48 +195,6 @@ support < 3    -> compute
 | PubMed | SoftDirectReuse | 42.3% | 4.48% |
 | PubMed | ResidualReuse | 42.3% | 1.96% |
 
-解释：
-
-```text
-Cora:
-    soft hit 相对干净。
-    residual 主要负责在相同 reuse 下拉回精度。
-
-PubMed:
-    soft hit 更脏。
-    在相同 accepted reuse 下，
-    residual correction 将 drop 从 4.48% 拉回到 1.96%。
-```
-
-需要注意的 target 对齐问题：
-
-```text
-ST oracle 纠错后，严格 T31 共享配置尚未完全恢复到
-“Cora/PubMed 同时 40%+ reuse 且 2% 内 drop”。
-
-Llama2-7B W4A16 旧日志显示该方向可行，
-但需要在当前代码和当前 target pool 下重新复核。
-```
-
-因此 residual-gate 的机制已经跑通；不同 encoder backend 下需要使用各自的目标 embedding 训练和评估 residual adapter。
-
-Residual-gate 的几个边界也需要明确：
-
-```text
-1. 它不是 zero-calibration。
-   需要少量目标 encoder embedding 作为离线校准样本。
-   当前实验中的 train pairs 是几百级别，不是全图预编码。
-
-2. 它是 backend-specific。
-   ST 的 residual MLP 只能服务 ST embedding 空间；
-   LLaMA-7B 的 residual MLP 需要用 LLaMA-7B embedding 重新训练。
-
-3. 它解决的是 fuzzy bucket 的质量控制。
-   SoftDirectReuse 在 PubMed 上 drop 明显变大，
-   说明 support=3..4 不能只做 anchor 直用；
-   accept gate 的作用是把 fuzzy match 从“直接全收”变成“可控复用”。
-```
-
 ---
 
 ## 2. Graph-Bit Variable-Depth NPU Unit
