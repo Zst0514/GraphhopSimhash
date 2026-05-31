@@ -56,6 +56,27 @@ output/onnxim_graphbit/llama_roofline_p8_m16_m128/llama_roofline_components.tsv
 output/onnxim_graphbit/llama_roofline_p8_m16_m128/llama_roofline_layers.tsv
 ```
 
+绘图命令：
+
+```bash
+cd /home/zhangshangtong/Transformer/OFA/GraphhopSimhash
+
+/home/zhangshangtong/.conda/envs/OFA/bin/python \
+  scripts/plot_llama_roofline.py \
+  --profile-dir /home/zhangshangtong/Transformer/OFA/output/onnxim_graphbit/llama_roofline_p8_m16_m128 \
+  --output docs/figures/llama_roofline_profile.png
+```
+
+生成图：
+
+```text
+docs/figures/llama_roofline_profile.png
+docs/figures/llama_roofline_profile.pdf
+docs/figures/llama_roofline_profile.svg
+```
+
+![LLaMA ONNXim roofline profile](../figures/llama_roofline_profile.png)
+
 默认 peak 参数：
 
 ```text
@@ -226,4 +247,3 @@ PEwork = ONNXim ideal matmul work / wall cycles
 ```
 
 It can exceed 100% when work is spread across cores or pipeline overlap. It is used only as a compute-exposure proxy; the theoretical roofline bound is still determined by OI and the peak compute/memory ratio.
-
