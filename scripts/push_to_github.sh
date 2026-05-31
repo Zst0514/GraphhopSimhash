@@ -4,6 +4,8 @@ set -euo pipefail
 usage() {
   cat <<'EOF'
 Usage:
+  ./push.sh "commit message"
+  ./push.sh -m "commit message"
   bash scripts/push_to_github.sh "commit message"
   bash scripts/push_to_github.sh -m "commit message"
 
@@ -12,6 +14,7 @@ Optional environment variables:
   BRANCH=<branch-name>   Branch to push. Defaults to current branch.
 
 Examples:
+  ./push.sh "docs: update graphbit notes"
   bash scripts/push_to_github.sh "docs: update graphbit notes"
   REMOTE=origin BRANCH=main bash scripts/push_to_github.sh -m "feat: add script"
 EOF

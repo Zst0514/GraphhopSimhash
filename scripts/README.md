@@ -68,6 +68,10 @@ push_to_github.sh
 用法：
 
 ```bash
+cd ~/Transformer/OFA/GraphhopSimhash
+./push.sh "docs: update graphbit notes"
+
+# 或者直接调用底层脚本
 bash GraphhopSimhash/scripts/push_to_github.sh "docs: update graphbit notes"
 ```
 
