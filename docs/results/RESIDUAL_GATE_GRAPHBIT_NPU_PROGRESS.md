@@ -92,12 +92,15 @@ SimHash/CAM 前端会产生三类结果：
 ```text
 exact / high-confidence hit:
     锚点和目标节点高度相似，可以直接复用 embedding。
+    当前主线参数下对应 8 个 hash head 中 support >= 5。
 
 fuzzy / medium-confidence hit:
     CAM 找到了相近锚点，但直接复用有误差风险。
+    当前主线参数下对应 support = 3..4。
 
 miss / rejected hit:
     复用不可靠，需要重新运行 encoder。
+    当前主线参数下对应 support < 3，或 residual accept gate 拒绝。
 ```
 
 仅使用 direct reuse 时，fuzzy hit 是主要矛盾：
