@@ -556,7 +556,7 @@ python GraphhopSimhash/scripts/model_graphbit_activity_breakdown.py \
     A-depth 才会变成明显 latency 收益。
 ```
 
-### 7.1 Roofline sensitivity
+### 7.1 Roofline sensitivity 不是实际结果
 
 为排查这个问题，新增了 cycles sensitivity 诊断：
 
@@ -574,18 +574,79 @@ output/onnxim_graphbit/cycle_sensitivity/measured_components.tsv
 output/onnxim_graphbit/cycle_sensitivity/roofline_sensitivity.tsv
 ```
 
-关键结果：
+注意：这里的 `memory_scale` 不是实际实验配置，也不是默认硬件假设。它只用于回答一个诊断问题：
+
+```text
+在什么条件下，A bit-depth 的减少会从“activity/energy saving”
+变成真正的 wall-cycle latency saving？
+```
+
+实际结果仍然以 ONNXim 当前 measured wall cycles 为准：
 
 ```text
 ws_b32:
-    memory path 仍保持当前水平时，P6/P5 latency save 约 0。
-    memory path 压到约 15% 以下后，P6/P5 开始出现 20%+ latency save。
+    P6 cycles / P8 cycles = 0.999
+    P5 cycles / P8 cycles = 0.998
 
 ws_b64:
-    memory path 压到约 20% 左右后，P6/P5 开始出现明显 latency save。
+    P6 cycles / P8 cycles = 0.997
+    P5 cycles / P8 cycles = 0.996
 ```
 
-这给出当前更精确的定位：
+也就是说，在当前 ONNXim component 实测下，mixed-depth 几乎没有带来 latency saving。
+
+`15% / 20%` 这类数字来自临界点计算，而不是人为设定的性能结果。计算方式是：
+
+```text
+P8 wall cycles = C_p8
+P8 exposed PE active path = A_p8
+
+如果 memory/fixed path M >= A_p8:
+    P8/P6/P5 都被 memory/fixed path 盖住，depth 不影响 latency。
+
+如果 M < A_p8:
+    P8 开始暴露 PE critical path。
+
+如果 M < A_p8 * depth / 8:
+    对应 depth 才能完整暴露 latency saving。
+```
+
+当前实测组件：
+
+```text
+ws_b32:
+    C_p8 = 20,067,168
+    A_p8 = 3,818,496
+    A_p8 / C_p8 = 19.0%
+    P6 compute path / C_p8 = 14.3%
+    P5 compute path / C_p8 = 11.9%
+
+ws_b64:
+    C_p8 = 15,135,552
+    A_p8 = 3,818,496
+    A_p8 / C_p8 = 25.2%
+    P6 compute path / C_p8 = 18.9%
+    P5 compute path / C_p8 = 15.8%
+```
+
+所以更准确的说法是：
+
+```text
+ws_b32:
+    只有当 memory/fixed path 已经低到约 19% 以下时，
+    bit-depth 才开始影响 latency；
+    要让 P6 接近完整 25% latency save，
+    memory/fixed path 还要低到约 14% 以下。
+
+ws_b64:
+    因为 W path 已经更小，PE path 占比更高；
+    memory/fixed path 低到约 25% 以下时，
+    bit-depth 开始影响 latency。
+```
+
+这个 sensitivity 的用途是解释瓶颈，不是给主表制造收益。主表应继续报告当前 measured/replayed cycles。
+
+因此当前更精确的定位是：
 
 ```text
 W-stationary risk-bucket:
