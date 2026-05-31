@@ -250,7 +250,69 @@ GraphhopSimhash 不追求“完全相同”，而是要找“足够相似”的�
 
 ---
 
-## 10. 一句话总结
+## 10. 频率估算与工艺边界
+
+Garzón 等人的 HD-CAM 论文给出的硅片基线是：
+
+```text
+128-kbit approximate-search CAM
+65nm CMOS
+64bit query / CAM word 量级
+最高测试频率 125MHz
+```
+
+这个结果可以作为我们的硬件外推锚点，但不能直接当成 GraphhopSimhash 的实测频率。原因是我们的前端不是单个长 word，而是：
+
+```text
+8 个并行 HD-CAM bank
+每个 bank 只做 16bit/head
+每个 head 的汉明距离阈值 R = 2
+```
+
+从 match line 物理行为看，16bit/head 比 64bit word 更容易跑高频：
+
+```text
+word 从 64bit 缩到 16bit
+-> 单条 match line 上挂载的 bitcell 数量约降到 1/4
+-> C_ML 显著下降
+-> precharge / evaluation 的 RC 延迟下降
+-> 允许更短搜索周期
+```
+
+`R = 2` 也是比较自然的阈值选择：
+
+```text
+16bit 下 HD = 2  -> 2 / 16 = 12.5%
+64bit 下 HD = 8  -> 8 / 64 = 12.5%
+```
+
+也就是说，16bit/head, R=2 保留了和 64bit, R=8 类似的相对容错比例，同时把每条 match line 的负载大幅缩短。工程上可以把它理解成“更短的模拟判决线 + 合理的 HD 感测裕度”。
+
+在没有重新版图和 SPICE/PVT 仿真的情况下，本文只采用如下估算口径：
+
+| 设计点 | 频率结论 | 说明 |
+|---|---:|---|
+| 65nm, 64bit HD-CAM | 125MHz | Garzón 等人的硅片实测基线 |
+| 65nm, 16bit/head, R=2 | 300-500MHz | 基于 match line 负载下降的工程外推 |
+| 28nm, 16bit/head, R=2 | 0.8-1.5GHz | 同时考虑短 word 和工艺缩放后的工程外推 |
+
+因此，如果把 GraphhopSimhash 的 HD-CAM 前端实现为 28nm 下的 `8 x 16bit` bank，并采用 `R=2`，那么把系统级仿真频率设在 `1GHz` 是一个合理但仍偏模型化的假设。它不是硅片实测结论，正式论文中应写成：
+
+```text
+We use a 1GHz HD-CAM frontend frequency as a technology-scaled modeling assumption
+for a 28nm 8x16-bit multi-head design. This is extrapolated from the 65nm
+64-bit HD-CAM silicon baseline, not measured silicon.
+```
+
+边界也要明确：
+
+- 最高频率最终取决于版图后的 `C_ML`、search-line driver、MLSA、precharge、电源电压和 PVT corner。
+- `16bit, R=2` 的 false match / false miss 需要用 Monte Carlo 和 extracted parasitics 验证。
+- 本文可以 claim `16bit/head 降低 match-line 负载并支持更高频建模`，不要 claim `28nm 实测达到 1GHz`。
+
+---
+
+## 11. 一句话总结
 
 我们这里的 HD-CAM 设计可以概括成一句话：
 
@@ -258,3 +320,9 @@ GraphhopSimhash 不追求“完全相同”，而是要找“足够相似”的�
 把普通 CAM 的“完全相同才命中”，改成“match line 放电速度反映汉明距离”，
 再让 8 个 16bit head 并行搜索，最后通过 support 聚合决定 direct / residual / compute。
 ```
+
+---
+
+## 12. 参考文献
+
+Garzón E, Rechef E, Golman R, et al. A 128-kbit Approximate Search-Capable Content-Addressable Memory (CAM) With Tunable Hamming Distance[J]. IEEE Journal of Solid-State Circuits, 2025, 60(8): 3009-3019.
