@@ -32,7 +32,84 @@ gate_accept_threshold = 0.575
 docs/results/SHARED_ONLINE_RESIDUAL_REUSE_RESULT.md
 ```
 
-## 2. Cora Graph-Bit Trace-Driven Hardware Replay
+## 2. Cora/LLaMA T31 Full-Stack Trace Replay
+
+本节把当前 T31 shared retrieval 前端接入 Graph-Bit full-stack：
+
+```text
+Front-end:
+    h8_53_T31
+    hard direct: support >= 5
+    residual:    support = 3..4
+    compute:     support < 3
+
+Graph-Bit:
+    Degree priority
+    predictor-free runtime bound
+    high/mid/low min depth = 8 / 6 / 4
+    high/mid/low tolerance = 0.00 / 0.02 / 0.04
+
+Output:
+    output/graphbit_trace_replay/cora_h8_53_T31_t31/
+```
+
+3-run accuracy profile:
+
+| Config | Reuse | Direct | Residual | P8 | P6 | P5 | P4 | Cost | Acc | Drop | FinalErr |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| FullP8 | 52.4% | 17.8% | 34.6% | 47.6% | 0.0% | 0.0% | 0.0% | 0.240 | 0.7012 | 2.77% | 0.10602 |
+| DegBound | 52.4% | 17.8% | 34.6% | 9.5% | 23.8% | 14.3% | 0.0% | 0.192 | 0.6908 | 3.80% | 0.10950 |
+
+Seed-42 trace-driven hardware replay, normalized to all graph nodes running FullP8:
+
+| Method | Reuse | Miss | Cycles | Traffic | Energy | Drop | AvgDepth | Wloads | Wscale |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| FullP8-miss | 52.4% | 47.6% | 0.476 | 0.476 | 0.476 | 2.77% | 8.00 | 81 | 1.000 |
+| GraphBit-now | 52.4% | 47.6% | 0.471 | 0.474 | 0.473 | 3.80% | 6.10 | 81 | 1.000 |
+| FullP8-bucket-b32 | 52.4% | 47.6% | 0.254 | 0.243 | 0.248 | 2.77% | 8.00 | 41 | 0.506 |
+| RiskBucket-b32 | 52.4% | 47.6% | 0.253 | 0.241 | 0.247 | 3.80% | 6.10 | 43 | 0.531 |
+| FullP8-bucket-b64 | 52.4% | 47.6% | 0.191 | 0.126 | 0.159 | 2.77% | 8.00 | 21 | 0.259 |
+| RiskBucket-b64 | 52.4% | 47.6% | 0.191 | 0.124 | 0.158 | 3.80% | 6.10 | 23 | 0.284 |
+
+解读：
+
+```text
+T31 front-end:
+    reuse 很高，但 LLaMA 下 FullP8-miss 已有 2.77% drop。
+
+DegBound:
+    把 miss-node 平均 depth 从 8.00 降到 6.10，
+    但额外 drop 到 3.80%。
+
+Bucket replay:
+    b32/b64 的主要收益仍来自 W-stationary bucket batching。
+    RiskBucket 与 FullP8-bucket 的 cycles 接近，说明 mixed-depth 在当前 ONNXim component model 里主要体现为片上 activity/energy 潜力，而不是直接 latency 主收益。
+```
+
+Bit-depth-sensitive activity breakdown：
+
+| Compare | ONNX Cycles Save | Activity Cycles Save | Activity Energy Save | PE/W_RF/Psum Save | Extra Drop |
+|---|---:|---:|---:|---:|---:|
+| RiskBucket-b32 vs FullP8-bucket-b32 | 0.1% | 11.0% | 15.0% | 23.7% | +1.03% |
+| RiskBucket-b64 vs FullP8-bucket-b64 | 0.3% | 13.1% | 16.4% | 23.7% | +1.03% |
+
+相关输出：
+
+```text
+output/graphbit_trace_replay/cora_h8_53_T31_t31/summary.txt
+output/graphbit_trace_replay/cora_h8_53_T31_t31/predictor_free_main.txt
+output/graphbit_trace_replay/cora_h8_53_T31_t31/replay/cora_seed42_DegBound_trace_replay.txt
+output/graphbit_trace_replay/cora_h8_53_T31_t31/activity_breakdown/graphbit_activity_breakdown.txt
+```
+
+复现命令：
+
+```bash
+cd /home/zhangshangtong/Transformer/OFA
+RUNS=3 DATASET=cora bash GraphhopSimhash/scripts/run_graphbit_trace_replay.sh
+```
+
+## 3. Historical Cora Graph-Bit Trace-Driven Hardware Replay
 
 当前 Graph-Bit full-stack 结果固定：
 
@@ -145,7 +222,7 @@ mixed-depth predictor-free early stop:
 docs/npu/GRAPH_BIT_FULLSTACK_REPRODUCTION_GUIDE.md
 ```
 
-## 3. 当前结论
+## 4. 当前结论
 
 主线结论分两层：
 

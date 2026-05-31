@@ -21,7 +21,7 @@ docs/npu/GRAPH_BIT_EARLY_STOP_IMPLEMENTATION.md
 
 ## 1. 当前主线实验是什么
 
-默认主线是：
+默认主线是当前 T31 shared retrieval 前端：
 
 ```text
 Dataset:
@@ -38,8 +38,8 @@ Front-end reuse:
 
 Residual split:
     hard direct reuse: support >= 5
-    residual reuse:    support == 4
-    compute/miss:      support < 4
+    residual reuse:    support = 3..4
+    compute/miss:      support < 3
 
 Graph-Bit:
     miss nodes only
@@ -56,7 +56,7 @@ Trace replay:
 这套配置的短名：
 
 ```text
-cora_h8_54_T40
+cora_h8_53_T31
 ```
 
 含义：
@@ -65,11 +65,24 @@ cora_h8_54_T40
 h8:
     8 hash heads
 
-54:
-    hard>=5, soft=4
+53:
+    hard>=5, soft=3..4
 
-T40:
-    score_reuse_threshold = 40
+T31:
+    score_reuse_threshold = 31
+```
+
+当前一键命令：
+
+```bash
+cd /home/zhangshangtong/Transformer/OFA
+RUNS=3 DATASET=cora bash GraphhopSimhash/scripts/run_graphbit_trace_replay.sh
+```
+
+默认输出目录：
+
+```text
+output/graphbit_trace_replay/cora_h8_53_T31_t31/
 ```
 
 ## 2. 输入文件要求
@@ -138,7 +151,7 @@ p8_ws_b64/ p6_ws_b64/ p5_ws_b64/ p4_ws_b64/
 ```bash
 cd /home/zhangshangtong/Transformer/OFA
 
-bash GraphhopSimhash/scripts/run_graphbit_trace_replay.sh
+RUNS=3 DATASET=cora bash GraphhopSimhash/scripts/run_graphbit_trace_replay.sh
 ```
 
 默认会做两件事：
@@ -151,31 +164,31 @@ bash GraphhopSimhash/scripts/run_graphbit_trace_replay.sh
 默认输出目录：
 
 ```text
-output/graphbit_trace_replay/cora_h8_54_T40_quick
+output/graphbit_trace_replay/cora_h8_53_T31_t31
 ```
 
-如果使用当前文档里的 boundclean quick 目录，可以显式指定：
+如果要显式指定当前 T31 配置：
 
 ```bash
 cd /home/zhangshangtong/Transformer/OFA
 
-RUNS=1 \
+RUNS=3 \
 DATASET=cora \
-THRESHOLD=40 \
+THRESHOLD=31 \
 HARD_SUPPORT=5 \
-SOFT_SUPPORT=4 \
-FRONTEND_ID=h8_54_T40 \
-OUT_DIR=output/graphbit_trace_replay/cora_h8_54_T40_boundclean_quick \
+SOFT_SUPPORT=3 \
+FRONTEND_ID=h8_53_T31 \
+OUT_DIR=output/graphbit_trace_replay/cora_h8_53_T31_t31 \
 bash GraphhopSimhash/scripts/run_graphbit_trace_replay.sh
 ```
 
 主要输出：
 
 ```text
-output/graphbit_trace_replay/cora_h8_54_T40_boundclean_quick/node_traces/cora_seed42_DegBound.jsonl
-output/graphbit_trace_replay/cora_h8_54_T40_boundclean_quick/predictor_free_main.txt
-output/graphbit_trace_replay/cora_h8_54_T40_boundclean_quick/replay/cora_seed42_DegBound_trace_replay.txt
-output/graphbit_trace_replay/cora_h8_54_T40_boundclean_quick/replay/cora_seed42_DegBound_component_lookup.tsv
+output/graphbit_trace_replay/cora_h8_53_T31_t31/node_traces/cora_seed42_DegBound.jsonl
+output/graphbit_trace_replay/cora_h8_53_T31_t31/predictor_free_main.txt
+output/graphbit_trace_replay/cora_h8_53_T31_t31/replay/cora_seed42_DegBound_trace_replay.txt
+output/graphbit_trace_replay/cora_h8_53_T31_t31/replay/cora_seed42_DegBound_component_lookup.tsv
 ```
 
 如果要查看 bit-depth-sensitive 的片上活动分解，可继续运行：
@@ -185,8 +198,8 @@ cd /home/zhangshangtong/Transformer/OFA
 
 /home/zhangshangtong/.conda/envs/OFA/bin/python \
   GraphhopSimhash/scripts/model_graphbit_activity_breakdown.py \
-  --replay-json output/graphbit_trace_replay/cora_h8_54_T40_boundclean_quick/replay/cora_seed42_DegBound_trace_replay.json \
-  --output-dir output/graphbit_trace_replay/cora_h8_54_T40_boundclean_quick/activity_breakdown
+  --replay-json output/graphbit_trace_replay/cora_h8_53_T31_t31/replay/cora_seed42_DegBound_trace_replay.json \
+  --output-dir output/graphbit_trace_replay/cora_h8_53_T31_t31/activity_breakdown
 ```
 
 输出：
@@ -327,11 +340,11 @@ cd /home/zhangshangtong/Transformer/OFA
 
 /home/zhangshangtong/.conda/envs/OFA/bin/python \
   GraphhopSimhash/scripts/replay_graphbit_trace_scheduler.py \
-  --trace output/graphbit_trace_replay/cora_h8_54_T40_boundclean_quick/node_traces/cora_seed42_DegBound.jsonl \
+  --trace output/graphbit_trace_replay/cora_h8_53_T31_t31/node_traces/cora_seed42_DegBound.jsonl \
   --components-root output/onnxim_graphbit/risk_bucket_components_s8 \
-  --output-dir output/graphbit_trace_replay/cora_h8_54_T40_boundclean_quick/replay \
-  --fullp8-drop-percent 0.77 \
-  --drop-percent 2.13 \
+  --output-dir output/graphbit_trace_replay/cora_h8_53_T31_t31/replay \
+  --fullp8-drop-percent 2.77 \
+  --drop-percent 3.80 \
   --baseline-tile-batch 16 \
   --candidate-batches 32 64
 ```
@@ -339,10 +352,10 @@ cd /home/zhangshangtong/Transformer/OFA
 输出：
 
 ```text
-output/graphbit_trace_replay/cora_h8_54_T40_boundclean_quick/replay/cora_seed42_DegBound_trace_replay.txt
-output/graphbit_trace_replay/cora_h8_54_T40_boundclean_quick/replay/cora_seed42_DegBound_trace_replay.tsv
-output/graphbit_trace_replay/cora_h8_54_T40_boundclean_quick/replay/cora_seed42_DegBound_trace_replay.json
-output/graphbit_trace_replay/cora_h8_54_T40_boundclean_quick/replay/cora_seed42_DegBound_component_lookup.tsv
+output/graphbit_trace_replay/cora_h8_53_T31_t31/replay/cora_seed42_DegBound_trace_replay.txt
+output/graphbit_trace_replay/cora_h8_53_T31_t31/replay/cora_seed42_DegBound_trace_replay.tsv
+output/graphbit_trace_replay/cora_h8_53_T31_t31/replay/cora_seed42_DegBound_trace_replay.json
+output/graphbit_trace_replay/cora_h8_53_T31_t31/replay/cora_seed42_DegBound_component_lookup.tsv
 ```
 
 注意：
@@ -370,9 +383,9 @@ THRESHOLD
 示例：
 
 ```bash
-THRESHOLD=35 FRONTEND_ID=h8_54_T35 ...
-THRESHOLD=40 FRONTEND_ID=h8_54_T40 ...
-THRESHOLD=45 FRONTEND_ID=h8_54_T45 ...
+THRESHOLD=30 FRONTEND_ID=h8_53_T30 ...
+THRESHOLD=31 FRONTEND_ID=h8_53_T31 ...
+THRESHOLD=35 FRONTEND_ID=h8_53_T35 ...
 ```
 
 影响：
@@ -406,7 +419,7 @@ SOFT_SUPPORT
 
 ```text
 HARD_SUPPORT=5
-SOFT_SUPPORT=4
+SOFT_SUPPORT=3
 ```
 
 含义：
@@ -415,19 +428,19 @@ SOFT_SUPPORT=4
 support >= 5:
     hard direct reuse
 
-support == 4:
+support = 3..4:
     residual correction
 
-support < 4:
+support < 3:
     compute / Graph-Bit miss
 ```
 
 示例：
 
 ```bash
+HARD_SUPPORT=5 SOFT_SUPPORT=3 FRONTEND_ID=h8_53_T31
 HARD_SUPPORT=5 SOFT_SUPPORT=4 FRONTEND_ID=h8_54_T40
 HARD_SUPPORT=6 SOFT_SUPPORT=4 FRONTEND_ID=h8_64_T40
-HARD_SUPPORT=4 SOFT_SUPPORT=3 FRONTEND_ID=h8_43_T40
 ```
 
 影响：
