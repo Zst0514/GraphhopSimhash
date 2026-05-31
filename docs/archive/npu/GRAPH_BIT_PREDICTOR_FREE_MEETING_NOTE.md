@@ -296,7 +296,7 @@ NPU 执行一个 risk bucket 时：
 
 7. if true:
        stop issuing lower bit-planes
-       gate A_RF / W_RF / PE / psum update
+       gate A_RF / PE / psum update
    else:
        continue next lower bit-plane
 ```
@@ -320,7 +320,7 @@ Comparator:
     bound <= tolerance
 
 Gating logic:
-    disables low-bit PE issue, RF access, W broadcast, psum update
+    disables low-bit PE issue, RF access, psum update
 ```
 
 ## 8. Bound Estimator 流水重叠

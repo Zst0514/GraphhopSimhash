@@ -250,8 +250,7 @@ tile scheduling overhead
 ```text
 1. activation plane-group demand fetch
 2. bit-plane issue gating
-3. weight RF / broadcast gating
-4. partial-sum update gating
+3. partial-sum update gating
 ```
 
 ### 4.1 Activation Demand Fetch
@@ -302,7 +301,6 @@ if bound_satisfied:
 
 ```text
 PE cycles
-weight RF/broadcast cycles
 psum update cycles
 ```
 
@@ -312,7 +310,6 @@ psum update cycles
 
 ```text
 低位 activation plane 不发射
-对应的 W RF read / broadcast 也不发生
 ```
 
 这主要减少片上访问和广播能耗。

@@ -702,7 +702,7 @@ SEQ_LEN=8 bash GraphhopSimhash/scripts/run_onnxim_graphbit_datapath_suite.sh
 ```
 
 It separates byte-major mask-only, plane-group demand fetch, risk-bucket issue
-gating, W RF/psum gating, and optional weight-stationary sensitivity.  The compact result is:
+gating, psum gating, and optional weight-stationary sensitivity.  The compact result is:
 
 ```text
 output/onnxim_graphbit/datapath_suite_s8/datapath_summary.txt

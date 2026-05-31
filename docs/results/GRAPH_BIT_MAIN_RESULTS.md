@@ -88,7 +88,7 @@ Bucket replay:
 
 Bit-depth-sensitive activity breakdown：
 
-| Compare | ONNX Cycles Save | Activity Cycles Save | Activity Energy Save | PE/W_RF/Psum Save | Extra Drop |
+| Compare | ONNX Cycles Save | Activity Cycles Save | Activity Energy Save | PE/Psum Save | Extra Drop |
 |---|---:|---:|---:|---:|---:|
 | RiskBucket-b32 vs FullP8-bucket-b32 | 0.1% | 11.0% | 15.0% | 23.7% | +1.03% |
 | RiskBucket-b64 vs FullP8-bucket-b64 | 0.3% | 13.1% | 16.4% | 23.7% | +1.03% |
@@ -185,12 +185,12 @@ output:
 该模型把每行拆成：
 
 ```text
-W_HBM, A_HBM, A_RF, PE, W_RF, Psum, Out, Scheduler
+W_HBM, A_HBM, A_RF, PE, Psum, Out, Scheduler
 ```
 
 关键结果：
 
-| Compare | ONNX Cycles Save | Activity Cycles Save | Activity Energy Save | PE/W_RF/Psum Save | Extra Drop |
+| Compare | ONNX Cycles Save | Activity Cycles Save | Activity Energy Save | PE/Psum Save | Extra Drop |
 |---|---:|---:|---:|---:|---:|
 | RiskBucket-b32 vs FullP8-bucket-b32 | 0.1% | 12.1% | 15.6% | 23.7% | +1.36% |
 | RiskBucket-b64 vs FullP8-bucket-b64 | 0.3% | 13.9% | 16.8% | 23.7% | +1.36% |
@@ -202,7 +202,7 @@ ONNX component cycles:
     当前对 P8/P6/P5 的区别不敏感，因此看不到 mixed-depth cycles 收益。
 
 activity model:
-    A_RF / PE / W_RF / Psum 随 AvgDepth/8 缩放。
+    A_RF / PE / Psum 随 AvgDepth/8 缩放。
     AvgDepth 从 8.00 降到 6.10 后，这些片上活动下降约 23.7%。
 ```
 

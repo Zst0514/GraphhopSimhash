@@ -7,7 +7,7 @@
 Graph-Bit 在 Q/K/V/O projection 和 FFN GEMM 里到底减少了哪些计算/访存？
 ```
 
-它和 full-stack GNN accuracy 表不同。这里不讨论分类准确率，只拆 NPU 内部的 GEMM row count、W HBM、activation HBM、PE bit-plane compute、RF/broadcast、psum update。
+它和 full-stack GNN accuracy 表不同。这里不讨论分类准确率，只拆 NPU 内部的 GEMM row count、W HBM、activation HBM、PE bit-plane compute、RF access、psum update。
 
 ## 1. 为什么要重新建模 M
 
@@ -155,7 +155,7 @@ W HBM read
 activation read
 output write
 PE bit-plane issue
-A_RF / W_RF activity
+A_RF activity
 partial-sum update
 bound estimator overhead
 ```
@@ -164,7 +164,6 @@ Graph-Bit mixed depth 主要影响：
 
 ```text
 PE bit-plane issue
-W_RF broadcast activity
 partial-sum update
 bound estimator overhead
 ```

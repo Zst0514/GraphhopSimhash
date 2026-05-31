@@ -244,7 +244,6 @@ The runtime bound decides the actual stop depth.
 
 ```text
 PE bit-serial MAC activity
-W RF / broadcast activity for skipped low-bit cycles
 partial-sum read / update / write
 activation-side issue activity
 ```
@@ -321,7 +320,7 @@ Graph-Bit:
 
 如果不同风险节点混在一个 micro-batch，低风险节点可能被高风险节点拖到保守执行。
 
-Graph-Bit 的额外机会来自图前端。普通 Transformer accelerator 通常只看到一批 sequence / token rows；Graph-Bit 还知道：
+Graph-Bit 的额外机会来自图前端。如果把 GFM 前端当作普通 LLM encoder batch 来执行，就会把所有节点都视为一批独立 sequence / token rows，从而忽略图任务已经给出的结构信息。Graph-Bit 显式利用这些信息：
 
 ```text
 1. 哪些节点已经被 SimHash/CAM 或 residual reuse 过滤掉；

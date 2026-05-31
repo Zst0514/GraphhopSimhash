@@ -451,7 +451,6 @@ graphbit_bound_tolerance
 graphbit_bound_scale
 graphbit_bound_mode
 graphbit_issue_gate
-graphbit_weight_rf_gate
 graphbit_psum_gate
 graphbit_risk_bucket_enable
 graphbit_weight_stationary_enable
@@ -530,7 +529,7 @@ return config_depth
 inst.graphbit_effective_depth
 ```
 
-### 6.4 effective / issue / weight / psum 四个 depth
+### 6.4 effective / issue / psum 三个 depth
 
 一个 instruction 会被标注多个 depth：
 
@@ -541,9 +540,6 @@ effective_depth:
 issue_depth:
     PE array 实际发射的 bit-plane cycles。
 
-weight_depth:
-    weight RF / broadcast 在多少 bit-plane cycle 中被访问。
-
 psum_depth:
     partial-sum read/update/write 在多少 bit-plane cycle 中发生。
 ```
@@ -552,7 +548,6 @@ psum_depth:
 
 ```text
 graphbit_issue_depth(...)
-graphbit_weight_depth(...)
 graphbit_psum_depth(...)
 ```
 
@@ -578,24 +573,6 @@ issue_depth = 8
 ```
 
 这表示如果没有 risk bucket，mixed batch 可能被高风险节点拖到 full depth。
-
-#### weight RF / broadcast
-
-如果开启：
-
-```text
-graphbit_weight_rf_gate = true
-```
-
-则：
-
-```text
-weight_depth = issue_depth
-```
-
-含义是低位 bit-plane 不发射后，对应周期内不需要 weight RF read / broadcast。
-
-注意：这不自动减少 HBM weight read。HBM weight read 是否下降取决于 weight-stationary tile scheduling。
 
 #### psum update
 
@@ -652,7 +629,6 @@ graphbit_weight_stationary_enable = true
 ```text
 graphbit_effective_depth
 graphbit_issue_depth
-graphbit_weight_depth
 graphbit_psum_depth
 graphbit_remaining_bound
 graphbit_weight_hbm_scale
@@ -666,7 +642,6 @@ BoundStops
 AvgDepth
 AvgSavedBitplanes
 AvgIssueDepth
-AvgWeightDepth
 AvgPsumDepth
 EffectiveDepthHist
 IssueDepthHist
@@ -857,7 +832,7 @@ GraphhopSimhash accuracy validation
 ```text
 1. 哪些节点进入 encoder？
 2. miss nodes 算到几 bit？
-3. activation fetch / issue / psum / weight RF 是否随 stop depth 变化？
+3. activation fetch / issue / psum 是否随 stop depth 变化？
 4. risk-bucket scheduler 是否在真实节点 trace 上形成更大的 W tile service window？
 ```
 

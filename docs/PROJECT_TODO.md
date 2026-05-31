@@ -296,7 +296,7 @@ psum update event
 ```text
 HBM read/write energy
 SRAM read/write energy
-RF/broadcast energy
+RF access energy
 MAC energy per bit-plane
 psum update energy
 ```

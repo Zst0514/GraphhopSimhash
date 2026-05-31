@@ -159,7 +159,7 @@
 
   <rect x="80" y="625" width="560" height="76" class="save"/>
   <text x="100" y="650" class="label">真实收益来自同步跳过：</text>
-  <text x="100" y="675" class="small">low-bit fetch / RF access / PE issue / W broadcast cycle / psum update</text>
+  <text x="100" y="675" class="small">low-bit fetch / RF access / PE issue / psum update</text>
 
   <!-- W tile reuse row -->
   <rect x="45" y="780" width="1400" height="145" class="box"/>

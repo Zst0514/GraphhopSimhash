@@ -333,7 +333,7 @@ output/.../activity_breakdown/graphbit_activity_breakdown.json
 它会把每个方法拆成：
 
 ```text
-W_HBM / A_HBM / A_RF / PE / W_RF / Psum / Out / Scheduler
+W_HBM / A_HBM / A_RF / PE / Psum / Out / Scheduler
 ```
 
 用于判断 mixed-depth 相比 FullP8-bucket 是否真的减少片上活动。
@@ -888,7 +888,7 @@ RiskBucket 的 AvgD 更低，但 accuracy drop 更高。
 
 用 `model_graphbit_activity_breakdown.py` 对同一 replay JSON 做片上活动拆分：
 
-| Compare | ONNX-C Save | Activity-C Save | Activity-E Save | PE/W_RF/Psum Save | Extra Drop |
+| Compare | ONNX-C Save | Activity-C Save | Activity-E Save | PE/Psum Save | Extra Drop |
 |---|---:|---:|---:|---:|---:|
 | RiskBucket-b32 vs FullP8-bucket-b32 | 0.1% | 12.1% | 15.6% | 23.7% | +1.36% |
 | RiskBucket-b64 vs FullP8-bucket-b64 | 0.3% | 13.9% | 16.8% | 23.7% | +1.36% |
@@ -900,7 +900,7 @@ ONNX cycles:
     目前主要反映 W tile batching，对 P8/P6/P5 depth 不敏感。
 
 activity model:
-    mixed-depth 能明确减少 PE issue、W RF/broadcast 和 psum update。
+    mixed-depth 能明确减少 PE issue 和 psum update。
 ```
 
 所以当前结论是：

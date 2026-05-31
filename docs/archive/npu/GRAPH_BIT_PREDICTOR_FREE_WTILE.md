@@ -113,7 +113,6 @@ tile_scale:
 ```text
 skip low-bit PE issue cycles
 skip low-bit MAC activity
-skip low-bit weight RF / broadcast cycles
 skip low-bit partial-sum update
 ```
 
@@ -121,7 +120,7 @@ skip low-bit partial-sum update
 
 ```text
 PE bit-plane work
-RF / broadcast activity
+RF activity
 partial-sum read/update/write
 energy proxy
 ```
@@ -305,7 +304,7 @@ predictor-free mixed depth:
 
 bit-depth-sensitive activity breakdown：
 
-| Compare | Activity-C Save | Activity-E Save | PE/W_RF/Psum Save | Extra Drop |
+| Compare | Activity-C Save | Activity-E Save | PE/Psum Save | Extra Drop |
 |---|---:|---:|---:|---:|
 | RiskBucket-b32 vs FullP8-bucket-b32 | 12.1% | 15.6% | 23.7% | +1.36% |
 | RiskBucket-b64 vs FullP8-bucket-b64 | 13.9% | 16.8% | 23.7% | +1.36% |

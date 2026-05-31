@@ -514,14 +514,14 @@ for each layer:
 
 ```text
 1. variable activation depth:
-   减少 PE MAC、W RF broadcast、psum update 等片上活动。
+   减少 PE MAC、psum update 等片上活动。
 
 2. risk-bucket W-stationary scheduling:
    让同风险 miss nodes 连续消费同一个 W tile，
    减少 W tile reload。
 ```
 
-第二点是 Graph-Bit 相对普通 Transformer accelerator 的关键机会。普通 Transformer accelerator 通常只看到一批独立 sequence / token rows，不知道哪些节点在图任务里是高风险、低风险，也不知道哪些节点已经被 SimHash / CAM 前端过滤掉。Graph-Bit 的前端会产生额外的图任务信息：
+第二点是 Graph-Bit 相对普通 Transformer accelerator 的关键机会。如果把 GFM 前端当作普通 LLM encoder batch 来执行，就会把所有节点都视为一批独立 sequence / token rows，从而忽略图任务已经给出的结构信息。Graph-Bit 显式利用这些信息：
 
 ```text
 reuse / residual front-end:
@@ -542,7 +542,7 @@ mid / low-risk bucket:
     更容易提前停止低位 bit-plane。
 ```
 
-所有节点本来就使用同一个 LLaMA 权重 `W`。risk bucket 不是为了让“相同风险节点才共享 W”，而是为了让 stop-depth / tolerance 相近的 token rows 连续执行。这样同一个 `W tile` 加载到片上 SRAM / RF 后，面对的是一串控制流相似的 token rows，PE issue、W RF broadcast 和 psum update 更规整，tile 可以在换出前服务更多 rows。这个机会来自图前端提供的 risk / reuse 信息，不是普通无图 Transformer batch 自然具备的信号。
+所有节点本来就使用同一个 LLaMA 权重 `W`。risk bucket 不是为了让“相同风险节点才共享 W”，而是为了让 stop-depth / tolerance 相近的 token rows 连续执行。这样同一个 `W tile` 加载到片上 SRAM / RF 后，面对的是一串控制流相似的 token rows，PE issue 和 psum update 更规整，tile 可以在换出前服务更多 rows。这个机会来自图前端提供的 risk / reuse 信息，不是普通无图 Transformer batch 自然具备的信号。
 
 这里的 `b16 / b32 / b64` 表示 W tile 的 service window，不是 bit-width：
 
@@ -565,7 +565,7 @@ service window 越大，单个 W tile 的 HBM 读取越能被更多 token rows �
 variable activation depth:
     同一 risk bucket 内的节点使用相近 min_depth / tolerance。
     低风险节点更早停止低位 bit-plane，
-    减少 PE MAC、W RF broadcast、activation RF access、
+    减少 PE MAC、activation RF access、
     partial-sum read/update/write 等片上活动。
 
 risk-bucket W-stationary scheduling:
