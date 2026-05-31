@@ -80,6 +80,18 @@ Graph-Bit 的 early stop 作用在 bit-plane 维度：
 如果 A5 已经足够，则不再执行 b2,b1,b0。
 ```
 
+当前实现状态：
+
+| 层级 | 是否已经实现 | 说明 |
+|---|---|---|
+| Accuracy validation | 是 | runtime depth 映射到已有 W4A8/W4A6/W4A5/W4A4 embedding pools，用于验证分类精度。 |
+| ONNXim compute issue | 是 | `SystolicWS.cc` 根据 `graphbit_issue_depth / graphbit_full_depth` 缩放 GEMM issue/compute cycles。 |
+| ONNXim fetch-depth model | 部分实现 | `GemmWS.cc` 生成 `graphbit_fetch_depth`；`plane_group` 模式会减少模拟的 input fetch requests。 |
+| 真实 activation bit-plane-major layout | 未完整实现 | 当前没有在真实 LLaMA encoder 中把 activation tensor 物理重排成 `plane7/plane6/...` 并重新执行整网。 |
+| RTL / Verilog | 未实现 | 当前是 ONNXim + analytical roofline + trace replay 级别建模。 |
+
+因此，上面的 `plane7/plane6/...` 是 NPU dataflow 的逻辑组织方式。当前代码已经模拟 bit-plane depth 对 compute issue、fetch depth、RF/psum activity 的影响；还没有实现完整的真实 tensor layout 转换和端到端 LLaMA bit-plane execution。
+
 ## 3. GEMM 形状
 
 Transformer Linear 层按 GEMM 建模：
