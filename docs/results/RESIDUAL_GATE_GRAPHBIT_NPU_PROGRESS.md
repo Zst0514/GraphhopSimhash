@@ -33,30 +33,19 @@ Graph-Bit NPU:
 整体数据流如下：
 
 ```mermaid
-flowchart TD
-    A[Graph text node] --> B[SimHash signature]
-    B --> C[LRU + HD-CAM lookup]
+flowchart LR
+    A[Graph text node] --> B[SimHash<br/>8 x 16-bit heads]
+    B --> C[LRU + HD-CAM<br/>anchor + support]
 
-    C --> D{CAM result}
-    D -->|high-confidence hit| E[Direct reuse]
-    D -->|fuzzy hit| F[Residual-Gate Reuse]
-    D -->|miss / reject| G[Graph-Bit NPU]
+    C -->|support >= 5| D[P0 Direct reuse<br/>cache read]
+    C -->|support = 3..4| E[P1 Residual-Gate<br/>correct or reject]
+    C -->|support < 3| F[P2 Graph-Bit NPU<br/>risk bucket + variable depth]
 
-    F --> H{Accept gate}
-    H -->|accept| I[Anchor embedding + residual correction]
-    H -->|reject| G
-
-    A --> J[Graph risk / degree / context]
-    J --> G
-
-    G --> K[Risk-bucket scheduling]
-    K --> L[W-stationary systolic array]
-    L --> M[Predictor-free variable-depth execution]
-
-    E --> N[Final embedding]
-    I --> N
-    M --> N
-    N --> O[GNN classifier]
+    E -->|accept| G[Final embedding]
+    E -->|reject| F
+    D --> G
+    F --> G
+    G --> H[GNN classifier]
 ```
 
 四个模块的作用边界：
