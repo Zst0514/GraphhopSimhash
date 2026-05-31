@@ -1,0 +1,16 @@
+{
+  "clock_mhz": 1000,
+  "radius": 2,
+  "support_threshold": 3,
+  "memo_k": 3,
+  "neighbor_lookup_lanes": 16,
+  "candidate_cam_entries": 512,
+  "exact_lookup_cycles": 1,
+  "candidate_select_cycles": 1,
+  "cache_write_cycles": 1,
+  "sram_probe_energy_pj": 0.025,
+  "candidate_cam_probe_energy_pj": 0.20,
+  "bucket_write_energy_pj": 0.08,
+  "sram_bitcell_area_um2": 0.08,
+  "bucket_pointer_bits": 32
+}

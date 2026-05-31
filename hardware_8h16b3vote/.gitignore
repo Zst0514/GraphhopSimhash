@@ -1,0 +1,6 @@
+build/
+reports/
+traces/*.trace
+*.decisions.csv
+__pycache__/
+*.pyc

@@ -232,7 +232,7 @@ class ActivationOutlierCollector:
     def finalize_first_pass(self):
         thresholds = {}
         second = {}
-        for name, stats in self.first.items():
+        for name, stats in s                                elf.first.items():
             report = stats.threshold_report(self.percentile, self.std_factor, self.min_abs_threshold)
             thresholds[name] = report["threshold_abs"]
             second[name] = SecondPassLayerStats(stats.feature_dim)

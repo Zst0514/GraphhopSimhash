@@ -343,7 +343,6 @@ def load_model_and_tokenizer(llm_name, config_name, cache_dir, force_cpu=False):
 
     kwargs = {
         "cache_dir": cache_dir,
-        "output_hidden_states": True,
     }
     if spec["model_class"] == "llama" and not force_cpu:
         kwargs["device_map"] = "auto"
@@ -377,29 +376,53 @@ def _forward_hidden_states(model, tokens):
     outputs = target_model(
         input_ids=tokens["input_ids"],
         attention_mask=tokens["attention_mask"],
-        output_hidden_states=True,
+        output_hidden_states=False,
         return_dict=True,
     )
-    hidden = outputs.hidden_states[-1].to(torch.float32)
+    if hasattr(outputs, "last_hidden_state") and outputs.last_hidden_state is not None:
+        hidden = outputs.last_hidden_state
+    elif hasattr(outputs, "hidden_states") and outputs.hidden_states is not None:
+        hidden = outputs.hidden_states[-1]
+    else:
+        hidden = outputs[0]
+    hidden = hidden.to(torch.float32)
     return torch.nan_to_num(hidden, nan=0.0, posinf=0.0, neginf=0.0)
 
 
-def encode_texts(model, tokenizer, texts, batch_size, max_length, device):
+def _encode_batch(model, tokenizer, batch, max_length, device):
+    tokens = tokenizer(
+        batch,
+        return_tensors="pt",
+        padding="longest",
+        truncation=True,
+        max_length=max_length,
+    )
+    tokens = {key: value.to(device) for key, value in tokens.items()}
+    hidden = _forward_hidden_states(model, tokens)
+    return mean_pool(hidden, tokens["attention_mask"]).cpu()
+
+
+def encode_texts(model, tokenizer, texts, batch_size, max_length, device, length_bucketed=False):
+    if length_bucketed:
+        order = sorted(range(len(texts)), key=lambda idx: len(texts[idx]))
+        output = None
+        with torch.no_grad():
+            for start in tqdm(range(0, len(order), batch_size), desc="Encoding"):
+                indices = order[start : start + batch_size]
+                batch = [texts[idx] for idx in indices]
+                embs = _encode_batch(model, tokenizer, batch, max_length, device)
+                if output is None:
+                    output = torch.empty((len(texts), embs.size(1)), dtype=embs.dtype)
+                output[indices] = embs
+        if output is None:
+            return torch.empty((0, 0), dtype=torch.float32)
+        return output
+
     all_embs = []
     with torch.no_grad():
         for start in tqdm(range(0, len(texts), batch_size), desc="Encoding"):
             batch = texts[start : start + batch_size]
-            tokens = tokenizer(
-                batch,
-                return_tensors="pt",
-                padding="longest",
-                truncation=True,
-                max_length=max_length,
-            )
-            tokens = {key: value.to(device) for key, value in tokens.items()}
-            hidden = _forward_hidden_states(model, tokens)
-            embs = mean_pool(hidden, tokens["attention_mask"]).cpu()
-            all_embs.append(embs)
+            all_embs.append(_encode_batch(model, tokenizer, batch, max_length, device))
     return torch.cat(all_embs, dim=0)
 
 
@@ -728,9 +751,10 @@ def generate_pool(dataset, llm_name, config_name, args):
     print(f"{'=' * 72}")
     texts = load_raw_texts(dataset)
     batch_size = args.batch_size
-    if llm_name.startswith("llama2") and batch_size > 4:
-        print("[Info] Reducing LLaMA batch_size to 4 to avoid OOM.")
-        batch_size = 4
+    llama_max_batch_size = int(getattr(args, "llama_max_batch_size", 4))
+    if llm_name.startswith("llama2") and batch_size > llama_max_batch_size:
+        print(f"[Info] Reducing LLaMA batch_size to {llama_max_batch_size} to avoid OOM.")
+        batch_size = llama_max_batch_size
 
     load_config_name = "fp16" if config_spec["kind"] in ("fake_wa", "awq", "awq_act") else config_name
     model, tokenizer, _tag = load_model_and_tokenizer(
@@ -757,7 +781,15 @@ def generate_pool(dataset, llm_name, config_name, args):
         calib_count = min(len(texts), int(args.w4a_calib_samples))
         if calib_count > 0:
             print(f"[FakeWA] Running calibration pass on {calib_count} node texts...")
-            _ = encode_texts(model, tokenizer, texts[:calib_count], batch_size, args.max_length, device)
+            _ = encode_texts(
+                model,
+                tokenizer,
+                texts[:calib_count],
+                batch_size,
+                args.max_length,
+                device,
+                length_bucketed=bool(getattr(args, "length_bucketed_encoding", False)),
+            )
     elif config_spec["kind"] in ("awq", "awq_act"):
         print(
             "[AWQ] Installing official llm-awq W4 weight quantization path "
@@ -789,7 +821,15 @@ def generate_pool(dataset, llm_name, config_name, args):
                 clip_config_by_name=act_clip_config,
             )
 
-    embs = encode_texts(model, tokenizer, texts, batch_size, args.max_length, device)
+    embs = encode_texts(
+        model,
+        tokenizer,
+        texts,
+        batch_size,
+        args.max_length,
+        device,
+        length_bucketed=bool(getattr(args, "length_bucketed_encoding", False)),
+    )
     embs = maybe_align_output_embeddings(embs, dataset, llm_name, tag, config_spec, out_path, args)
 
     os.makedirs(os.path.dirname(out_path) or ".", exist_ok=True)
@@ -808,6 +848,17 @@ def main():
     parser.add_argument("--llm_name", type=str, default="llama2_7b", choices=sorted(MODEL_SPECS.keys()))
     parser.add_argument("--configs", nargs="+", default=["fp16", "int8", "int4"], choices=sorted(CONFIG_SPECS.keys()))
     parser.add_argument("--batch_size", type=int, default=64)
+    parser.add_argument(
+        "--llama_max_batch_size",
+        type=int,
+        default=4,
+        help="Maximum effective batch size for llama2 models. Default preserves the previous OOM guard.",
+    )
+    parser.add_argument(
+        "--length_bucketed_encoding",
+        action="store_true",
+        help="Encode texts in approximate length order and restore the original node order to reduce padding waste.",
+    )
     parser.add_argument("--max_length", type=int, default=500)
     parser.add_argument("--cache_dir", type=str, default="cache_data/model")
     parser.add_argument("--output_path", type=str, default=None, help="Only valid with one dataset and one config.")
@@ -883,6 +934,10 @@ def main():
         parser.error("--output_path requires exactly one dataset and one config")
     if args.batch_size <= 0:
         parser.error("--batch_size must be positive")
+    if args.llama_max_batch_size <= 0:
+        parser.error("--llama_max_batch_size must be positive")
+    if args.llama_max_batch_size <= 0:
+        parser.error("--llama_max_batch_size must be positive")
     if args.max_length <= 0:
         parser.error("--max_length must be positive")
     if args.w4a_calib_samples < 0:
