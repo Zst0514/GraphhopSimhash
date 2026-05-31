@@ -660,6 +660,19 @@ normal / strong:
 
 ---
 
+### 2.8 PubMed / Arxiv 实验口径
+
+PubMed 和 Arxiv 后续按同一套 Graph-Bit 流程处理，但实验粒度不同：
+
+| Dataset | 实验目标 | 输出指标 |
+|---|---|---|
+| PubMed | 补齐 full-stack trace replay | `FullP8-miss / GraphBit-now / RiskBucket-b32 / RiskBucket-b64` 的 `Reuse / Miss / AvgDepth / Wloads / Cycles / Traffic / Energy / Drop` |
+| Arxiv | 先做 feasibility-only | `reuse/miss profile`、`risk bucket size`、`stop-depth histogram`、`Wloads/Wscale`、`SRAM feasibility` |
+
+PubMed 用来验证 Cora 上的 Graph-Bit full-stack 结果是否能迁移到更大图；Arxiv 节点规模更大，优先验证 risk bucket 是否足够大、W tile service window 是否更容易被填满。
+
+---
+
 ## 3. 当前缺口与待验证项
 
 当前机制链路已经跑通，但还需要补齐以下验证，才能形成更完整的 full-stack 证据：
@@ -679,21 +692,16 @@ PubMed/LLaMA Graph-Bit:
     需要更严格前端，避免 accepted reuse 本身带来过大 drop。
 ```
 
-### 3.2 PubMed Graph-Bit full-stack 主表
+### 3.2 PubMed / Arxiv 数据集验证
 
-Cora 已有 trace-driven replay 表；PubMed 还需要用同一口径补齐：
-
-```text
-FullP8-miss
-GraphBit-now
-RiskBucket-b32
-RiskBucket-b64
-```
-
-表中需要同时报告：
+Cora 已有 trace-driven replay 表；PubMed 和 Arxiv 后续按 2.8 的口径补齐：
 
 ```text
-Reuse / Miss / AvgDepth / Wloads / Cycles / Traffic / Energy / Drop
+PubMed:
+    full-stack trace replay
+
+Arxiv:
+    feasibility-only first
 ```
 
 ### 3.3 HEAT-like baseline
@@ -734,17 +742,3 @@ M = 2048 / 4096 / 8192 / 16384
 ```
 
 观察 large-M 下 variable activation depth 是否更明显转化为 cycles / energy 收益。
-
-### 3.5 Arxiv feasibility-only
-
-Arxiv 暂时不需要完整多 seed accuracy，但需要先做 feasibility-only：
-
-```text
-reuse / miss profile
-risk bucket size
-stop-depth histogram
-Wloads / Wscale
-SRAM feasibility
-```
-
-目标是验证大图上 risk bucket 是否更大、W tile service window 是否更容易被填满。
