@@ -452,8 +452,6 @@ graphbit_min_depth
 graphbit_bound_tolerance
 graphbit_bound_scale
 graphbit_bound_mode
-graphbit_activation_layout
-graphbit_plane_group_bits
 graphbit_issue_gate
 graphbit_weight_rf_gate
 graphbit_psum_gate
@@ -534,16 +532,13 @@ return config_depth
 inst.graphbit_effective_depth
 ```
 
-### 6.4 fetch / issue / weight / psum 四个 depth
+### 6.4 effective / issue / weight / psum 四个 depth
 
 一个 instruction 会被标注多个 depth：
 
 ```text
 effective_depth:
     runtime bound 得到的实际 stop depth。
-
-fetch_depth:
-    activation buffer 需要 demand-fetch 的 bit depth。
 
 issue_depth:
     PE array 实际发射的 bit-plane cycles。
@@ -558,43 +553,10 @@ psum_depth:
 对应函数：
 
 ```text
-graphbit_fetch_depth(...)
 graphbit_issue_depth(...)
 graphbit_weight_depth(...)
 graphbit_psum_depth(...)
 ```
-
-#### activation fetch
-
-如果 activation 是 byte-major：
-
-```text
-fetch_depth = 8
-```
-
-因为一读就是完整 A8。
-
-如果 activation 是 plane-group layout：
-
-```text
-fetch_depth = ceil(effective_depth / group_bits) * group_bits
-```
-
-例如 `group_bits=2`：
-
-```text
-effective P5 -> fetch P6
-effective P6 -> fetch P6
-effective P8 -> fetch P8
-```
-
-对应代码：
-
-```text
-make_graphbit_src_addrs(...)
-```
-
-它根据 `fetch_depth / full_depth` 缩小 activation source address 集合。
 
 #### bit-plane issue
 
@@ -691,7 +653,6 @@ graphbit_weight_stationary_enable = true
 
 ```text
 graphbit_effective_depth
-graphbit_fetch_depth
 graphbit_issue_depth
 graphbit_weight_depth
 graphbit_psum_depth
@@ -706,12 +667,10 @@ GraphBit Inst
 BoundStops
 AvgDepth
 AvgSavedBitplanes
-AvgFetchDepth
 AvgIssueDepth
 AvgWeightDepth
 AvgPsumDepth
 EffectiveDepthHist
-FetchDepthHist
 IssueDepthHist
 RawComputeCycles
 EffectiveComputeCycles

@@ -146,48 +146,30 @@ T = max(T_HBM, T_PE_bitserial)
 
 如果 `T_HBM` 占主导，A-depth 减少主要体现为片上 activity / energy；如果 `T_PE_bitserial` 占主导，A-depth 才直接变成 latency reduction。
 
-## 4. 两种 activation 读取模式
+## 4. Graph-Bit 统计项
 
-### 4.1 byte-major
-
-外部 activation 仍以普通 A8 byte 读取：
+roofline 模型把每个 GEMM 的开销拆成：
 
 ```text
-activation HBM read = A8
+W HBM read
+activation read
+output write
+PE bit-plane issue
+A_RF / W_RF activity
+partial-sum update
+bound estimator overhead
 ```
 
-即使运行时只执行到 P6/P5，低位 bit 已经被读入。此时 Graph-Bit 主要减少：
+Graph-Bit mixed depth 主要影响：
 
 ```text
 PE bit-plane issue
-A_RF access
-W_RF broadcast
-psum update
+W_RF broadcast activity
+partial-sum update
+bound estimator overhead
 ```
 
-不明显减少 activation HBM。
-
-### 4.2 plane-group
-
-activation 在 NPU 内部或 layer-fused buffer 中按 bit-plane group 组织：
-
-```text
-group0: b7 b6
-group1: b5 b4
-group2: b3 b2
-group3: b1 b0
-```
-
-如果 runtime bound 在 P5/P6 停止，则后续低位 group 不再 demand fetch。此时 Graph-Bit 同时减少：
-
-```text
-activation HBM / SRAM fetch
-PE issue
-A_RF / W_RF
-psum update
-```
-
-这一路径收益更强，但实现复杂度也更高。当前更保守的主线是先报告 `byte_major`，把 `plane_group` 作为增强设计。
+W HBM read 是否下降由 risk-bucket W-stationary scheduler 决定；这里单独分析每个 GEMM 在不同 `M=batch_nodes*seq_len` 下的 compute/memory 边界。
 
 ## 5. 复现命令
 
@@ -201,10 +183,8 @@ bash GraphhopSimhash/scripts/run_graphbit_internal_roofline.sh
 输出：
 
 ```text
-output/graphbit_internal_roofline/byte_major/graphbit_internal_roofline.txt
-output/graphbit_internal_roofline/byte_major/graphbit_internal_roofline.tsv
-output/graphbit_internal_roofline/plane_group/graphbit_internal_roofline.txt
-output/graphbit_internal_roofline/plane_group/graphbit_internal_roofline.tsv
+output/graphbit_internal_roofline/default/graphbit_internal_roofline.txt
+output/graphbit_internal_roofline/default/graphbit_internal_roofline.tsv
 ```
 
 关键参数：
@@ -221,8 +201,7 @@ bash GraphhopSimhash/scripts/run_graphbit_internal_roofline.sh
 python GraphhopSimhash/scripts/model_graphbit_internal_roofline.py \
   --batch-nodes 1 2 4 8 16 32 \
   --seq-lens 128 256 512 \
-  --activation-hbm-mode byte_major \
-  --output-dir output/graphbit_internal_roofline/byte_major
+  --output-dir output/graphbit_internal_roofline/default
 ```
 
 ## 6. 当前默认结果
@@ -239,7 +218,7 @@ QKV input read fused = true
 
 ### 6.1 Layer total
 
-`byte_major` 下的 layer total：
+layer total：
 
 | M | 对应 batch/seq 示例 | P8 Bound | P8 W% | P8 A% | P6 Cycle Save | P5 Cycle Save | P4 Cycle Save |
 |---:|---|---|---:|---:|---:|---:|---:|

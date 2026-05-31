@@ -13,7 +13,7 @@ GRAPH_BIT_DEGREE_BOUND_POLICY.md
     风险策略：Degree 如何映射到 high/mid/low bucket、min_depth、tolerance 和 runtime stop depth。
 
 GRAPH_BIT_PREDICTOR_FREE_WTILE.md
-    机制细化：predictor-free bound、activation bit-plane demand fetch、W tile 省搬运和 b32/b64 tradeoff。
+    机制细化：predictor-free bound、bit-plane issue gating、W tile 省搬运和 b32/b64 tradeoff。
 
 GRAPH_BIT_FULLSTACK_REPRODUCTION_GUIDE.md
     复现和调参：从 residual/Graph-Bit trace 导出到 ONNXim component lookup、scheduler replay、cycles 表的完整流程。
@@ -144,30 +144,9 @@ Degree / TSER / Context / LowUnique
 
 ## 4. NPU Datapath
 
-Graph-Bit 需要五个关键硬件组件。
+Graph-Bit 需要四个关键硬件组件。
 
-### 4.1 Plane-Group Activation Buffer
-
-普通 A8 byte-major layout 是：
-
-```text
-A_byte = [b7 b6 b5 b4 b3 b2 b1 b0]
-```
-
-一读就是完整 8 bit。即使 low-risk node 只需要高 5 bit，低 3 bit 也已经被读进来了。
-
-Graph-Bit 使用 plane-group-major activation buffer：
-
-```text
-Group 0: b7 b6
-Group 1: b5 b4
-Group 2: b3 b2
-Group 3: b1 b0
-```
-
-这样当 runtime bound 在 P5/P6 停止时，可以不再 demand-fetch 后续低位 plane group。
-
-### 4.2 Bit-Plane Issue Scheduler
+### 4.1 Bit-Plane Issue Scheduler
 
 PE array 不应该只是拿到完整 activation 后 mask 结果，而是从 issue 阶段停止：
 
@@ -180,12 +159,11 @@ if bound_satisfied:
 
 ```text
 PE MAC cycles
-activation plane reads
 partial-sum update
 weight RF/broadcast energy for skipped planes
 ```
 
-### 4.3 Weight-Stationary Tile Window
+### 4.2 Weight-Stationary Tile Window
 
 W4 权重 tile 仍然要服务高位 activation plane，因此 Graph-Bit 不能简单说“低位停了所以 HBM weight 少读”。要减少 weight-side traffic，需要让一个 W tile 在片上服务更多 node blocks：
 
@@ -197,9 +175,9 @@ evict W tile
 
 这要求 scheduler 按 graph risk / stop-depth 把 miss nodes 分桶，形成更大的 same-risk micro-batch。
 
-### 4.4 Partial-Sum Gating
+### 4.3 Partial-Sum Gating
 
-跳过低位 bit-plane 后，partial sum 也不再做低位更新：
+跳过低位 bit-plane 后，对应 partial sum 更新也被门控：
 
 ```text
 skip psum read
@@ -209,7 +187,7 @@ skip psum writeback
 
 这主要节省片上能耗，而不一定直接体现在 DRAM traffic。
 
-### 4.5 Risk-Bucket Scheduler
+### 4.4 Risk-Bucket Scheduler
 
 如果 high-risk 和 low-risk 节点混在同一个 micro-batch，一个 high-risk node 会把整个 batch 拖到 P8：
 

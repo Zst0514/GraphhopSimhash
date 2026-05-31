@@ -16,20 +16,10 @@ OUT_ROOT="${OUT_ROOT:-${OFA_DIR}/output/graphbit_internal_roofline}"
 
 cd "${OFA_DIR}"
 
-run_mode() {
-  local mode="$1"
-  local out_dir="${OUT_ROOT}/${mode}"
-  "${PYTHON_BIN}" "${REPO_DIR}/scripts/model_graphbit_internal_roofline.py" \
-    --batch-nodes "${BATCH_NODES[@]}" \
-    --seq-lens "${SEQ_LENS[@]}" \
-    --activation-hbm-mode "${mode}" \
-    --output-dir "${out_dir}"
-}
+"${PYTHON_BIN}" "${REPO_DIR}/scripts/model_graphbit_internal_roofline.py" \
+  --batch-nodes "${BATCH_NODES[@]}" \
+  --seq-lens "${SEQ_LENS[@]}" \
+  --output-dir "${OUT_ROOT}/default"
 
-run_mode byte_major
-run_mode plane_group
-
-echo "[GraphBitInternalRoofline] byte-major report:"
-echo "  ${OUT_ROOT}/byte_major/graphbit_internal_roofline.txt"
-echo "[GraphBitInternalRoofline] plane-group report:"
-echo "  ${OUT_ROOT}/plane_group/graphbit_internal_roofline.txt"
+echo "[GraphBitInternalRoofline] report:"
+echo "  ${OUT_ROOT}/default/graphbit_internal_roofline.txt"

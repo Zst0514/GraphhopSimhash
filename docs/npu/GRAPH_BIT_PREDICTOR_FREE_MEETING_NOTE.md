@@ -49,30 +49,6 @@ bit-serial GEMM 按 bit-plane 顺序执行：
 再按需执行低位: ..., b2, b1, b0
 ```
 
-对于一组 activation：
-
-```text
-a0 = 11010101
-a1 = 01101011
-a2 = 10011100
-a3 = 00110110
-```
-
-byte-major 表示：
-
-```text
-[a0完整8bit] [a1完整8bit] [a2完整8bit] [a3完整8bit]
-```
-
-bit-plane 表示：
-
-```text
-plane7: a0.b7 a1.b7 a2.b7 a3.b7
-plane6: a0.b6 a1.b6 a2.b6 a3.b6
-...
-plane0: a0.b0 a1.b0 a2.b0 a3.b0
-```
-
 Graph-Bit 的 early stop 作用在 bit-plane 维度：
 
 ```text
@@ -80,17 +56,7 @@ Graph-Bit 的 early stop 作用在 bit-plane 维度：
 如果 A5 已经足够，则不再执行 b2,b1,b0。
 ```
 
-当前实现状态：
-
-| 层级 | 是否已经实现 | 说明 |
-|---|---|---|
-| Accuracy validation | 是 | runtime depth 映射到已有 W4A8/W4A6/W4A5/W4A4 embedding pools，用于验证分类精度。 |
-| ONNXim compute issue | 是 | `SystolicWS.cc` 根据 `graphbit_issue_depth / graphbit_full_depth` 缩放 GEMM issue/compute cycles。 |
-| ONNXim fetch-depth model | 部分实现 | `GemmWS.cc` 生成 `graphbit_fetch_depth`；`plane_group` 模式会减少模拟的 input fetch requests。 |
-| 真实 activation bit-plane-major layout | 未完整实现 | 当前没有在真实 LLaMA encoder 中把 activation tensor 物理重排成 `plane7/plane6/...` 并重新执行整网。 |
-| RTL / Verilog | 未实现 | 当前是 ONNXim + analytical roofline + trace replay 级别建模。 |
-
-因此，上面的 `plane7/plane6/...` 是 NPU dataflow 的逻辑组织方式。当前代码已经模拟 bit-plane depth 对 compute issue、fetch depth、RF/psum activity 的影响；还没有实现完整的真实 tensor layout 转换和端到端 LLaMA bit-plane execution。
+本文中的 bit-plane 指执行粒度：PE 先处理高位贡献，再由 runtime bound 决定是否继续发射低位贡献。
 
 ## 3. GEMM 形状
 
@@ -557,7 +523,6 @@ cd /home/zhangshangtong/Transformer/OFA
 python GraphhopSimhash/scripts/model_graphbit_internal_roofline.py \
   --batch-nodes 4 8 16 32 \
   --seq-lens 512 2048 \
-  --activation-hbm-mode byte_major \
   --output-dir output/graphbit_internal_roofline/tape_dylgnn_bound_overhead
 ```
 
@@ -567,7 +532,6 @@ python GraphhopSimhash/scripts/model_graphbit_internal_roofline.py \
 python GraphhopSimhash/scripts/model_graphbit_internal_roofline.py \
   --batch-nodes 4 8 16 32 \
   --seq-lens 512 2048 \
-  --activation-hbm-mode byte_major \
   --bound-ops-per-output 16 \
   --bound-tops 4 \
   --bound-overlap 0 \
@@ -597,7 +561,6 @@ scripts/model_graphbit_internal_roofline.py
 ```text
 --batch-nodes
 --seq-lens
---activation-hbm-mode {byte_major, plane_group}
 --peak-tops
 --mem-gbps
 --bound-enable / --no-bound-enable
