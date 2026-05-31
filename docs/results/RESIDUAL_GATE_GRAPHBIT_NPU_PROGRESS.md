@@ -521,6 +521,29 @@ for each layer:
    减少 W tile reload。
 ```
 
+第二点是 Graph-Bit 相对普通 Transformer accelerator 的关键机会。普通 Transformer accelerator 通常只看到一批独立 sequence / token rows，不知道哪些节点在图任务里是高风险、低风险，也不知道哪些节点已经被 SimHash / CAM 前端过滤掉。Graph-Bit 的前端会产生额外的图任务信息：
+
+```text
+reuse / residual front-end:
+    哪些节点不需要进入 encoder。
+
+graph risk / degree / propagation score:
+    剩余 miss nodes 中，哪些节点需要更保守计算，
+    哪些节点可以更激进 early stop。
+```
+
+因此 miss nodes 可以先按风险分桶，再送入 encoder：
+
+```text
+high-risk bucket:
+    更完整 bit-depth，更保守 tolerance。
+
+mid / low-risk bucket:
+    更容易提前停止低位 bit-plane。
+```
+
+所有节点仍然使用同一个 LLaMA 权重 `W`。区别在于调度顺序：把同风险节点聚在一起后，同一个 `W tile` 加载到片上 SRAM / RF 后，可以连续服务更多来自同一 risk bucket 的 token rows。这个机会来自图前端提供的 risk / reuse 信息，不是普通无图 Transformer batch 自然具备的信号。
+
 这里的 `b16 / b32 / b64` 表示 W tile 的 service window，不是 bit-width：
 
 ```text
