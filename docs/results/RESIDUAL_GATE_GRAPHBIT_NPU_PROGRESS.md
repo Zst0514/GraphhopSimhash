@@ -192,7 +192,7 @@ support < 3    -> compute
 | Cora | SoftDirectReuse | 46.5% | 1.77% |
 | Cora | ResidualReuse | 46.5% | 0.93% |
 | PubMed | DirectReuse | 25.7% | 1.04% |
-| PubMed | SoftDirectReuse | 69.5% | 4.48% |
+| PubMed | SoftDirectReuse | 42.3% | 4.48% |
 | PubMed | ResidualReuse | 42.3% | 1.96% |
 
 解释：
@@ -204,8 +204,8 @@ Cora:
 
 PubMed:
     soft hit 更脏。
-    accept gate 拒绝一部分 fuzzy hit，
-    用更低 reuse 换回 2% 内 drop。
+    在相同 accepted reuse 下，
+    residual correction 将 drop 从 4.48% 拉回到 1.96%。
 ```
 
 需要注意的 target 对齐问题：
@@ -232,8 +232,8 @@ Residual-gate 的几个边界也需要明确：
    LLaMA-7B 的 residual MLP 需要用 LLaMA-7B embedding 重新训练。
 
 3. 它解决的是 fuzzy bucket 的质量控制。
-   SoftDirectReuse 在 PubMed 上 reuse 很高但 drop 明显变大，
-   说明 support=3..4 不能无条件全收；
+   SoftDirectReuse 在 PubMed 上 drop 明显变大，
+   说明 support=3..4 不能只做 anchor 直用；
    accept gate 的作用是把 fuzzy match 从“直接全收”变成“可控复用”。
 ```
 
