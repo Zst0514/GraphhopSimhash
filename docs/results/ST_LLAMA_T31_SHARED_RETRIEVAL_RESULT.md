@@ -152,32 +152,9 @@ PubMed:
 
 这说明问题不是单纯的文档命名错误，而是实验目标 embedding 选错后导致的主结论错误。
 
-<<<<<<< HEAD
-```bash
---residual_classifier_accept_gate
---residual_classifier_accept_mode both
---residual_classifier_accept_max_kl 0.2
---residual_classifier_accept_after_residual
---residual_classifier_accept_probe_alpha 0.125
-```
-
-当前实现里 classifier-aware accept gate 的监督信号来自冻结 GNN：
-
-```text
-reference embedding -> frozen GNN -> reference logits
-candidate reuse embedding -> frozen GNN -> candidate logits
-
-accept = prediction preserved AND KL(reference || candidate) <= max_kl
-```
-
-`--residual_classifier_accept_after_residual` 表示先用一个 probe residual adapter 生成候选修正结果，再用该结果构造 accept gate 的离线监督标签。在线阶段不跑 GNN、不读标签，只使用 residual adapter 的 accept score 和 `--residual_gate_accept_threshold`。
-
-## 参数解释
-=======
 ## 后续处理
 
 目前应把 ST 这条线从“已达标”改成“真实 ST oracle 下尚未恢复原目标”。
->>>>>>> e4c8ad7 (update)
 
 优先级建议如下：
 
