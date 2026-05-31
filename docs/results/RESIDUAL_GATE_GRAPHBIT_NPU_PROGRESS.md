@@ -12,6 +12,77 @@
 
 ---
 
+## 0. Overall Pipeline
+
+整个系统可以分成四个连续模块：
+
+```text
+SimHash:
+    为每个图文本节点生成多头 hash signature。
+
+LRU-CAM:
+    在 embedding cache 中做近似匹配，找可复用 anchor。
+
+Residual-Gate Reuse:
+    对 fuzzy match 做 residual correction 和 accept/reject 判断。
+
+Graph-Bit NPU:
+    对 reject / miss nodes 执行 graph-risk-guided variable-depth encoder。
+```
+
+整体数据流如下：
+
+```mermaid
+flowchart TD
+    A[Graph text node] --> B[SimHash signature]
+    B --> C[LRU + HD-CAM lookup]
+
+    C --> D{CAM result}
+    D -->|high-confidence hit| E[Direct reuse]
+    D -->|fuzzy hit| F[Residual-Gate Reuse]
+    D -->|miss / reject| G[Graph-Bit NPU]
+
+    F --> H{Accept gate}
+    H -->|accept| I[Anchor embedding + residual correction]
+    H -->|reject| G
+
+    A --> J[Graph risk / degree / context]
+    J --> G
+
+    G --> K[Risk-bucket scheduling]
+    K --> L[W-stationary systolic array]
+    L --> M[Predictor-free variable-depth execution]
+
+    E --> N[Final embedding]
+    I --> N
+    M --> N
+    N --> O[GNN classifier]
+```
+
+四个模块的作用边界：
+
+| Module | Input | Output | Role |
+|---|---|---|---|
+| SimHash | text / graph context | multi-head hash | 生成可检索签名 |
+| LRU-CAM | hash signature | anchor candidates + support | 快速找可复用节点 |
+| Residual-Gate Reuse | fuzzy anchor pair | corrected embedding or reject | 拯救中等置信 fuzzy match |
+| Graph-Bit NPU | miss / rejected nodes | encoder embedding | 降低剩余 encoder 计算成本 |
+
+执行路径可以概括为：
+
+```text
+high-confidence CAM hit:
+    cache read only
+
+fuzzy CAM hit:
+    residual correction if accept gate passes
+
+CAM miss / rejected fuzzy hit:
+    Graph-Bit NPU computes encoder embedding
+```
+
+---
+
 ## 1. SimHash Residual-Gate
 
 ### 1.1 问题
