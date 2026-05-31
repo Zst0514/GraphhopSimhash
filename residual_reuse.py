@@ -1226,10 +1226,6 @@ def train_residual_adapter(
         )
         if class_targets is not None:
             accept_targets = accept_targets * class_targets
-<<<<<<< HEAD
-
-=======
->>>>>>> e4c8ad7 (update)
     global_adapter, global_loss, global_gate_mean, global_accept_gate_mean = _fit_residual_adapter(
         x_train,
         anchors,
