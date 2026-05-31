@@ -849,6 +849,17 @@ def build_parser():
         help="Graph risk proxies to evaluate for bound-based precision-depth policies.",
     )
     parser.add_argument(
+        "--precision_depth_bound_assignment",
+        type=str,
+        default="bucket_ratio",
+        choices=["bucket_ratio", "nodewise"],
+        help=(
+            "bucket_ratio assigns high/mid/low groups by fixed ratios. nodewise "
+            "computes a per-node tolerance from graph risk and lets the runtime "
+            "bound decide each miss node's stop depth."
+        ),
+    )
+    parser.add_argument(
         "--precision_depth_bound_high_min_depth",
         type=int,
         default=8,
@@ -895,6 +906,36 @@ def build_parser():
         type=int,
         default=128,
         help="Reduction tile size used by the bound estimator.",
+    )
+    parser.add_argument(
+        "--precision_depth_bound_nodewise_min_depth",
+        type=int,
+        default=4,
+        help="Lowest depth that nodewise runtime-bound policies are allowed to test.",
+    )
+    parser.add_argument(
+        "--precision_depth_bound_nodewise_min_tolerance",
+        type=float,
+        default=0.0,
+        help="Tolerance assigned to maximum-risk nodes in nodewise bound mode.",
+    )
+    parser.add_argument(
+        "--precision_depth_bound_nodewise_max_tolerance",
+        type=float,
+        default=0.04,
+        help="Tolerance assigned to lowest-risk nodes in nodewise bound mode.",
+    )
+    parser.add_argument(
+        "--precision_depth_bound_nodewise_gamma",
+        type=float,
+        default=1.0,
+        help="Risk-to-tolerance curve exponent for nodewise bound mode.",
+    )
+    parser.add_argument(
+        "--precision_depth_bound_nodewise_risk_max",
+        type=float,
+        default=15.0,
+        help="Risk value treated as maximum risk when mapping graph risk to tolerance.",
     )
     parser.add_argument(
         "--precision_depth_trace_export_dir",
@@ -1395,6 +1436,20 @@ def validate_args(parser, args):
         parser.error("--precision_depth_bound_scale must be positive")
     if args.precision_depth_bound_tile_k <= 0:
         parser.error("--precision_depth_bound_tile_k must be positive")
+    if args.precision_depth_bound_nodewise_min_depth <= 0:
+        parser.error("--precision_depth_bound_nodewise_min_depth must be positive")
+    if args.precision_depth_bound_nodewise_min_depth > args.precision_depth_reference_bits:
+        parser.error("--precision_depth_bound_nodewise_min_depth cannot exceed --precision_depth_reference_bits")
+    if args.precision_depth_bound_nodewise_min_tolerance < 0:
+        parser.error("--precision_depth_bound_nodewise_min_tolerance must be non-negative")
+    if args.precision_depth_bound_nodewise_max_tolerance < 0:
+        parser.error("--precision_depth_bound_nodewise_max_tolerance must be non-negative")
+    if args.precision_depth_bound_nodewise_max_tolerance < args.precision_depth_bound_nodewise_min_tolerance:
+        parser.error("--precision_depth_bound_nodewise_max_tolerance must be >= min tolerance")
+    if args.precision_depth_bound_nodewise_gamma <= 0:
+        parser.error("--precision_depth_bound_nodewise_gamma must be positive")
+    if args.precision_depth_bound_nodewise_risk_max <= 0:
+        parser.error("--precision_depth_bound_nodewise_risk_max must be positive")
     if not args.token_compaction_tags:
         parser.error("--token_compaction_tags must contain at least one tag")
     if args.token_compaction_names is not None and len(args.token_compaction_names) != len(args.token_compaction_tags):

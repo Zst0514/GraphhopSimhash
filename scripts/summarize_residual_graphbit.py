@@ -18,7 +18,7 @@ CONFIG_ALIASES = {
 }
 
 
-RUN_RE = re.compile(r"T(?P<T>\d+)_(?P<budget>[^_]+)_runs(?P<runs>\d+)\.log$")
+RUN_RE = re.compile(r"T(?P<T>\d+)_(?P<budget>.+)_runs(?P<runs>\d+)\.log$")
 SUMMARY_RE = re.compile(r"FINAL RESIDUAL \+ GRAPH-BIT SUMMARY \((?P<runs>\d+) Runs\) \| (?P<dataset>\w+)")
 
 
@@ -65,9 +65,23 @@ def parse_table_row(line: str) -> dict[str, str] | None:
         return None
     if not fields[1].endswith("%"):
         return None
+    has_p7 = len(fields) >= 15 and is_number(fields[9])
     has_p5 = len(fields) >= 14 and is_number(fields[8])
     has_no_p5 = len(fields) >= 13 and is_number(fields[7])
-    if has_p5:
+    if has_p7:
+        p7 = fields[5]
+        p6 = fields[6]
+        p5 = fields[7]
+        p4 = fields[8]
+        cost = fields[9]
+        acc = fields[10]
+        drop = fields[11]
+        finalerr = fields[12]
+        train = fields[13]
+        alpha = fields[14] if len(fields) > 14 else ""
+    elif has_p5:
+        p7 = "0.0%"
+        p6 = fields[5]
         p5 = fields[6]
         p4 = fields[7]
         cost = fields[8]
@@ -77,6 +91,8 @@ def parse_table_row(line: str) -> dict[str, str] | None:
         train = fields[12]
         alpha = fields[13] if len(fields) > 13 else ""
     elif has_no_p5:
+        p7 = "0.0%"
+        p6 = fields[5]
         p5 = "0.0%"
         p4 = fields[6]
         cost = fields[7]
@@ -93,7 +109,8 @@ def parse_table_row(line: str) -> dict[str, str] | None:
         "direct": fields[2],
         "residual": fields[3],
         "P8": fields[4],
-        "P6": fields[5],
+        "P7": p7,
+        "P6": p6,
         "P5": p5,
         "P4": p4,
         "cost": cost,
@@ -159,6 +176,7 @@ def write_tsv(rows: list[dict[str, str]], path: Path) -> None:
         "direct",
         "residual",
         "P8",
+        "P7",
         "P6",
         "P5",
         "P4",

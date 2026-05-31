@@ -62,10 +62,29 @@ CLASSIFIER_ACCEPT_AFTER_RESIDUAL="${CLASSIFIER_ACCEPT_AFTER_RESIDUAL:-1}"
 CLASSIFIER_ACCEPT_PROBE_ALPHA="${CLASSIFIER_ACCEPT_PROBE_ALPHA:-0.125}"
 RESIDUAL_EPOCHS="${RESIDUAL_EPOCHS:-200}"
 RESIDUAL_ALPHA_GRID=(${RESIDUAL_ALPHA_GRID:-0 0.03125 0.0625 0.125 0.25 0.5})
+RESIDUAL_POSITIVE_ERROR_MAX="${RESIDUAL_POSITIVE_ERROR_MAX:-0.40}"
+RESIDUAL_OFFLINE_NEGATIVE_ANCHORS_PER_NODE="${RESIDUAL_OFFLINE_NEGATIVE_ANCHORS_PER_NODE:-4}"
+RESIDUAL_NEGATIVE_ERROR_MIN="${RESIDUAL_NEGATIVE_ERROR_MIN:-0.45}"
+if [[ -z "${RESIDUAL_NEGATIVE_GATE_WEIGHT+x}" ]]; then
+  if [[ "${DATASET}" == "cora" ]]; then
+    RESIDUAL_NEGATIVE_GATE_WEIGHT="2.0"
+  else
+    RESIDUAL_NEGATIVE_GATE_WEIGHT="1.0"
+  fi
+fi
+if [[ -z "${RESIDUAL_ACCEPT_LOSS_WEIGHT+x}" ]]; then
+  if [[ "${DATASET}" == "cora" ]]; then
+    RESIDUAL_ACCEPT_LOSS_WEIGHT="2.0"
+  else
+    RESIDUAL_ACCEPT_LOSS_WEIGHT="0.0"
+  fi
+fi
+RESIDUAL_GATE_SPARSITY_WEIGHT="${RESIDUAL_GATE_SPARSITY_WEIGHT:-0.02}"
 PRECISION_DEPTH_TAGS=(${PRECISION_DEPTH_TAGS:-W4A6 W4A5 W4A4})
 PRECISION_DEPTH_BITS=(${PRECISION_DEPTH_BITS:-6 5 4})
 BOUND_ENABLE="${BOUND_ENABLE:-1}"
 BOUND_PRIORITIES=(${BOUND_PRIORITIES:-degree tser})
+BOUND_ASSIGNMENT="${BOUND_ASSIGNMENT:-bucket_ratio}"
 BOUND_HIGH_MIN="${BOUND_HIGH_MIN:-8}"
 BOUND_MID_MIN="${BOUND_MID_MIN:-6}"
 BOUND_LOW_MIN="${BOUND_LOW_MIN:-4}"
@@ -74,6 +93,11 @@ BOUND_MID_TOL="${BOUND_MID_TOL:-0.02}"
 BOUND_LOW_TOL="${BOUND_LOW_TOL:-0.04}"
 BOUND_SCALE="${BOUND_SCALE:-1.0}"
 BOUND_TILE_K="${BOUND_TILE_K:-128}"
+BOUND_NODEWISE_MIN_DEPTH="${BOUND_NODEWISE_MIN_DEPTH:-4}"
+BOUND_NODEWISE_MIN_TOL="${BOUND_NODEWISE_MIN_TOL:-0.0}"
+BOUND_NODEWISE_MAX_TOL="${BOUND_NODEWISE_MAX_TOL:-0.04}"
+BOUND_NODEWISE_GAMMA="${BOUND_NODEWISE_GAMMA:-1.0}"
+BOUND_NODEWISE_RISK_MAX="${BOUND_NODEWISE_RISK_MAX:-15.0}"
 TRACE_EXPORT="${TRACE_EXPORT:-0}"
 TRACE_EXPORT_DIR="${TRACE_EXPORT_DIR:-${OUT_DIR}/node_traces}"
 TRACE_EXPORT_CONFIGS=(${TRACE_EXPORT_CONFIGS:-DegBound})
@@ -133,6 +157,7 @@ run_algo() {
     bound_args=(
       --precision_depth_bound_enable
       --precision_depth_bound_priorities "${BOUND_PRIORITIES[@]}"
+      --precision_depth_bound_assignment "${BOUND_ASSIGNMENT}"
       --precision_depth_bound_high_min_depth "${BOUND_HIGH_MIN}"
       --precision_depth_bound_mid_min_depth "${BOUND_MID_MIN}"
       --precision_depth_bound_low_min_depth "${BOUND_LOW_MIN}"
@@ -141,6 +166,11 @@ run_algo() {
       --precision_depth_bound_low_tolerance "${BOUND_LOW_TOL}"
       --precision_depth_bound_scale "${BOUND_SCALE}"
       --precision_depth_bound_tile_k "${BOUND_TILE_K}"
+      --precision_depth_bound_nodewise_min_depth "${BOUND_NODEWISE_MIN_DEPTH}"
+      --precision_depth_bound_nodewise_min_tolerance "${BOUND_NODEWISE_MIN_TOL}"
+      --precision_depth_bound_nodewise_max_tolerance "${BOUND_NODEWISE_MAX_TOL}"
+      --precision_depth_bound_nodewise_gamma "${BOUND_NODEWISE_GAMMA}"
+      --precision_depth_bound_nodewise_risk_max "${BOUND_NODEWISE_RISK_MAX}"
     )
   fi
   local trace_args=()
@@ -210,17 +240,17 @@ run_algo() {
     --residual_loss_delta_weight 0.75 \
     --residual_bucket_mode support_dist \
     --residual_offline_extra_anchors_per_node 8 \
-    --residual_positive_error_max 0.40 \
+    --residual_positive_error_max "${RESIDUAL_POSITIVE_ERROR_MAX}" \
     --residual_offline_extra_query_nodes 4096 \
-    --residual_offline_negative_anchors_per_node 4 \
-    --residual_negative_error_min 0.45 \
-    --residual_negative_gate_weight 1.0 \
+    --residual_offline_negative_anchors_per_node "${RESIDUAL_OFFLINE_NEGATIVE_ANCHORS_PER_NODE}" \
+    --residual_negative_error_min "${RESIDUAL_NEGATIVE_ERROR_MIN}" \
+    --residual_negative_gate_weight "${RESIDUAL_NEGATIVE_GATE_WEIGHT}" \
     --residual_train_split train_val \
     --residual_gate_loss_weight 0.5 \
-    --residual_accept_loss_weight 0.0 \
+    --residual_accept_loss_weight "${RESIDUAL_ACCEPT_LOSS_WEIGHT}" \
     --residual_gate_error_scale 0.25 \
     --residual_gate_error_max 0.45 \
-    --residual_gate_sparsity_weight 0.02 \
+    --residual_gate_sparsity_weight "${RESIDUAL_GATE_SPARSITY_WEIGHT}" \
     "${classifier_args[@]}" \
     --residual_gate_accept_threshold "${RESIDUAL_GATE_THRESHOLD}" \
     --residual_min_dist 1.0 2>&1 | tee "${MAIN_LOG}"

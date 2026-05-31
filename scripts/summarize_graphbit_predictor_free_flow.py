@@ -35,9 +35,15 @@ CONFIG_ALIASES = {
     "ContextDepthBudget": "Ctx",
     "LowUniqueDepthBudget": "Uniq",
     "DegreeBound": "DegBound",
+    "DegBoundNode": "DegBoundNode",
+    "DegreeBoundNode": "DegBoundNode",
     "TSERBound": "TSERBound",
+    "TSERBoundNode": "TSERBoundNode",
     "ContextBound": "CtxBound",
+    "CtxBoundNode": "CtxBoundNode",
+    "ContextBoundNode": "CtxBoundNode",
     "LowUniqueBound": "UniqBound",
+    "LowUniqueBoundNode": "UniqBoundNode",
 }
 
 
@@ -111,6 +117,7 @@ def ratios_from_row(row: dict[str, str]) -> dict[str, float]:
         "residual": residual,
         "miss": max(0.0, 1.0 - reuse),
         "p8": parse_percent(row.get("P8")),
+        "p7": parse_percent(row.get("P7")),
         "p6": parse_percent(row.get("P6")),
         "p5": parse_percent(row.get("P5")),
         "p4": parse_percent(row.get("P4")),
@@ -120,6 +127,7 @@ def ratios_from_row(row: dict[str, str]) -> dict[str, float]:
 def depth_factor(ratios: dict[str, float], bits: dict[str, float]) -> float:
     return (
         ratios.get("p8", 0.0) * bits["p8"] / 8.0
+        + ratios.get("p7", 0.0) * bits["p7"] / 8.0
         + ratios.get("p6", 0.0) * bits["p6"] / 8.0
         + ratios.get("p5", 0.0) * bits["p5"] / 8.0
         + ratios.get("p4", 0.0) * bits["p4"] / 8.0
@@ -127,9 +135,17 @@ def depth_factor(ratios: dict[str, float], bits: dict[str, float]) -> float:
 
 
 def miss_avg_depth(ratios: dict[str, float], bits: dict[str, float]) -> float:
-    miss = max(1e-12, ratios.get("p8", 0.0) + ratios.get("p6", 0.0) + ratios.get("p5", 0.0) + ratios.get("p4", 0.0))
+    miss = max(
+        1e-12,
+        ratios.get("p8", 0.0)
+        + ratios.get("p7", 0.0)
+        + ratios.get("p6", 0.0)
+        + ratios.get("p5", 0.0)
+        + ratios.get("p4", 0.0),
+    )
     return (
         ratios.get("p8", 0.0) * bits["p8"]
+        + ratios.get("p7", 0.0) * bits["p7"]
         + ratios.get("p6", 0.0) * bits["p6"]
         + ratios.get("p5", 0.0) * bits["p5"]
         + ratios.get("p4", 0.0) * bits["p4"]
@@ -145,7 +161,13 @@ def traffic_factor(
     cache_read_cost: float,
     residual_traffic_cost: float,
 ) -> float:
-    miss = ratios.get("p8", 0.0) + ratios.get("p6", 0.0) + ratios.get("p5", 0.0) + ratios.get("p4", 0.0)
+    miss = (
+        ratios.get("p8", 0.0)
+        + ratios.get("p7", 0.0)
+        + ratios.get("p6", 0.0)
+        + ratios.get("p5", 0.0)
+        + ratios.get("p4", 0.0)
+    )
     act_factor = depth_factor(ratios, bits)
     direct = ratios.get("direct", 0.0)
     residual = ratios.get("residual", 0.0)
@@ -165,7 +187,7 @@ def method_row(
     bounded: bool,
 ) -> dict[str, Any]:
     ratios = ratios_from_row(source_row)
-    fixed_bits = {"p8": 8.0, "p6": 6.0, "p5": 5.0, "p4": 4.0}
+    fixed_bits = {"p8": 8.0, "p7": 7.0, "p6": 6.0, "p5": 5.0, "p4": 4.0}
     bits = dict(fixed_bits)
     if bounded:
         bits["p6"] = max(1.0, bits["p6"] - args.bounded_save_p6)
@@ -202,6 +224,7 @@ def method_row(
         "direct": ratios["direct"],
         "residual": ratios["residual"],
         "p8": ratios["p8"],
+        "p7": ratios["p7"],
         "p6": ratios["p6"],
         "p5": ratios["p5"],
         "p4": ratios["p4"],
@@ -229,6 +252,7 @@ def write_tsv(rows: list[dict[str, Any]], path: Path) -> None:
         "direct",
         "residual",
         "p8",
+        "p7",
         "p6",
         "p5",
         "p4",
@@ -277,14 +301,15 @@ def write_compact(rows: list[dict[str, Any]], path: Path, args: argparse.Namespa
         ),
         "Runtime-bound rows are evaluated with the embedding depth selected by min_depth+tolerance bound.",
         "",
-        "Method                         Reuse   P8     P6     P5     P4     AvgBit Saved  Cycles Traffic Energy Drop",
-        "------------------------------------------------------------------------------------------------------",
+        "Method                         Reuse   P8     P7     P6     P5     P4     AvgBit Saved  Cycles Traffic Energy Drop",
+        "-------------------------------------------------------------------------------------------------------------",
     ]
     for row in rows:
         lines.append(
             f"{row['method']:<30} "
             f"{fmt_pct(row['reuse']):>6} "
             f"{fmt_pct(row['p8']):>6} "
+            f"{fmt_pct(row['p7']):>6} "
             f"{fmt_pct(row['p6']):>6} "
             f"{fmt_pct(row['p5']):>6} "
             f"{fmt_pct(row['p4']):>6} "
@@ -319,6 +344,7 @@ def write_workload(rows: list[dict[str, Any]], args: argparse.Namespace, path: P
                     "direct": row["direct"],
                     "residual": row["residual"],
                     "p8": row["p8"],
+                    "p7": row["p7"],
                     "p6": row["p6"],
                     "p5": row["p5"],
                     "p4": row["p4"],
@@ -382,19 +408,20 @@ def main() -> None:
     rand = maybe_find_row(rows, args, "Rand")
     deg = maybe_find_row(rows, args, "Deg")
     tser = maybe_find_row(rows, args, "TSER")
-    deg_bound = maybe_find_row(rows, args, "DegBound")
-    tser_bound = maybe_find_row(rows, args, "TSERBound")
+    deg_bound = maybe_find_row(rows, args, "DegBoundNode") or maybe_find_row(rows, args, "DegBound")
+    tser_bound = maybe_find_row(rows, args, "TSERBoundNode") or maybe_find_row(rows, args, "TSERBound")
 
     out_rows = [method_row("FullP8-miss", full, args, aggregate, bounded=False)]
-    if rand is not None:
+    include_static_budget_rows = not str(args.budget).startswith("node_")
+    if include_static_budget_rows and rand is not None:
         out_rows.append(method_row("Random static P8/P6/P5/P4", rand, args, aggregate, bounded=False))
-    if deg is not None:
+    if include_static_budget_rows and deg is not None:
         out_rows.append(method_row("Degree static P8/P6/P5/P4", deg, args, aggregate, bounded=False))
-    if tser is not None:
+    if include_static_budget_rows and tser is not None:
         out_rows.append(method_row("TSER static P8/P6/P5/P4", tser, args, aggregate, bounded=False))
     if deg_bound is not None:
         out_rows.append(method_row("Degree runtime-bound", deg_bound, args, aggregate, bounded=False))
-    elif deg is not None:
+    elif include_static_budget_rows and deg is not None:
         out_rows.append(method_row("Degree synthetic EarlyStop", deg, args, aggregate, bounded=True))
     if tser_bound is not None:
         out_rows.append(method_row("TSER runtime-bound", tser_bound, args, aggregate, bounded=False))

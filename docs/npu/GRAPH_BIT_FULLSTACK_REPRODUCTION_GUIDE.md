@@ -19,6 +19,123 @@ docs/npu/GRAPH_BIT_EARLY_STOP_IMPLEMENTATION.md
 
 本文档重点是运行流程、参数修改方式和结果读取路径。
 
+## 0. 固定 T31 前端的 nodewise bound sweep
+
+`docs/results/ST_LLAMA_T31_SHARED_RETRIEVAL_RESULT.md` 记录了当前 T31 共享检索骨架。Graph-Bit 的 bound policy sweep 应固定这套在线前端，只改变 miss nodes 进入 NPU 后的逐节点 bound 参数。
+
+固定前端：
+
+```text
+8 heads x 16 bit
+radius = 2
+disable_structure_check
+score gate on
+score threshold T = 31
+score weights = 3 / 1 / 1
+score_pair_confidence_discount = 1
+
+support >= 5   -> hard direct reuse
+support = 3..4 -> residual candidate
+support < 3    -> Graph-Bit encoder
+```
+
+当前主线不使用固定 `20/50/30` 这类 high/mid/low 节点比例。miss node 的执行深度由逐节点风险和 predictor-free bound 共同决定：
+
+```text
+risk(v)       = degree / propagation score
+risk_norm(v)  = clamp(risk(v) / risk_max, 0, 1)
+tolerance(v)  = min_tol + (max_tol - min_tol) * (1 - risk_norm(v))^gamma
+
+for depth in min_depth..8:
+    if remaining_low_bit_bound(depth) <= tolerance(v):
+        stop at depth
+        break
+
+requested depth -> nearest generated pool: P8/P7/P6/P5/P4
+```
+
+也就是说，`Degree/TSER/Context` 不直接指定固定比例的 P8/P6/P5/P4；它们只提供逐节点风险，最终 stop depth 由 bound 判断得到。
+
+一键 nodewise sweep：
+
+```bash
+RUNS=1 DATASETS="cora pubmed" \
+bash GraphhopSimhash/scripts/run_t31_graphbit_nodewise_bound_sweep.sh
+```
+
+输出：
+
+```text
+output/t31_graphbit_nodewise_bound_sweep/summary.tsv
+output/t31_graphbit_nodewise_bound_sweep/summary.txt
+output/t31_graphbit_nodewise_bound_sweep/pareto.tsv
+output/t31_graphbit_nodewise_bound_sweep/pareto.txt
+```
+
+默认 policy：
+
+```text
+mild:
+    min_depth=4, min_tol=0.00, max_tol=0.02, gamma=1.0
+
+normal:
+    min_depth=4, min_tol=0.00, max_tol=0.04, gamma=1.0
+
+steep:
+    min_depth=4, min_tol=0.00, max_tol=0.04, gamma=2.0
+
+strong:
+    min_depth=4, min_tol=0.00, max_tol=0.08, gamma=1.0
+```
+
+自定义 policy：
+
+```bash
+POLICIES=$'my_policy:4:0.0:0.025:1.0:15:1.0' \
+RUNS=1 DATASETS="cora" \
+bash GraphhopSimhash/scripts/run_t31_graphbit_nodewise_bound_sweep.sh
+```
+
+字段格式：
+
+```text
+id:min_depth:min_tol:max_tol:gamma:risk_max:bound_scale
+```
+
+选择默认 policy 时不要只看单数据集。优先看：
+
+```text
+pareto.tsv:
+    min_reuse
+    max_drop
+    max_extra_drop
+    mean_avg_depth
+mean_cost_save_vs_full
+```
+
+推荐约束：
+
+```text
+max_drop <= 3%
+max_extra_drop 越低越好
+mean_avg_depth 尽量低
+mean_cost_save_vs_full 尽量高
+```
+
+Cora quick result example:
+
+```text
+output/t31_graphbit_nodewise_bound_sweep_cora_quick/summary.txt
+
+policy  P8    P7    P6     P5     P4    avg_depth  drop   cost_save_vs_full
+mild    0.1%  4.8%  55.5%  0.0%   0.0%  6.0828     2.85%  20.13%
+normal  0.0%  0.3%  22.3%  37.7%  0.0%  5.3798     3.53%  27.72%
+steep   0.3%  4.6%  42.7%  12.7%  0.0%  5.8756     3.05%  22.44%
+strong  0.0%  0.1%  0.5%   33.5%  26.0% 4.5790     5.27%  36.21%
+```
+
+这张表的 P8/P7/P6/P5/P4 是逐节点 bound 决策后的实际分布，不是预设比例。
+
 ## 1. 当前主线实验是什么
 
 默认主线是当前 T31 shared retrieval 前端：
@@ -45,8 +162,9 @@ Graph-Bit:
     miss nodes only
     priority = Degree / propagation_q
     predictor-free bound enabled
-    high/mid/low min depths = 8 / 6 / 4
-    high/mid/low tolerances = 0.00 / 0.02 / 0.04
+    nodewise tolerance:
+        tolerance(v) = min_tol + (max_tol - min_tol) * (1 - risk_norm(v))^gamma
+    runtime bound selects P8/P7/P6/P5/P4
 
 Trace replay:
     baseline tile batch = 16
@@ -93,6 +211,7 @@ Graph-Bit accuracy validation 需要以下 cache：
 
 ```text
 cache_data/cora_llama2_7b_oracle_W4A8.pt
+cache_data/cora_llama2_7b_oracle_W4A7.pt
 cache_data/cora_llama2_7b_oracle_W4A6.pt
 cache_data/cora_llama2_7b_oracle_W4A5.pt
 cache_data/cora_llama2_7b_oracle_W4A4.pt
@@ -102,6 +221,7 @@ cache_data/cora_llama2_7b_oracle_W4A4.pt
 
 ```text
 cache_data/pubmed_llama2_7b_oracle_W4A8.pt
+cache_data/pubmed_llama2_7b_oracle_W4A7.pt
 cache_data/pubmed_llama2_7b_oracle_W4A6.pt
 cache_data/pubmed_llama2_7b_oracle_W4A5.pt
 cache_data/pubmed_llama2_7b_oracle_W4A4.pt
@@ -266,26 +386,26 @@ RUNS=1 \
 RUN_ALGO=1 \
 RUN_ONNXIM=0 \
 DATASET=cora \
-THRESHOLD=40 \
+THRESHOLD=31 \
 HARD_SUPPORT=5 \
-SOFT_SUPPORT=4 \
-FRONTEND_ID=h8_54_T40 \
-BUDGET=boundclean \
-HIGH_RATIO=0.20 \
-MID_RATIO=0.50 \
-LOW_RATIO=0.0 \
-OUT_DIR=output/graphbit_trace_replay/cora_h8_54_T40_boundclean_quick \
+SOFT_SUPPORT=3 \
+FRONTEND_ID=h8_53_T31 \
+BUDGET=node_mild \
+HIGH_RATIO=0 \
+MID_RATIO=0 \
+LOW_RATIO=0 \
+OUT_DIR=output/graphbit_trace_replay/cora_h8_53_T31_node_mild_quick \
 TRACE_EXPORT=1 \
-TRACE_EXPORT_DIR=output/graphbit_trace_replay/cora_h8_54_T40_boundclean_quick/node_traces \
-TRACE_EXPORT_CONFIGS='DegBound' \
+TRACE_EXPORT_DIR=output/graphbit_trace_replay/cora_h8_53_T31_node_mild_quick/node_traces \
+TRACE_EXPORT_CONFIGS='DegBoundNode' \
 BOUND_ENABLE=1 \
+BOUND_ASSIGNMENT=nodewise \
 BOUND_PRIORITIES='degree' \
-BOUND_HIGH_MIN=8 \
-BOUND_MID_MIN=6 \
-BOUND_LOW_MIN=4 \
-BOUND_HIGH_TOL=0.0 \
-BOUND_MID_TOL=0.02 \
-BOUND_LOW_TOL=0.04 \
+BOUND_NODEWISE_MIN_DEPTH=4 \
+BOUND_NODEWISE_MIN_TOL=0.0 \
+BOUND_NODEWISE_MAX_TOL=0.02 \
+BOUND_NODEWISE_GAMMA=1.0 \
+BOUND_NODEWISE_RISK_MAX=15.0 \
 BOUND_TILE_K=128 \
 bash GraphhopSimhash/scripts/run_graphbit_predictor_free_flow.sh
 ```
@@ -456,98 +576,62 @@ hard 更高:
     更保守，drop 低，但 reuse 少。
 ```
 
-### 5.3 调 Graph-Bit high/mid/low 比例
+### 5.3 调 predictor-free nodewise bound
 
 参数：
 
 ```text
-HIGH_RATIO
-MID_RATIO
-LOW_RATIO
-```
-
-当前 quick flow：
-
-```text
-HIGH_RATIO=0.20
-MID_RATIO=0.50
-LOW_RATIO=0.0
-```
-
-代码中 `bound_budget` 会先把所有 miss nodes 初始化为 low bucket，再覆盖 high 和 mid。因此：
-
-```text
-low share = 1 - HIGH_RATIO - MID_RATIO
-```
-
-即使 `LOW_RATIO=0.0`，剩余未覆盖节点仍然进入 low bucket。
-
-当前：
-
-```text
-high = 20%
-mid  = 50%
-low  = 30%
-```
-
-常用配置：
-
-```bash
-# conservative
-HIGH_RATIO=0.60 MID_RATIO=0.30 LOW_RATIO=0.10
-
-# balanced
-HIGH_RATIO=0.20 MID_RATIO=0.50 LOW_RATIO=0.0
-
-# aggressive
-HIGH_RATIO=0.10 MID_RATIO=0.50 LOW_RATIO=0.0
-```
-
-### 5.4 调 predictor-free bound 阈值
-
-参数：
-
-```text
-BOUND_HIGH_MIN
-BOUND_MID_MIN
-BOUND_LOW_MIN
-BOUND_HIGH_TOL
-BOUND_MID_TOL
-BOUND_LOW_TOL
-BOUND_SCALE
+BOUND_NODEWISE_MIN_DEPTH
+BOUND_NODEWISE_MIN_TOL
+BOUND_NODEWISE_MAX_TOL
+BOUND_NODEWISE_GAMMA
+BOUND_NODEWISE_RISK_MAX
 BOUND_TILE_K
 ```
 
 默认：
 
 ```text
-BOUND_HIGH_MIN=8
-BOUND_MID_MIN=6
-BOUND_LOW_MIN=4
-BOUND_HIGH_TOL=0.0
-BOUND_MID_TOL=0.02
-BOUND_LOW_TOL=0.04
-BOUND_SCALE=1.0
+BOUND_NODEWISE_MIN_DEPTH=4
+BOUND_NODEWISE_MIN_TOL=0.0
+BOUND_NODEWISE_MAX_TOL=0.04
+BOUND_NODEWISE_GAMMA=1.0
+BOUND_NODEWISE_RISK_MAX=15.0
 BOUND_TILE_K=128
 ```
+
+执行时，每个 miss node 都根据自己的 `risk_norm` 得到单独的 `tolerance(v)`。因此最终 P8/P7/P6/P5/P4 分布来自 runtime bound，而不是来自预设节点比例。
 
 影响：
 
 ```text
-tolerance 越小:
+max_tol 越小:
     early stop 越保守
     AvgD 更高
     drop 更低
     cycles 更高
 
-tolerance 越大:
+max_tol 越大:
     early stop 越激进
     AvgD 更低
     drop 更高
     cycles 更低
+
+gamma 越大:
+    高风险节点更接近 min_tol
+    低风险节点获得更大的 tolerance
+    stop-depth 分布更两极化
 ```
 
-### 5.5 调 scheduler batch size
+示例：
+
+```bash
+POLICIES=$'mild:4:0.0:0.02:1.0:15:1.0\nnormal:4:0.0:0.04:1.0:15:1.0' \
+RUNS=1 DATASETS="cora" \
+bash GraphhopSimhash/scripts/run_t31_graphbit_nodewise_bound_sweep.sh
+```
+
+### 5.4 调 scheduler batch size
 
 参数：
 
@@ -978,14 +1062,14 @@ speedup = baseline_cycles / method_cycles
 1. 固定 Graph-Bit，先调 reuse 前端：
    T, HARD_SUPPORT, SOFT_SUPPORT
 
-2. 固定 reuse 前端，调 Graph-Bit risk budget：
-   HIGH_RATIO, MID_RATIO
+2. 固定 reuse 前端，调 Graph-Bit nodewise bound：
+   BOUND_NODEWISE_MAX_TOL, BOUND_NODEWISE_GAMMA, BOUND_NODEWISE_RISK_MAX
 
-3. 固定 budget，调 bound：
-   BOUND_MID_TOL, BOUND_LOW_TOL
+3. 固定 bound policy，调 trace replay / scheduler：
+   CANDIDATE_BATCHES, BASELINE_TILE_BATCH
 
-4. 固定算法输出，调硬件 scheduler：
-   CANDIDATE_BATCHES, BASELINE_TILE_BATCH, SRAM/buffer 参数
+4. 固定算法输出，调硬件 buffer 参数：
+   SRAM/buffer 参数
 ```
 
 推荐先用 Cora `RUNS=1` 快速扫，再对候选点跑：

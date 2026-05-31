@@ -1946,12 +1946,14 @@ def build_precision_depth_policy_configs(args, bits):
     if bool(getattr(args, "precision_depth_include_oracle", False)):
         configs.append(("Oracle", {"kind": "budget", "priority": "oracle_damage"}))
     if bool(getattr(args, "precision_depth_bound_enable", False)):
+        nodewise = str(getattr(args, "precision_depth_bound_assignment", "bucket_ratio")) == "nodewise"
+        suffix = "Node" if nodewise else ""
         name_by_priority = {
-            "degree": "DegBound",
-            "tser": "TSERBound",
-            "context": "CtxBound",
-            "low_unique": "UniqBound",
-            "random": "RandBound",
+            "degree": f"DegBound{suffix}",
+            "tser": f"TSERBound{suffix}",
+            "context": f"CtxBound{suffix}",
+            "low_unique": f"UniqBound{suffix}",
+            "random": f"RandBound{suffix}",
         }
         for priority in getattr(args, "precision_depth_bound_priorities", ["degree", "tser"]):
             configs.append((name_by_priority[priority], {"kind": "bound_budget", "priority": priority}))
@@ -2028,6 +2030,29 @@ def bound_policy_bucket_bits(bits, ref_bit, args):
     return out
 
 
+def select_nodewise_bound_actions(priority, eligible_idx, args, num_nodes, bits, ref_bit, device):
+    actions = torch.full((num_nodes,), int(ref_bit), dtype=torch.int64, device=device)
+    if int(eligible_idx.numel()) <= 0:
+        return actions
+
+    bits = sorted(int(bit) for bit in bits)
+    min_depth = int(getattr(args, "precision_depth_bound_nodewise_min_depth", 4))
+    min_tol = float(getattr(args, "precision_depth_bound_nodewise_min_tolerance", 0.0))
+    max_tol = float(getattr(args, "precision_depth_bound_nodewise_max_tolerance", 0.04))
+    gamma = float(getattr(args, "precision_depth_bound_nodewise_gamma", 1.0))
+    risk_max = float(getattr(args, "precision_depth_bound_nodewise_risk_max", 15.0))
+
+    risks = torch.clamp(priority[eligible_idx].to(dtype=torch.float32) / max(risk_max, 1e-12), 0.0, 1.0)
+    tolerances = min_tol + (max_tol - min_tol) * torch.pow(1.0 - risks, gamma)
+
+    selected = []
+    for tol in tolerances.detach().cpu().tolist():
+        runtime_depth = select_runtime_bound_depth(min_depth, float(tol), ref_bit, args)
+        selected.append(nearest_available_precision_depth(runtime_depth, bits, ref_bit))
+    actions[eligible_idx] = torch.tensor(selected, dtype=torch.int64, device=device)
+    return actions
+
+
 def select_precision_depth_actions(
     policy,
     scores,
@@ -2090,6 +2115,9 @@ def select_precision_depth_actions(
     eligible_count = int(eligible_idx.numel())
     if eligible_count <= 0:
         return actions
+
+    if policy["kind"] == "bound_budget" and str(getattr(args, "precision_depth_bound_assignment", "bucket_ratio")) == "nodewise":
+        return select_nodewise_bound_actions(priority, eligible_idx, args, num_nodes, bits, ref_bit, device)
 
     actions[eligible_idx] = cheapest_bit
     order = eligible_idx[torch.argsort(priority[eligible_idx], descending=True)]
@@ -2886,32 +2914,56 @@ def run_residual_precision_depth_experiment(args):
                     f"{int(args.residual_hard_min_support_hits) - 1} heads | "
                     f"compute< {int(args.residual_soft_min_support_hits)} heads"
                 )
+            assignment = str(getattr(args, "precision_depth_bound_assignment", "bucket_ratio"))
+            ratio_text = (
+                "nodewise_bound"
+                if bool(getattr(args, "precision_depth_bound_enable", False)) and assignment == "nodewise"
+                else (
+                    f"high_ratio={args.precision_depth_high_ratio:.2f} "
+                    f"| mid_ratio={args.precision_depth_mid_ratio:.2f} "
+                    f"| low_ratio={args.precision_depth_low_ratio:.2f}"
+                )
+            )
             log_important(
                 "[PrecisionDepthCost] "
                 f"model={args.real_quant_model_name} | reference={args.precision_depth_reference_tag}/P{ref_bit} "
                 f"| tags={list(zip(args.precision_depth_tags, args.precision_depth_bits))} "
-                f"| high_ratio={args.precision_depth_high_ratio:.2f} "
-                f"| mid_ratio={args.precision_depth_mid_ratio:.2f} "
-                f"| low_ratio={args.precision_depth_low_ratio:.2f} "
+                f"| assignment={ratio_text} "
                 f"| cost_scale={args.precision_depth_cost_scale:.2f} "
                 f"| fixed_cost={args.precision_depth_fixed_cost:.2f} "
                 f"| residual_cost={args.hierarchical_residual_cost:.4f}"
             )
             if bool(getattr(args, "precision_depth_bound_enable", False)):
-                bucket_bits = bound_policy_bucket_bits(bits, ref_bit, args)
-                bucket_text = " | ".join(
-                    f"{name}:min={info['min_depth']},tau={info['tolerance']:.4f},"
-                    f"runtime=P{info['runtime_depth']},pool=P{info['pool_bit']},"
-                    f"bound={info['bound']:.5f}"
-                    for name, info in bucket_bits.items()
-                )
-                log_important(
-                    "[GraphBitBound] "
-                    f"priorities={list(getattr(args, 'precision_depth_bound_priorities', []))} | "
-                    f"tile_k={int(getattr(args, 'precision_depth_bound_tile_k', 128))} | "
-                    f"scale={float(getattr(args, 'precision_depth_bound_scale', 1.0)):.3f} | "
-                    f"{bucket_text}"
-                )
+                assignment = str(getattr(args, "precision_depth_bound_assignment", "bucket_ratio"))
+                if assignment == "nodewise":
+                    log_important(
+                        "[GraphBitBound] "
+                        "assignment=nodewise | "
+                        f"priorities={list(getattr(args, 'precision_depth_bound_priorities', []))} | "
+                        f"tile_k={int(getattr(args, 'precision_depth_bound_tile_k', 128))} | "
+                        f"scale={float(getattr(args, 'precision_depth_bound_scale', 1.0)):.3f} | "
+                        f"min_depth={int(getattr(args, 'precision_depth_bound_nodewise_min_depth', 4))} | "
+                        f"tol=[{float(getattr(args, 'precision_depth_bound_nodewise_min_tolerance', 0.0)):.4f}, "
+                        f"{float(getattr(args, 'precision_depth_bound_nodewise_max_tolerance', 0.04)):.4f}] | "
+                        f"gamma={float(getattr(args, 'precision_depth_bound_nodewise_gamma', 1.0)):.3f} | "
+                        f"risk_max={float(getattr(args, 'precision_depth_bound_nodewise_risk_max', 15.0)):.3f}"
+                    )
+                else:
+                    bucket_bits = bound_policy_bucket_bits(bits, ref_bit, args)
+                    bucket_text = " | ".join(
+                        f"{name}:min={info['min_depth']},tau={info['tolerance']:.4f},"
+                        f"runtime=P{info['runtime_depth']},pool=P{info['pool_bit']},"
+                        f"bound={info['bound']:.5f}"
+                        for name, info in bucket_bits.items()
+                    )
+                    log_important(
+                        "[GraphBitBound] "
+                        f"assignment={assignment} | "
+                        f"priorities={list(getattr(args, 'precision_depth_bound_priorities', []))} | "
+                        f"tile_k={int(getattr(args, 'precision_depth_bound_tile_k', 128))} | "
+                        f"scale={float(getattr(args, 'precision_depth_bound_scale', 1.0)):.3f} | "
+                        f"{bucket_text}"
+                    )
 
             seeds = [int(args.seed) + run_idx for run_idx in range(args.runs)]
             for run_idx, seed in enumerate(seeds):

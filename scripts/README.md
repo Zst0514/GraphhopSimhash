@@ -12,6 +12,10 @@ run_graphbit_trace_replay.sh
 run_graphbit_predictor_free_flow.sh
     只跑 predictor-free Graph-Bit accuracy / stop-depth trace。
 
+run_t31_graphbit_nodewise_bound_sweep.sh
+    固定 T31 residual/reuse 前端，扫描逐节点 predictor-free bound 参数。
+    该入口不使用固定 high/mid/low 节点比例。
+
 replay_graphbit_trace_scheduler.py
     用已有 node trace 和 ONNXim component lookup 重放 scheduler，输出 cycles/traffic/energy 表。
 
