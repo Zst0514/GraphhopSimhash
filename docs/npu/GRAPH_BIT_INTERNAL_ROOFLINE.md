@@ -80,13 +80,63 @@ P4: W4A4
 bit-serial compute ∝ M * K * N * W_bits * A_depth
 ```
 
-因此理论 PE bit-plane compute reduction 是：
+因此，不考虑控制开销时，理论 PE bit-plane compute reduction 是：
 
 ```text
 A8 -> A6: 25.0%
 A8 -> A5: 37.5%
 A8 -> A4: 50.0%
 ```
+
+这只是上限。真正的 predictor-free early stop 还要执行 runtime bound：
+
+```text
+execute high bit planes
+estimate remaining low-bit upper bound
+compare bound <= graph-risk tolerance
+decide stop / continue
+```
+
+因此模型中需要显式计入：
+
+```text
+bound_ops:
+    remaining-bit bound estimation and compare
+
+bound_control_cycles:
+    per tile stop-check control and issue decision
+
+bound_overlap:
+    bound estimator 与 GEMM bit-plane execution 的可重叠比例
+```
+
+当前脚本默认采用一组保守但可调的参数：
+
+```text
+bound_ops_per_output = 8
+bound_tops = 16 TOPS
+bound_overlap = 0.5
+bound_control_cycles_per_check = 4
+```
+
+在 TAPE/DyLGNN 级别的 `M >= 2048` 下，这组默认设置会把净收益修正为：
+
+```text
+A8 -> A6: about 23.6% net cycle saving
+A8 -> A5: about 34.8% net cycle saving
+A8 -> A4: about 48.6% net cycle saving
+```
+
+如果使用更悲观的 bound datapath，例如：
+
+```text
+bound_ops_per_output = 16
+bound_tops = 4 TOPS
+bound_overlap = 0
+bound_control_cycles_per_check = 8
+```
+
+则 `A8 -> A6` 的净 cycle saving 会降到约 `12.6%`。这说明 Graph-Bit 的 mixed-depth 收益不仅取决于 bit-plane 数量，也取决于 bound estimator 是否足够轻量、是否能和 GEMM 执行重叠。
 
 但 latency 是否同幅下降取决于 roofline：
 

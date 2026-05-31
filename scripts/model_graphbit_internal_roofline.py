@@ -17,6 +17,7 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import math
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -57,6 +58,20 @@ def ceil_to_group(depth: int, group_bits: int, full_depth: int) -> int:
     return min(full_depth, groups * group_bits)
 
 
+def ceil_div(num: int, den: int) -> int:
+    return (num + den - 1) // den
+
+
+def default_bound_checks(depth: int, full_depth: int, low_min_depth: int, group_bits: int) -> int:
+    """Runtime predictor-free bound checks for a selected stop depth."""
+    if depth >= full_depth:
+        return 0
+    first_check = 6 if depth >= 6 else min(low_min_depth, depth)
+    if depth < first_check:
+        return 0
+    return 1 + max(0, math.ceil((depth - first_check) / max(1, group_bits)))
+
+
 def stage_metrics(
     stage: Stage,
     *,
@@ -70,10 +85,19 @@ def stage_metrics(
     peak_tops: float,
     mem_gbps: float,
     freq_ghz: float,
+    bound_enable: bool,
+    bound_low_min_depth: int,
+    bound_check_group_bits: int,
+    bound_ops_per_output: float,
+    bound_tops: float,
+    bound_overlap: float,
+    bound_control_cycles_per_check: float,
+    m_tile: int,
+    n_tile: int,
 ) -> dict[str, float | str | int]:
     macs = float(m) * stage.k * stage.n * stage.count
     p8_macs = macs
-    compute_ops_equiv = macs * depth / full_depth
+    bit_compute_ops_equiv = macs * depth / full_depth
 
     weight_bytes = stage.k * stage.n * stage.count * weight_bits / 8.0
     if activation_hbm_mode == "plane_group":
@@ -86,9 +110,29 @@ def stage_metrics(
 
     # Roofline latency.  peak_tops is effective P8 MAC throughput; lower
     # activation depth reduces bit-serial compute proportionally.
-    compute_time_s = compute_ops_equiv / (peak_tops * 1.0e12)
+    bit_compute_time_s = bit_compute_ops_equiv / (peak_tops * 1.0e12)
+    bound_checks = default_bound_checks(
+        depth,
+        full_depth,
+        bound_low_min_depth,
+        bound_check_group_bits,
+    ) if bound_enable else 0
+    bound_ops = float(m) * stage.n * stage.count * bound_checks * bound_ops_per_output
+    bound_unit_tops = max(1.0e-9, bound_tops)
+    bound_time_s = bound_ops / (bound_unit_tops * 1.0e12)
+    bound_cycles_raw = bound_time_s * freq_ghz * 1.0e9
+    visible_bound_cycles = bound_cycles_raw * max(0.0, min(1.0, 1.0 - bound_overlap))
+    tile_checks = (
+        ceil_div(max(1, m), max(1, m_tile))
+        * ceil_div(max(1, stage.n), max(1, n_tile))
+        * stage.count
+        * bound_checks
+    )
+    bound_control_cycles = float(tile_checks) * bound_control_cycles_per_check
+    bit_compute_cycles = bit_compute_time_s * freq_ghz * 1.0e9
+    cycles_bound = visible_bound_cycles + bound_control_cycles
     memory_time_s = hbm_bytes / (mem_gbps * 1.0e9)
-    cycles_compute = compute_time_s * freq_ghz * 1.0e9
+    cycles_compute = bit_compute_cycles + cycles_bound
     cycles_memory = memory_time_s * freq_ghz * 1.0e9
     cycles = max(cycles_compute, cycles_memory)
 
@@ -103,6 +147,7 @@ def stage_metrics(
     pe_activity = macs * depth_scale
     w_rf_activity = macs * depth_scale
     psum_activity = float(m) * stage.n * stage.count * depth_scale
+    bound_activity = bound_ops + float(tile_checks)
 
     total_activity = (
         weight_hbm_activity
@@ -112,6 +157,7 @@ def stage_metrics(
         + pe_activity
         + w_rf_activity
         + psum_activity
+        + bound_activity
     )
 
     oi = (2.0 * p8_macs) / hbm_bytes if hbm_bytes > 0.0 else 0.0
@@ -122,13 +168,21 @@ def stage_metrics(
         "m": m,
         "depth": depth,
         "macs": p8_macs,
-        "compute_ops_equiv": compute_ops_equiv,
+        "compute_ops_equiv": bit_compute_ops_equiv + bound_ops,
+        "bit_compute_ops_equiv": bit_compute_ops_equiv,
+        "bound_ops": bound_ops,
+        "bound_checks": bound_checks,
+        "tile_checks": tile_checks,
         "weight_bytes": weight_bytes,
         "activation_bytes": activation_bytes,
         "output_bytes": output_bytes,
         "hbm_bytes": hbm_bytes,
         "oi": oi,
         "ridge": ridge,
+        "bit_compute_cycles": bit_compute_cycles,
+        "bound_cycles_raw": bound_cycles_raw,
+        "bound_cycles": cycles_bound,
+        "bound_control_cycles": bound_control_cycles,
         "cycles_compute": cycles_compute,
         "cycles_memory": cycles_memory,
         "cycles": cycles,
@@ -143,6 +197,7 @@ def stage_metrics(
         "pe_activity": pe_activity,
         "w_rf_activity": w_rf_activity,
         "psum_activity": psum_activity,
+        "bound_activity": bound_activity,
         "total_activity": total_activity,
     }
 
@@ -154,10 +209,18 @@ def aggregate_layer(rows: list[dict[str, Any]]) -> dict[str, Any]:
         "depth": rows[0]["depth"],
         "macs": sum(float(r["macs"]) for r in rows),
         "compute_ops_equiv": sum(float(r["compute_ops_equiv"]) for r in rows),
+        "bit_compute_ops_equiv": sum(float(r["bit_compute_ops_equiv"]) for r in rows),
+        "bound_ops": sum(float(r["bound_ops"]) for r in rows),
+        "bound_checks": sum(float(r["bound_checks"]) for r in rows),
+        "tile_checks": sum(float(r["tile_checks"]) for r in rows),
         "weight_bytes": sum(float(r["weight_bytes"]) for r in rows),
         "activation_bytes": sum(float(r["activation_bytes"]) for r in rows),
         "output_bytes": sum(float(r["output_bytes"]) for r in rows),
         "hbm_bytes": sum(float(r["hbm_bytes"]) for r in rows),
+        "bit_compute_cycles": sum(float(r["bit_compute_cycles"]) for r in rows),
+        "bound_cycles_raw": sum(float(r["bound_cycles_raw"]) for r in rows),
+        "bound_cycles": sum(float(r["bound_cycles"]) for r in rows),
+        "bound_control_cycles": sum(float(r["bound_control_cycles"]) for r in rows),
         "cycles_compute": sum(float(r["cycles_compute"]) for r in rows),
         "cycles_memory": sum(float(r["cycles_memory"]) for r in rows),
         # A layer executes these GEMM stages sequentially in this simple model.
@@ -169,6 +232,7 @@ def aggregate_layer(rows: list[dict[str, Any]]) -> dict[str, Any]:
         "pe_activity": sum(float(r["pe_activity"]) for r in rows),
         "w_rf_activity": sum(float(r["w_rf_activity"]) for r in rows),
         "psum_activity": sum(float(r["psum_activity"]) for r in rows),
+        "bound_activity": sum(float(r["bound_activity"]) for r in rows),
         "total_activity": sum(float(r["total_activity"]) for r in rows),
     }
     total["oi"] = safe_div(2.0 * float(total["macs"]), float(total["hbm_bytes"]))
@@ -197,6 +261,8 @@ def normalize_rows(rows: list[dict[str, Any]]) -> None:
         row["activity_save_vs_p8"] = 1.0 - float(row["activity_vs_p8"])
         row["pe_vs_p8"] = safe_div(float(row["pe_activity"]), float(base["pe_activity"]))
         row["pe_save_vs_p8"] = 1.0 - float(row["pe_vs_p8"])
+        row["bound_cycles_vs_p8"] = safe_div(float(row["bound_cycles"]), float(base["cycles"]))
+        row["net_cycle_save_after_bound"] = row["cycle_save_vs_p8"]
 
 
 def write_tsv(path: Path, rows: list[dict[str, Any]]) -> None:
@@ -207,10 +273,15 @@ def write_tsv(path: Path, rows: list[dict[str, Any]]) -> None:
         "depth",
         "bound",
         "cycles",
+        "bit_compute_cycles",
+        "bound_cycles",
+        "bound_cycles_raw",
+        "bound_control_cycles",
         "cycles_compute",
         "cycles_memory",
         "cycles_vs_p8",
         "cycle_save_vs_p8",
+        "bound_cycles_vs_p8",
         "hbm_bytes",
         "weight_bytes",
         "activation_bytes",
@@ -230,6 +301,10 @@ def write_tsv(path: Path, rows: list[dict[str, Any]]) -> None:
         "w_rf_activity",
         "psum_activity",
         "output_hbm_activity",
+        "bound_activity",
+        "bound_ops",
+        "bound_checks",
+        "tile_checks",
     ]
     with path.open("w", newline="", encoding="utf-8") as handle:
         writer = csv.DictWriter(handle, fieldnames=fields, delimiter="\t")
@@ -246,13 +321,19 @@ def write_report(path: Path, rows: list[dict[str, Any]], *, batch_nodes: list[in
         f"batch_nodes={batch_nodes} | seq_lens={seq_lens}",
         f"activation_hbm_mode={args.activation_hbm_mode} | qkv_fused={args.qkv_fused}",
         f"peak={args.peak_tops:.1f} TOPS | mem={args.mem_gbps:.1f} GB/s | freq={args.freq_ghz:.2f} GHz",
+        (
+            "bound_overhead="
+            f"{args.bound_enable} | ops/output={args.bound_ops_per_output:.1f} | "
+            f"bound_tops={args.bound_tops:.1f} | overlap={args.bound_overlap:.2f} | "
+            f"ctrl/check={args.bound_control_cycles_per_check:.1f}"
+        ),
         "",
         "Layer total by M",
         (
-            f"{'M':>6s} {'B*S':<12s} {'P8 cyc':>10s} {'P6 save':>9s} {'P5 save':>9s} {'P4 save':>9s} "
-            f"{'P8 OI':>8s} {'P8 bound':>8s} {'P8 W%':>7s} {'P8 A%':>7s}"
+            f"{'M':>6s} {'B*S':<12s} {'P8 cyc':>10s} {'P6 net':>8s} {'P5 net':>8s} {'P4 net':>8s} "
+            f"{'P6 bnd':>8s} {'P5 bnd':>8s} {'P4 bnd':>8s} {'P8 OI':>8s} {'P8 bound':>8s}"
         ),
-        "-" * 104,
+        "-" * 124,
     ]
     p8_layer = {(r["m"], r["stage"]): r for r in layer_rows if r["depth"] == 8}
     for m in sorted({int(r["m"]) for r in layer_rows}):
@@ -261,13 +342,17 @@ def write_report(path: Path, rows: list[dict[str, Any]], *, batch_nodes: list[in
         def save(depth: int) -> str:
             row = by_depth.get(depth)
             return "-" if row is None else pct(float(row["cycle_save_vs_p8"]))
+        def bnd(depth: int) -> str:
+            row = by_depth.get(depth)
+            return "-" if row is None else pct(float(row["bound_cycles_vs_p8"]))
 
         w_share = safe_div(float(base["weight_bytes"]), float(base["hbm_bytes"]))
         a_share = safe_div(float(base["activation_bytes"]), float(base["hbm_bytes"]))
         lines.append(
             f"{m:6d} {str(base.get('batch_seq', '-')):<12s} {float(base['cycles']):10.1f} "
-            f"{save(6):>9s} {save(5):>9s} {save(4):>9s} "
-            f"{float(base['oi']):8.1f} {str(base['bound']):>8s} {pct(w_share):>7s} {pct(a_share):>7s}"
+            f"{save(6):>8s} {save(5):>8s} {save(4):>8s} "
+            f"{bnd(6):>8s} {bnd(5):>8s} {bnd(4):>8s} "
+            f"{float(base['oi']):8.1f} {str(base['bound']):>8s}"
         )
 
     lines.extend(
@@ -276,9 +361,9 @@ def write_report(path: Path, rows: list[dict[str, Any]], *, batch_nodes: list[in
             "Per-stage P8 bottleneck",
             (
                 f"{'M':>6s} {'stage':<12s} {'cycles%':>8s} {'OI':>8s} {'bound':>8s} "
-                f"{'W%':>7s} {'A%':>7s} {'P6 cyc save':>11s} {'P6 act save':>11s}"
+                f"{'W%':>7s} {'A%':>7s} {'P6 net':>8s} {'P6 bnd':>8s} {'P6 act':>8s}"
             ),
-            "-" * 104,
+            "-" * 116,
         ]
     )
     totals = {int(r["m"]): float(r["cycles"]) for r in layer_rows if r["depth"] == 8}
@@ -292,8 +377,9 @@ def write_report(path: Path, rows: list[dict[str, Any]], *, batch_nodes: list[in
         lines.append(
             f"{m:6d} {str(row['stage']):<12s} {pct(float(row['cycles']) / totals[m]):>8s} "
             f"{float(row['oi']):8.1f} {str(row['bound']):>8s} {pct(w_share):>7s} {pct(a_share):>7s} "
-            f"{pct(float(p6['cycle_save_vs_p8'])) if p6 else '-':>11s} "
-            f"{pct(float(p6['activity_save_vs_p8'])) if p6 else '-':>11s}"
+            f"{pct(float(p6['cycle_save_vs_p8'])) if p6 else '-':>8s} "
+            f"{pct(float(p6['bound_cycles_vs_p8'])) if p6 else '-':>8s} "
+            f"{pct(float(p6['activity_save_vs_p8'])) if p6 else '-':>8s}"
         )
 
     lines.extend(
@@ -302,6 +388,8 @@ def write_report(path: Path, rows: list[dict[str, Any]], *, batch_nodes: list[in
             "Reading guide:",
             "- M = batch_nodes * padded_sequence_length. This is the real row count of each Transformer linear GEMM.",
             "- P6/P5/P4 cycle save only appears when compute cycles are on the critical path.",
+            "- P6/P5/P4 net save includes predictor-free bound estimator and control overhead.",
+            "- bnd columns show visible bound-estimator overhead normalized to the P8 cycle count.",
             "- activity_save captures PE/RF/psum bit-plane reduction even when HBM dominates latency.",
             "- byte_major activation keeps A HBM reads at A8; plane_group allows activation HBM demand fetch.",
         ]
@@ -325,6 +413,30 @@ def main() -> None:
     parser.add_argument("--peak-tops", type=float, default=131.1)
     parser.add_argument("--mem-gbps", type=float, default=614.4)
     parser.add_argument("--freq-ghz", type=float, default=1.0)
+    parser.add_argument("--bound-enable", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--bound-low-min-depth", type=int, default=4)
+    parser.add_argument("--bound-check-group-bits", type=int, default=1)
+    parser.add_argument(
+        "--bound-ops-per-output",
+        type=float,
+        default=8.0,
+        help="Conservative bound-estimator ops per output element per runtime check.",
+    )
+    parser.add_argument(
+        "--bound-tops",
+        type=float,
+        default=16.0,
+        help="Effective throughput of the lightweight bound/check unit.",
+    )
+    parser.add_argument(
+        "--bound-overlap",
+        type=float,
+        default=0.5,
+        help="Fraction of bound-estimator cycles overlapped with bit-plane GEMM work.",
+    )
+    parser.add_argument("--bound-control-cycles-per-check", type=float, default=4.0)
+    parser.add_argument("--m-tile", type=int, default=128)
+    parser.add_argument("--n-tile", type=int, default=128)
     parser.add_argument(
         "--output-dir",
         type=Path,
@@ -355,6 +467,15 @@ def main() -> None:
                         peak_tops=args.peak_tops,
                         mem_gbps=args.mem_gbps,
                         freq_ghz=args.freq_ghz,
+                        bound_enable=args.bound_enable,
+                        bound_low_min_depth=args.bound_low_min_depth,
+                        bound_check_group_bits=args.bound_check_group_bits,
+                        bound_ops_per_output=args.bound_ops_per_output,
+                        bound_tops=args.bound_tops,
+                        bound_overlap=args.bound_overlap,
+                        bound_control_cycles_per_check=args.bound_control_cycles_per_check,
+                        m_tile=args.m_tile,
+                        n_tile=args.n_tile,
                     )
                     for stage in stages
                 ]
