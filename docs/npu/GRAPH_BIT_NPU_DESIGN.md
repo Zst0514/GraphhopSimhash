@@ -321,6 +321,29 @@ Graph-Bit:
 
 如果不同风险节点混在一个 micro-batch，低风险节点可能被高风险节点拖到保守执行。
 
+Graph-Bit 的额外机会来自图前端。普通 Transformer accelerator 通常只看到一批 sequence / token rows；Graph-Bit 还知道：
+
+```text
+1. 哪些节点已经被 SimHash/CAM 或 residual reuse 过滤掉；
+2. 剩余 miss nodes 的 degree / propagation / graph risk；
+3. 哪些 miss nodes 更适合保守执行，哪些可以更激进 early stop。
+```
+
+因此，Graph-Bit 可以把同风险 miss nodes 聚成 bucket，再让它们连续消费同一个 W tile。所有 bucket 使用同一个 LLaMA 权重矩阵，区别只在执行顺序：
+
+```text
+ordinary order:
+    W tile loaded
+    serves a short / mixed-risk token-row stream
+    evicted
+    later may be loaded again
+
+risk-bucket order:
+    W tile loaded
+    serves a longer same-risk token-row stream
+    evicted after more reuse
+```
+
 Graph-Bit scheduler 做两件事：
 
 ```text
@@ -343,6 +366,15 @@ bucket size 表示 W tile 的 service window，不是 bit-width：
 b16: W tile serves 16 token-row blocks
 b32: W tile serves 32 token-row blocks
 b64: W tile serves 64 token-row blocks
+```
+
+主要收益：
+
+```text
+1. amortize W tile HBM/LLC load over more token rows
+2. improve W-stationary array utilization
+3. keep nodes with similar min_depth / tolerance in the same execution stream
+4. reduce high-risk nodes forcing low-risk nodes into conservative P8-like execution
 ```
 
 tradeoff：

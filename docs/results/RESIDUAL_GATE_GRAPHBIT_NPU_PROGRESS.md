@@ -559,17 +559,22 @@ b64:
 
 service window 越大，单个 W tile 的 HBM 读取越能被更多 token rows 摊薄；但也要求 risk bucket 里有足够多的 miss-node token rows，并且片上 buffer / scheduler 能支撑更长的 tile 驻留时间。
 
-两类收益的定位不同：
+两类机制在数据流中分别提供不同收益：
 
 ```text
 variable activation depth:
-    主要是 compute / RF / psum activity saving。
-    它不应该单独被包装成主要 HBM latency 来源。
+    同一 risk bucket 内的节点使用相近 min_depth / tolerance。
+    低风险节点更早停止低位 bit-plane，
+    减少 PE MAC、W RF broadcast、activation RF access、
+    partial-sum read/update/write 等片上活动。
 
 risk-bucket W-stationary scheduling:
-    主要是 W tile reload / memory traffic saving。
-    这是端到端 cycles/traffic 更敏感的部分。
+    同风险 miss nodes 连续流过同一个 W tile。
+    一个 W tile 在换出前服务更多 token rows，
+    降低 W tile reload 次数，提高 weight-stationary 阵列利用率。
 ```
+
+这两部分是配套关系：risk bucket 先把执行流组织成更规整的同风险 token-row batch，variable-depth controller 再在 bucket 内执行更一致的 bit-serial early stop。
 
 硬件 profile 需要使用真实 encoder GEMM 行数：
 
