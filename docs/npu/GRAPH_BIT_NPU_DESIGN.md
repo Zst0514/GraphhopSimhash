@@ -329,7 +329,7 @@ Graph-Bit 的额外机会来自图前端。普通 Transformer accelerator 通常
 3. 哪些 miss nodes 更适合保守执行，哪些可以更激进 early stop。
 ```
 
-因此，Graph-Bit 可以把同风险 miss nodes 聚成 bucket，再让它们连续消费同一个 W tile。所有 bucket 使用同一个 LLaMA 权重矩阵，区别只在执行顺序：
+因此，Graph-Bit 可以把同风险 miss nodes 聚成 bucket，再让它们连续消费同一个 W tile。所有节点本来都共享同一个 LLaMA 权重矩阵；分桶的作用不是改变 W，而是让 stop-depth / tolerance 相近的 token rows 连续执行，减少 mixed-risk batch 带来的控制流分裂，并延长 W tile 的有效 service window：
 
 ```text
 ordinary order:

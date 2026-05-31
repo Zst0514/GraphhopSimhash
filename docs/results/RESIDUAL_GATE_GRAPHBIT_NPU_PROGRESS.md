@@ -542,7 +542,7 @@ mid / low-risk bucket:
     更容易提前停止低位 bit-plane。
 ```
 
-所有节点仍然使用同一个 LLaMA 权重 `W`。区别在于调度顺序：把同风险节点聚在一起后，同一个 `W tile` 加载到片上 SRAM / RF 后，可以连续服务更多来自同一 risk bucket 的 token rows。这个机会来自图前端提供的 risk / reuse 信息，不是普通无图 Transformer batch 自然具备的信号。
+所有节点本来就使用同一个 LLaMA 权重 `W`。risk bucket 不是为了让“相同风险节点才共享 W”，而是为了让 stop-depth / tolerance 相近的 token rows 连续执行。这样同一个 `W tile` 加载到片上 SRAM / RF 后，面对的是一串控制流相似的 token rows，PE issue、W RF broadcast 和 psum update 更规整，tile 可以在换出前服务更多 rows。这个机会来自图前端提供的 risk / reuse 信息，不是普通无图 Transformer batch 自然具备的信号。
 
 这里的 `b16 / b32 / b64` 表示 W tile 的 service window，不是 bit-width：
 
