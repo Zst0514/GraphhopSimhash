@@ -591,9 +591,9 @@ M = node_batch * sequence_length
 Graph-Bit 借鉴的是 FlashAttention 的 IO-aware 原则：
 
 ```text
-keep reusable tile on chip
-stream consumers through it
-avoid repeated HBM traffic
+把可复用 tile 留在片上
+让连续的消费者数据流过这个 tile
+减少同一 tile 的反复 HBM 读取
 ```
 
 区别在于作用对象不同：
@@ -659,3 +659,92 @@ normal / strong:
 这组比例是逐节点 bound 运行后得到的分布，不是预设 P8/P6/P5/P4 比例。
 
 ---
+
+## 3. 当前缺口与待验证项
+
+当前机制链路已经跑通，但还需要补齐以下验证，才能形成更完整的 full-stack 证据：
+
+### 3.1 前端参数口径统一
+
+当前文档中同时保留了 ST residual-gate、Cora/LLaMA Graph-Bit 和 PubMed/LLaMA support split 的不同配置。后续需要明确每个 dataset/backend 的主线前端：
+
+```text
+ST residual-gate:
+    当前共享在线配置已经有 Cora / PubMed 结果。
+
+Cora/LLaMA Graph-Bit:
+    需要固定一个通过 FullP8-miss sanity check 的前端。
+
+PubMed/LLaMA Graph-Bit:
+    需要更严格前端，避免 accepted reuse 本身带来过大 drop。
+```
+
+### 3.2 PubMed Graph-Bit full-stack 主表
+
+Cora 已有 trace-driven replay 表；PubMed 还需要用同一口径补齐：
+
+```text
+FullP8-miss
+GraphBit-now
+RiskBucket-b32
+RiskBucket-b64
+```
+
+表中需要同时报告：
+
+```text
+Reuse / Miss / AvgDepth / Wloads / Cycles / Traffic / Energy / Drop
+```
+
+### 3.3 HEAT-like baseline
+
+需要构造一个清晰的对照：
+
+```text
+HEAT-like static degree precision:
+    degree 直接决定静态 bit-depth
+    不做 residual reuse
+    不做 runtime bound
+    不做 risk-bucket scheduler
+```
+
+用于和以下主线逐项比较：
+
+```text
+Reuse + FullP8-miss
+Reuse + static degree bit-depth
+Reuse + predictor-free Graph-Bit
+Reuse + predictor-free Graph-Bit + risk-bucket W-stationary
+```
+
+这张表用于拆分收益来源：reuse/residual、runtime bound、risk-bucket W tile reuse 各自贡献多少。
+
+### 3.4 大 M ONNXim profile
+
+当前部分 ONNXim component lookup 仍来自小 M microbenchmark。真实 encoder GEMM 应使用：
+
+```text
+M = node_batch * sequence_length
+```
+
+建议补：
+
+```text
+M = 2048 / 4096 / 8192 / 16384
+```
+
+观察 large-M 下 variable activation depth 是否更明显转化为 cycles / energy 收益。
+
+### 3.5 Arxiv feasibility-only
+
+Arxiv 暂时不需要完整多 seed accuracy，但需要先做 feasibility-only：
+
+```text
+reuse / miss profile
+risk bucket size
+stop-depth histogram
+Wloads / Wscale
+SRAM feasibility
+```
+
+目标是验证大图上 risk bucket 是否更大、W tile service window 是否更容易被填满。

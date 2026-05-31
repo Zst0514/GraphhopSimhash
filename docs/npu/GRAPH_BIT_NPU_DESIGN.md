@@ -299,9 +299,9 @@ stay -> | PE PE PE PE|
 这里借鉴的是 FlashAttention 的 IO-aware 思路：
 
 ```text
-keep reusable tile on chip
-stream consumers through it
-avoid repeated HBM reload
+把可复用 tile 留在片上
+让连续的消费者数据流过这个 tile
+减少同一 tile 的反复 HBM 读取
 ```
 
 区别是：
