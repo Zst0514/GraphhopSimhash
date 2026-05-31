@@ -104,6 +104,15 @@ def build_node_risk_scores(
         + low_unique_weight * low_degree_unique_q
     )
 
+    propagation_f = propagation_risk.float() * 15.0
+    graph_context_f = graph_context_risk.float() * 15.0
+    low_degree_unique_f = (15.0 - propagation_f) * rarity_q.float() / 15.0
+    sensitivity_f = (
+        float(propagation_weight) * propagation_f
+        + float(graph_context_weight) * graph_context_f
+        + float(low_unique_weight) * low_degree_unique_f
+    )
+
     return {
         "propagation_risk": propagation_risk,
         "boundary_risk": boundary_risk,
@@ -115,6 +124,10 @@ def build_node_risk_scores(
         "similar_count": similar_count,
         "low_degree_unique_q": low_degree_unique_q,
         "sensitivity_q": sensitivity_q,
+        "propagation_f": propagation_f,
+        "graph_context_f": graph_context_f,
+        "low_degree_unique_f": low_degree_unique_f,
+        "sensitivity_f": sensitivity_f,
     }
 
 
@@ -143,7 +156,7 @@ def reuse_error_q(hamming_dist, route_hit_count=1, support_discount=True):
 @dataclass
 class RiskGateConfig:
     enabled: bool = True
-    reuse_threshold: int = 45
+    reuse_threshold: float = 45.0
     hub_threshold: int = 12
     rare_threshold: int = 10
     protect_hub_exact: bool = False
@@ -159,6 +172,7 @@ class RiskGateConfig:
     confidence_min_route_hits: int = 2
     confidence_min_base_hits: int = 2
     confidence_min_cos_margin: float = 0.02
+    use_continuous_risk: bool = False
 
 
 @dataclass
@@ -184,7 +198,10 @@ class ReuseRiskGate:
         cos_margin=None,
     ):
         dist = int(hamming_dist)
-        sensitivity = int(self.scores["sensitivity_q"][node_idx])
+        if self.config.use_continuous_risk and "sensitivity_f" in self.scores:
+            sensitivity = float(self.scores["sensitivity_f"][node_idx])
+        else:
+            sensitivity = int(self.scores["sensitivity_q"][node_idx])
         propagation = int(self.scores["propagation_q"][node_idx])
         graph_context = int(self.scores["graph_context_q"][node_idx])
         low_unique = int(self.scores["low_degree_unique_q"][node_idx])
@@ -342,4 +359,5 @@ def summarize_scores(scores):
         "rarity_q": stat(scores["rarity_q"]),
         "low_degree_unique_q": stat(scores["low_degree_unique_q"]),
         "sensitivity_q": stat(scores["sensitivity_q"]),
+        "sensitivity_f": stat(scores.get("sensitivity_f", scores["sensitivity_q"].float())),
     }

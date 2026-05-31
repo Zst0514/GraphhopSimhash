@@ -236,7 +236,7 @@ def build_parser():
         help="Disable degree/context/rare-leaf risk gate after retrieval.",
     )
     parser.set_defaults(disable_score_gate=True)
-    parser.add_argument("--score_reuse_threshold", type=int, default=45)
+    parser.add_argument("--score_reuse_threshold", type=float, default=45.0)
     parser.add_argument("--score_hub_threshold", type=int, default=12)
     parser.add_argument("--score_rare_threshold", type=int, default=10)
     parser.add_argument(
@@ -279,6 +279,11 @@ def build_parser():
     parser.add_argument("--score_propagation_weight", type=int, default=3)
     parser.add_argument("--score_graph_context_weight", type=int, default=2)
     parser.add_argument("--score_low_unique_weight", type=int, default=2)
+    parser.add_argument(
+        "--score_use_continuous_risk",
+        action="store_true",
+        help="Use the unrounded sensitivity score for reuse risk gating while keeping quantized score logs.",
+    )
     parser.add_argument(
         "--enable_quant_policy",
         action="store_true",
@@ -530,6 +535,12 @@ def build_parser():
         type=int,
         default=-1,
         help="If >0, collect hits with at least this many head/table hits; hits below hard threshold use residual correction.",
+    )
+    parser.add_argument(
+        "--residual_soft_min_cosine",
+        type=float,
+        default=-1.0,
+        help="If non-negative, soft residual hits with trace best cosine below this threshold fall back to compute.",
     )
     parser.add_argument("--residual_max_train_pairs", type=int, default=4096)
     parser.add_argument(

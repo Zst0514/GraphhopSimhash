@@ -440,6 +440,7 @@ def build_controller(
         score_propagation_weight=args.score_propagation_weight,
         score_graph_context_weight=args.score_graph_context_weight,
         score_low_unique_weight=args.score_low_unique_weight,
+        score_use_continuous_risk=args.score_use_continuous_risk,
         quant_policy_enabled=args.enable_quant_policy,
         quant_int4_threshold=args.quant_int4_threshold,
         quant_int8_threshold=args.quant_int8_threshold,
@@ -1034,6 +1035,30 @@ def build_support_split_masks(trace, soft_min_hits, hard_min_hits, device):
     }
 
 
+def apply_soft_cosine_gate(trace, split_info, min_cosine, device):
+    threshold = float(min_cosine)
+    if threshold < 0.0:
+        split_info["cos_filtered"] = 0
+        split_info["cos_threshold"] = threshold
+        return split_info
+
+    best_cos = trace["best_cosines"].to(device=device, dtype=torch.float32)
+    original_soft = split_info["soft_mask"].to(device=device, dtype=torch.bool)
+    keep_soft = original_soft & (best_cos >= threshold)
+    filtered = original_soft & ~keep_soft
+    hard_mask = split_info["hard_mask"].to(device=device, dtype=torch.bool)
+    residual_hit_mask = hard_mask | keep_soft
+
+    updated = dict(split_info)
+    updated["soft_mask"] = keep_soft
+    updated["residual_hit_mask"] = residual_hit_mask
+    updated["soft_count"] = int(keep_soft.sum().item())
+    updated["residual_count"] = int(residual_hit_mask.sum().item())
+    updated["cos_filtered"] = int(filtered.sum().item())
+    updated["cos_threshold"] = threshold
+    return updated
+
+
 def format_trace_dist_hist(trace, mask, max_dist=6):
     if mask is None or int(mask.sum().item()) <= 0:
         return "empty"
@@ -1235,6 +1260,19 @@ def run_residual_reuse_experiment(args):
                         args.residual_hard_min_support_hits,
                         device,
                     )
+                    split_info = apply_soft_cosine_gate(
+                        trace,
+                        split_info,
+                        args.residual_soft_min_cosine,
+                        device,
+                    )
+                    if int(split_info.get("cos_filtered", 0)) > 0:
+                        log_important(
+                            "[ResidualSoftCosGate] "
+                            f"threshold={float(split_info['cos_threshold']):.3f} "
+                            f"| filtered={int(split_info['cos_filtered'])} "
+                            f"| soft_kept={int(split_info['soft_count'])}"
+                        )
                     direct_hit_mask = split_info["hard_mask"]
                     residual_hit_mask = split_info["residual_hit_mask"]
                     soft_mask = split_info["soft_mask"]
@@ -1244,6 +1282,7 @@ def run_residual_reuse_experiment(args):
                     residual_base_features[residual_hit_mask] = direct_features[residual_hit_mask]
                     soft_direct_features = residual_base_features
                     correction_mask = correction_mask & soft_mask
+                    correction_info["soft_cos_filtered"] = int(split_info.get("cos_filtered", 0))
                     correction_info["residual_candidates"] = int(correction_mask.sum().item())
                 else:
                     split_info = None
@@ -1509,6 +1548,7 @@ def run_residual_reuse_experiment(args):
                     f"| Corrected={apply_info['corrected']} "
                     f"| DirectLowRisk={correction_info['direct_low_risk']} "
                     f"| SupportFiltered={correction_info['support_filtered']} "
+                    f"| SoftCosFiltered={correction_info.get('soft_cos_filtered', 0)} "
                     f"| ResidualCand={correction_info['residual_candidates']} "
                     f"| TrainPairs={train_info['train_pairs']} "
                     f"| BaseNodes={train_info.get('base_train_nodes', train_info['train_pairs'])} "
@@ -2981,14 +3021,22 @@ def run_residual_precision_depth_experiment(args):
                         run_args.residual_hard_min_support_hits,
                         device,
                     )
+                    split_info = apply_soft_cosine_gate(
+                        trace,
+                        split_info,
+                        run_args.residual_soft_min_cosine,
+                        device,
+                    )
                     correction_mask = correction_mask & split_info["soft_mask"]
+                    correction_info["soft_cos_filtered"] = int(split_info.get("cos_filtered", 0))
                     correction_info["residual_candidates"] = int(correction_mask.sum().item())
                     log_important(
                         "[FullStackSupportTrace] "
                         f"hard={split_info['hard_count']} | "
                         f"soft={split_info['soft_count']} | "
                         f"accepted={split_info['residual_count']} | "
-                        f"soft_hist={split_info['support_hist']}"
+                        f"soft_hist={split_info['support_hist']} | "
+                        f"cos_filtered={int(split_info.get('cos_filtered', 0))}"
                     )
                 adapter, train_info = train_residual_adapter(
                     target_embeddings=reference_raw,
@@ -4087,6 +4135,7 @@ def run_hierarchical_encoder_experiment(args):
                     max_pairs=residual_fit_cfg["max_pairs"],
                     correction_mask=correction_mask,
                     min_dist=run_args.residual_min_dist,
+<<<<<<< HEAD
                     controller=controller,
                     hash_route_features=route_bundle["hash_route_features"],
                     extra_anchors_per_node=run_args.residual_offline_extra_anchors_per_node,
@@ -4109,6 +4158,8 @@ def run_hierarchical_encoder_experiment(args):
                     gate_error_scale=run_args.residual_gate_error_scale,
                     gate_error_max=run_args.residual_gate_error_max,
                     gate_sparsity_weight=run_args.residual_gate_sparsity_weight,
+=======
+>>>>>>> e4c8ad7 (update)
                     class_aware_accept=run_args.residual_class_aware_accept,
                     classifier_accept_gate=run_args.residual_classifier_accept_gate,
                     classifier_model=model,

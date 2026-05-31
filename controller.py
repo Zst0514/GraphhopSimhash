@@ -125,6 +125,7 @@ class PaperHashReuseController(HeatPlusPlus_NDP_Controller):
         score_propagation_weight=3,
         score_graph_context_weight=2,
         score_low_unique_weight=2,
+        score_use_continuous_risk=False,
         quant_policy_enabled=False,
         quant_int4_threshold=90,
         quant_int8_threshold=45,
@@ -161,7 +162,7 @@ class PaperHashReuseController(HeatPlusPlus_NDP_Controller):
         self.disable_structure_check = bool(disable_structure_check)
         self.score_gate_config = RiskGateConfig(
             enabled=bool(score_gate_enabled),
-            reuse_threshold=int(score_reuse_threshold),
+            reuse_threshold=float(score_reuse_threshold),
             hub_threshold=int(score_hub_threshold),
             rare_threshold=int(score_rare_threshold),
             protect_hub_exact=bool(score_protect_hub_exact),
@@ -177,6 +178,7 @@ class PaperHashReuseController(HeatPlusPlus_NDP_Controller):
             confidence_min_route_hits=int(score_pair_confidence_min_route_hits),
             confidence_min_base_hits=int(score_pair_confidence_min_base_hits),
             confidence_min_cos_margin=float(score_pair_confidence_min_cos_margin),
+            use_continuous_risk=bool(score_use_continuous_risk),
         )
         self.score_rarity_bits = int(score_rarity_bits)
         self.score_rarity_seed = int(score_rarity_seed)

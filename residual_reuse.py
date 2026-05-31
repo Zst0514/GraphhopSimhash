@@ -491,7 +491,11 @@ def _build_class_accept_targets(data, pair_tensors, split):
         return torch.ones(node_indices.numel(), 1, dtype=torch.float32, device=device), 0, 0
 
     targets = torch.ones(node_indices.numel(), 1, dtype=torch.float32, device=device)
+<<<<<<< HEAD
     same_label = labels[node_indices[label_known]] == labels[safe_sources[label_known]]
+=======
+    same_label = labels[node_indices[label_known]] == labels[source_ids[label_known]]
+>>>>>>> e4c8ad7 (update)
     targets[label_known, 0] = same_label.to(dtype=torch.float32)
     labelled = int(label_known.sum().item())
     positives = int(same_label.sum().item())
@@ -1038,6 +1042,37 @@ def train_residual_adapter(
         positive_error_max,
     )
     pair_tensors = _append_training_pairs(pair_tensors, extra_pairs)
+    accept_targets = None
+    class_accept_labelled = 0
+    class_accept_positive = 0
+    classifier_accept_evaluated = 0
+    classifier_accept_positive = 0
+    classifier_accept_mean_kl = 0.0
+    class_targets = None
+    if bool(classifier_accept_gate) and not bool(classifier_accept_after_residual):
+        (
+            accept_targets,
+            classifier_accept_evaluated,
+            classifier_accept_positive,
+            classifier_accept_mean_kl,
+        ) = _build_classifier_accept_targets(
+            classifier_model,
+            data,
+            pair_tensors,
+            target_embeddings,
+            classifier_reference_logits,
+            mode=classifier_accept_mode,
+            scope=classifier_accept_scope,
+            max_kl=classifier_accept_max_kl,
+        )
+    if bool(class_aware_accept):
+        class_targets, class_accept_labelled, class_accept_positive = _build_class_accept_targets(
+            data,
+            pair_tensors,
+            train_split,
+        )
+        if class_targets is not None:
+            accept_targets = class_targets if accept_targets is None else accept_targets * class_targets
     negative_pairs = _harvest_negative_anchor_pairs(
         controller,
         hash_route_features,
@@ -1195,7 +1230,10 @@ def train_residual_adapter(
         )
         if class_targets is not None:
             accept_targets = accept_targets * class_targets
+<<<<<<< HEAD
 
+=======
+>>>>>>> e4c8ad7 (update)
     global_adapter, global_loss, global_gate_mean, global_accept_gate_mean = _fit_residual_adapter(
         x_train,
         anchors,
@@ -1334,6 +1372,7 @@ def apply_residual_adapter(
     gate_accept_threshold=None,
     min_dist=1.0,
     correction_mask=None,
+    normalize_corrected=False,
 ):
     if adapter is None:
         return direct_embeddings, {
@@ -1401,11 +1440,10 @@ def apply_residual_adapter(
             reject_mask = ~accept_mask
             if bool(accept_mask.any().item()):
                 accept_nodes = node_subset[accept_mask]
-                corrected[accept_nodes] = F.normalize(
-                    anchors[accept_mask] + float(local_alpha) * residual[accept_mask],
-                    p=2,
-                    dim=1,
-                )
+                corrected_values = anchors[accept_mask] + float(local_alpha) * residual[accept_mask]
+                if bool(normalize_corrected):
+                    corrected_values = F.normalize(corrected_values, p=2, dim=1)
+                corrected[accept_nodes] = corrected_values
             if bool(reject_mask.any().item()):
                 reject_nodes = node_subset[reject_mask]
                 corrected[reject_nodes] = target_embeddings[reject_nodes]
