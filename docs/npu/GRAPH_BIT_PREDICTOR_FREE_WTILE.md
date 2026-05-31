@@ -13,6 +13,12 @@
 docs/npu/GRAPH_BIT_FULLSTACK_REPRODUCTION_GUIDE.md
 ```
 
+Degree 如何具体映射到 `min_depth / tolerance / stop_depth` 见：
+
+```text
+docs/npu/GRAPH_BIT_DEGREE_BOUND_POLICY.md
+```
+
 ## 1. 当前方案的边界
 
 Graph-Bit 当前采用两阶段验证：

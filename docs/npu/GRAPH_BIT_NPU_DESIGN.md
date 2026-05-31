@@ -1,6 +1,6 @@
 # Graph-Bit NPU Design
 
-本文档是 Graph-Bit NPU 的主设计入口。当前主线只维护四份 NPU 文档：
+本文档是 Graph-Bit NPU 的主设计入口。当前主线只维护五份 NPU 文档：
 
 ```text
 GRAPH_BIT_NPU_DESIGN.md
@@ -8,6 +8,9 @@ GRAPH_BIT_NPU_DESIGN.md
 
 GRAPH_BIT_EARLY_STOP_IMPLEMENTATION.md
     实现细节：CLI、runner、ONNXim/GemmWS、trace replay 中 bit-plane early stop 的代码路径。
+
+GRAPH_BIT_DEGREE_BOUND_POLICY.md
+    风险策略：Degree 如何映射到 high/mid/low bucket、min_depth、tolerance 和 runtime stop depth。
 
 GRAPH_BIT_PREDICTOR_FREE_WTILE.md
     机制细化：predictor-free bound、activation bit-plane demand fetch、W tile 省搬运和 b32/b64 tradeoff。
