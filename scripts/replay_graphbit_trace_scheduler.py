@@ -447,6 +447,32 @@ def main() -> None:
     )
 
     for batch in args.candidate_batches:
+        full_loads_bucket = math.ceil(miss_count / max(1, batch))
+        out_rows.append(
+            make_row(
+                method=f"FullP8-bucket-b{batch}",
+                reuse_count=reuse_count,
+                direct_count=direct_count,
+                residual_count=residual_count,
+                miss_count=miss_count,
+                total_nodes=total_nodes,
+                exec_counts=full_exec,
+                loads=full_loads_bucket,
+                baseline_loads=baseline_loads,
+                tail_util=miss_count / (full_loads_bucket * batch)
+                if full_loads_bucket
+                else 1.0,
+                suffix=f"ws_b{batch}",
+                drop=args.fullp8_drop_percent,
+                base=base,
+                components=components,
+                sram_fit=batch <= buffers.max_batch(),
+                scheduler_nodes=miss_count,
+                scheduler_cycles_per_node=args.bucket_overhead_cycles_per_node,
+                scheduler_read_requests_per_node=args.bucket_overhead_read_requests_per_node,
+                scheduler_write_requests_per_node=args.bucket_overhead_write_requests_per_node,
+            )
+        )
         exec_original, loads_original, tail_original = replay_original_order(miss_rows, batch)
         out_rows.append(
             make_row(
@@ -628,6 +654,7 @@ def main() -> None:
             "Reading guide:",
             "- FullP8-miss replays the same miss set but forces every miss to D8.",
             "- GraphBit-now uses the real per-node stop depth, without larger W tile reuse.",
+            "- FullP8-bucket-bN keeps every miss at D8 but uses the larger W-stationary service window; it isolates W tile batching from mixed-depth early stop.",
             "- OriginalOrder-bN preserves node order; a mixed micro-batch executes to the maximum depth inside the batch.",
             "- RiskBucket-bN groups miss nodes by actual stop-depth bucket before batching, so Wloads and Wscale are replayed from the real trace.",
         ]

@@ -51,7 +51,9 @@ Trace replay source:
 |---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
 | FullP8-miss | 27.8% | 72.2% | 0.722 | 0.722 | 0.722 | 0.77% | 8.00 | 123 | 1.000 |
 | GraphBit-now | 27.8% | 72.1% | 0.716 | 0.719 | 0.717 | 2.13% | 6.10 | 123 | 1.000 |
+| FullP8-bucket-b32 | 27.8% | 72.2% | 0.385 | 0.368 | 0.377 | 0.77% | 8.00 | 62 | 0.504 |
 | RiskBucket-b32 | 27.8% | 72.1% | 0.384 | 0.366 | 0.375 | 2.13% | 6.10 | 63 | 0.512 |
+| FullP8-bucket-b64 | 27.8% | 72.2% | 0.290 | 0.191 | 0.241 | 0.77% | 8.00 | 31 | 0.252 |
 | RiskBucket-b64 | 27.8% | 72.1% | 0.289 | 0.189 | 0.239 | 2.13% | 6.10 | 33 | 0.268 |
 
 含义：
@@ -61,13 +63,35 @@ FullP8-miss:
     reuse/residual 前端固定，所有 miss nodes 都完整执行 P8。
 
 GraphBit-now:
-    只启用 predictor-free early stop 和 activation demand fetch。
+    只启用 predictor-free stop-depth / bit-plane issue proxy。
     不额外假设 W tile batch amortization。
+
+FullP8-bucket-b32 / b64:
+    所有 miss nodes 仍完整执行 P8，但使用更大的 W-stationary service window。
+    这行隔离出“只做 W tile batching、不做 mixed-depth early stop”的收益。
 
 RiskBucket-b32 / b64:
     在 GraphBit-now 基础上，按真实 stop-depth trace 做 risk-bucket scheduler replay。
     Wloads/Wscale 来自 trace replay 统计。
 ```
+
+这个消融暴露了当前最重要的边界：
+
+```text
+FullP8-bucket-b32: 0.385 cycles, 0.77% drop
+RiskBucket-b32:    0.384 cycles, 2.13% drop
+
+FullP8-bucket-b64: 0.290 cycles, 0.77% drop
+RiskBucket-b64:    0.289 cycles, 2.13% drop
+```
+
+也就是说，在当前 ONNXim component model 和 Cora trace 下，大头收益几乎全部来自 W-stationary bucket batching。predictor-free mixed-depth 把 AvgDepth 从 8.00 降到 6.10，但没有带来明显额外 cycles 下降，反而引入了额外 accuracy drop。因此当前硬件主线应优先强调：
+
+```text
+graph-risk bucket scheduler + W-stationary W tile reuse
+```
+
+mixed-depth / early-stop 应作为第二层片上算术与能耗优化，后续需要用更细粒度 RF / psum / PE 活动模型证明它相对 FullP8-bucket 的额外收益。
 
 复现流程见：
 

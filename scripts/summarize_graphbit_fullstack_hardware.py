@@ -325,7 +325,7 @@ def main() -> None:
             "",
             "Interpretation:",
             "- FullP8-miss keeps reuse/residual front-end fixed and sends every miss node to FullP8.",
-            "- GraphBit-now uses predictor-free bit-plane stop and activation demand fetch, without extra W-HBM amortization.",
+            "- GraphBit-now uses predictor-free stop-depth / bit-plane issue proxy, without extra W-HBM amortization.",
             "- GraphBit-bucket32/64 additionally use same-risk bucket scheduling when the feasibility model says SRAM and bucket size are sufficient.",
             "- Drop is inherited from the corresponding workload accuracy profile; W-tile scheduling does not change numerical output.",
         ]

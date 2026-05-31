@@ -462,7 +462,9 @@ Cora h8_54_T40 当前 trace-driven replay：
 |---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
 | FullP8-miss | 27.8% | 72.2% | 0.722 | 0.722 | 0.722 | 0.77% | 8.00 | 123 | 1.000 |
 | GraphBit-now | 27.8% | 72.1% | 0.716 | 0.719 | 0.717 | 2.13% | 6.10 | 123 | 1.000 |
+| FullP8-bucket-b32 | 27.8% | 72.2% | 0.385 | 0.368 | 0.377 | 0.77% | 8.00 | 62 | 0.504 |
 | RiskBucket-b32 | 27.8% | 72.1% | 0.384 | 0.366 | 0.375 | 2.13% | 6.10 | 63 | 0.512 |
+| FullP8-bucket-b64 | 27.8% | 72.2% | 0.290 | 0.191 | 0.241 | 0.77% | 8.00 | 31 | 0.252 |
 | RiskBucket-b64 | 27.8% | 72.1% | 0.289 | 0.189 | 0.239 | 2.13% | 6.10 | 33 | 0.268 |
 
 解释：
@@ -475,6 +477,10 @@ GraphBit-now:
     early stop 已经把 AvgDepth 从 8.00 降到 6.10，
     但 Wloads 不变，所以 cycles 只小幅下降。
 
+FullP8-bucket-b32/b64:
+    miss nodes 仍完整 P8，但使用更大的 W-stationary service window。
+    这行隔离出 W tile batching 本身的收益。
+
 RiskBucket-b32:
     在 GraphBit-now 基础上，按 stop-depth 分桶调度，
     Wloads 从 123 降到 63。
@@ -486,9 +492,9 @@ RiskBucket-b64:
 核心结论：
 
 ```text
-bit-plane early stop 解决“少算低位”的问题；
-risk-bucket W tile reuse 解决“少搬 W tile”的问题；
-两者必须一起出现，Graph-Bit NPU 才有明显端到端收益。
+当前 trace 下，W-stationary bucket batching 是主要 cycles / traffic 收益来源；
+predictor-free mixed depth 把 AvgDepth 降低，但相对 FullP8-bucket 的额外 cycles 收益很小；
+mixed depth 应定位为片上算术/能耗优化，需要继续用 RF、psum、PE 活动模型证明额外收益。
 ```
 
 ## 7. 相对 PADE / HEAT / 普通 Transformer Accelerator 的区别

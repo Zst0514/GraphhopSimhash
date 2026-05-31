@@ -7,7 +7,7 @@
 2. per-node stop-depth trace
 3. ONNXim component lookup
 4. trace-driven scheduler replay
-5. FullP8-miss / GraphBit-now / RiskBucket-b32 / RiskBucket-b64 cycles 表
+5. FullP8-miss / GraphBit-now / FullP8-bucket / RiskBucket cycles 表
 ```
 
 相关机制说明：
@@ -608,6 +608,10 @@ FullP8-miss:
 GraphBit-now:
     使用真实 stop_depth，但不扩大 W tile batch。
 
+FullP8-bucket-b32/b64:
+    所有 miss nodes 仍完整 P8，但使用更大的 W-stationary service window。
+    这行用于隔离 W tile batching 的收益。
+
 OriginalOrder-b32/b64:
     不分桶，按原始节点顺序组 batch。
     mixed batch 按最高 depth 执行。
@@ -688,7 +692,9 @@ miss = 72.2%
 |---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
 | FullP8-miss | 27.8% | 72.2% | 0.722 | 0.722 | 0.722 | 0.77% | 8.00 | 123 | 1.000 |
 | GraphBit-now | 27.8% | 72.2% | 0.716 | 0.719 | 0.717 | 2.13% | 6.10 | 123 | 1.000 |
+| FullP8-bucket-b32 | 27.8% | 72.2% | 0.385 | 0.368 | 0.377 | 0.77% | 8.00 | 62 | 0.504 |
 | RiskBucket-b32 | 27.8% | 72.2% | 0.384 | 0.366 | 0.375 | 2.13% | 6.10 | 63 | 0.512 |
+| FullP8-bucket-b64 | 27.8% | 72.2% | 0.290 | 0.191 | 0.241 | 0.77% | 8.00 | 31 | 0.252 |
 | RiskBucket-b64 | 27.8% | 72.2% | 0.289 | 0.189 | 0.239 | 2.13% | 6.10 | 33 | 0.268 |
 
 加速计算：
@@ -696,15 +702,28 @@ miss = 72.2%
 ```text
 相对 FullP8-miss:
     GraphBit-now:    0.722 / 0.716 = 1.01x
+    FullP8-bucket-b32: 0.722 / 0.385 = 1.88x
     RiskBucket-b32:  0.722 / 0.384 = 1.88x
+    FullP8-bucket-b64: 0.722 / 0.290 = 2.49x
     RiskBucket-b64:  0.722 / 0.289 = 2.50x
 
 相对 all-node FullP8/W4A8:
     FullP8-miss:     1 / 0.722 = 1.38x
     GraphBit-now:    1 / 0.716 = 1.40x
+    FullP8-bucket-b32: 1 / 0.385 = 2.60x
     RiskBucket-b32:  1 / 0.384 = 2.60x
+    FullP8-bucket-b64: 1 / 0.290 = 3.45x
     RiskBucket-b64:  1 / 0.289 = 3.46x
 ```
+
+这张消融的关键结论是：
+
+```text
+FullP8-bucket 和 RiskBucket 的 cycles 几乎相同；
+RiskBucket 的 AvgD 更低，但 accuracy drop 更高。
+```
+
+因此当前 trace 下，主要硬件收益来自 W-stationary bucket service window，而不是 mixed-depth early stop。mixed-depth / predictor-free bound 目前更适合定位为片上算术/能耗优化，需要继续用更细粒度 RF、psum、PE 活动模型验证其额外收益。
 
 ## 8. 常见复现实验模板
 
