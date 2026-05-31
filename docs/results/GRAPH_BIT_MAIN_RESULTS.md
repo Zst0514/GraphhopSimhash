@@ -93,6 +93,52 @@ graph-risk bucket scheduler + W-stationary W tile reuse
 
 mixed-depth / early-stop 应作为第二层片上算术与能耗优化，后续需要用更细粒度 RF / psum / PE 活动模型证明它相对 FullP8-bucket 的额外收益。
 
+### 2.1 Bit-depth-sensitive Activity Breakdown
+
+为避免 ONNXim component cycles 掩盖 mixed-depth 的片上收益，新增 activity breakdown：
+
+```text
+script:
+    scripts/model_graphbit_activity_breakdown.py
+
+output:
+    output/graphbit_trace_replay/cora_h8_54_T40_fullp8_bucket_ablation/activity_breakdown/
+```
+
+该模型把每行拆成：
+
+```text
+W_HBM, A_HBM, A_RF, PE, W_RF, Psum, Out, Scheduler
+```
+
+关键结果：
+
+| Compare | ONNX Cycles Save | Activity Cycles Save | Activity Energy Save | PE/W_RF/Psum Save | Extra Drop |
+|---|---:|---:|---:|---:|---:|
+| RiskBucket-b32 vs FullP8-bucket-b32 | 0.1% | 12.1% | 15.6% | 23.7% | +1.36% |
+| RiskBucket-b64 vs FullP8-bucket-b64 | 0.3% | 13.9% | 16.8% | 23.7% | +1.36% |
+
+解释：
+
+```text
+ONNX component cycles:
+    当前对 P8/P6/P5 的区别不敏感，因此看不到 mixed-depth cycles 收益。
+
+activity model:
+    A_RF / PE / W_RF / Psum 随 AvgDepth/8 缩放。
+    AvgDepth 从 8.00 降到 6.10 后，这些片上活动下降约 23.7%。
+```
+
+因此当前更准确的定位是：
+
+```text
+W-stationary bucket batching:
+    主要 latency / traffic 收益来源。
+
+mixed-depth predictor-free early stop:
+    主要片上 RF / PE / psum activity 和能耗优化。
+```
+
 复现流程见：
 
 ```text

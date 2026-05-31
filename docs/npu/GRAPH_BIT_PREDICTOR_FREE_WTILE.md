@@ -497,6 +497,32 @@ predictor-free mixed depth 把 AvgDepth 降低，但相对 FullP8-bucket 的额�
 mixed depth 应定位为片上算术/能耗优化，需要继续用 RF、psum、PE 活动模型证明额外收益。
 ```
 
+进一步的 bit-depth-sensitive activity breakdown 显示：
+
+| Compare | ONNX-C Save | Activity-C Save | Activity-E Save | PE/W_RF/Psum Save | Extra Drop |
+|---|---:|---:|---:|---:|---:|
+| RiskBucket-b32 vs FullP8-bucket-b32 | 0.1% | 12.1% | 15.6% | 23.7% | +1.36% |
+| RiskBucket-b64 vs FullP8-bucket-b64 | 0.3% | 13.9% | 16.8% | 23.7% | +1.36% |
+
+这个结果给出更准确的定位：
+
+```text
+W-stationary bucket batching:
+    负责主要 latency / traffic 收益。
+
+predictor-free mixed depth:
+    负责减少 A_RF / PE / W_RF / Psum 等片上活动。
+    当前更适合作为能耗优化，而不是主要 cycles 优化。
+```
+
+脚本入口：
+
+```bash
+python GraphhopSimhash/scripts/model_graphbit_activity_breakdown.py \
+  --replay-json output/.../replay/cora_seed42_DegBound_trace_replay.json \
+  --output-dir output/.../activity_breakdown
+```
+
 ## 7. 相对 PADE / HEAT / 普通 Transformer Accelerator 的区别
 
 ### 7.1 相对 PADE

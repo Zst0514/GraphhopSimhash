@@ -178,6 +178,33 @@ output/graphbit_trace_replay/cora_h8_54_T40_boundclean_quick/replay/cora_seed42_
 output/graphbit_trace_replay/cora_h8_54_T40_boundclean_quick/replay/cora_seed42_DegBound_component_lookup.tsv
 ```
 
+如果要查看 bit-depth-sensitive 的片上活动分解，可继续运行：
+
+```bash
+cd /home/zhangshangtong/Transformer/OFA
+
+/home/zhangshangtong/.conda/envs/OFA/bin/python \
+  GraphhopSimhash/scripts/model_graphbit_activity_breakdown.py \
+  --replay-json output/graphbit_trace_replay/cora_h8_54_T40_boundclean_quick/replay/cora_seed42_DegBound_trace_replay.json \
+  --output-dir output/graphbit_trace_replay/cora_h8_54_T40_boundclean_quick/activity_breakdown
+```
+
+输出：
+
+```text
+output/.../activity_breakdown/graphbit_activity_breakdown.txt
+output/.../activity_breakdown/graphbit_activity_breakdown.tsv
+output/.../activity_breakdown/graphbit_activity_breakdown.json
+```
+
+它会把每个方法拆成：
+
+```text
+W_HBM / A_HBM / A_RF / PE / W_RF / Psum / Out / Scheduler
+```
+
+用于判断 mixed-depth 相比 FullP8-bucket 是否真的减少片上活动。
+
 ## 4. 分步跑法
 
 如果要调参数，建议分步跑，方便检查每一步。
@@ -724,6 +751,32 @@ RiskBucket 的 AvgD 更低，但 accuracy drop 更高。
 ```
 
 因此当前 trace 下，主要硬件收益来自 W-stationary bucket service window，而不是 mixed-depth early stop。mixed-depth / predictor-free bound 目前更适合定位为片上算术/能耗优化，需要继续用更细粒度 RF、psum、PE 活动模型验证其额外收益。
+
+### 7.1 Activity Breakdown
+
+用 `model_graphbit_activity_breakdown.py` 对同一 replay JSON 做片上活动拆分：
+
+| Compare | ONNX-C Save | Activity-C Save | Activity-E Save | PE/W_RF/Psum Save | Extra Drop |
+|---|---:|---:|---:|---:|---:|
+| RiskBucket-b32 vs FullP8-bucket-b32 | 0.1% | 12.1% | 15.6% | 23.7% | +1.36% |
+| RiskBucket-b64 vs FullP8-bucket-b64 | 0.3% | 13.9% | 16.8% | 23.7% | +1.36% |
+
+这说明：
+
+```text
+ONNX cycles:
+    目前主要反映 W tile batching，对 P8/P6/P5 depth 不敏感。
+
+activity model:
+    mixed-depth 能明确减少 PE issue、W RF/broadcast 和 psum update。
+```
+
+所以当前结论是：
+
+```text
+W-stationary bucket scheduler 负责 latency / traffic 主收益；
+mixed-depth predictor-free early stop 负责片上活动和能耗收益。
+```
 
 ## 8. 常见复现实验模板
 
