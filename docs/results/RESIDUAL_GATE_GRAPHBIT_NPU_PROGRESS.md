@@ -726,19 +726,3 @@ Reuse + predictor-free Graph-Bit + risk-bucket W-stationary
 ```
 
 这张表用于拆分收益来源：reuse/residual、runtime bound、risk-bucket W tile reuse 各自贡献多少。
-
-### 3.4 大 M ONNXim profile
-
-当前部分 ONNXim component lookup 仍来自小 M microbenchmark。真实 encoder GEMM 应使用：
-
-```text
-M = node_batch * sequence_length
-```
-
-待验证的 M 取值：
-
-```text
-M = 2048 / 4096 / 8192 / 16384
-```
-
-观察 large-M 下 variable activation depth 是否更明显转化为 cycles / energy 收益。
