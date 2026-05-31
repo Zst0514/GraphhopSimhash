@@ -97,26 +97,16 @@ tau:
 
 ### 1.3 Pair Feature
 
-Residual adapter 不从 hash bit 直接还原 embedding。Hash/CAM 只负责找锚点，adapter 使用目标节点和锚点之间的差异特征：
+Residual adapter 不从 hash bit 直接还原 embedding。Hash/CAM 只负责找锚点，adapter 只需要判断“目标节点和锚点差多少、是否值得修”。
 
 ```text
-cheap_delta:
-    cheap_feature(v) - cheap_feature(u)
-
-context_delta:
-    context_signature(v) - context_signature(u)
-
-scalar_stats:
-    hamming distance
-    support count
-    base support count
-    table hit count
-    cheap/context cosine
-    degree ratio
-    risk / sensitivity score
+pair_feature(v, u) =
+    cheap/context feature difference
+  + CAM confidence signals
+  + graph risk / degree signals
 ```
 
-这里的 cheap feature 通常来自轻量文本模型或浅层编码结果；context signature 来自节点自身特征和邻居均值。
+其中 CAM confidence signals 包括 Hamming distance、support count、候选 cosine 等；graph signals 包括 degree ratio 和 sensitivity/risk score。在线阶段只用这些轻量特征和已缓存的 anchor embedding，不访问目标节点的 full embedding。
 
 ---
 
@@ -234,7 +224,7 @@ Llama2-7B W4A16 旧日志显示该方向可行，
 但需要在当前代码和当前 target pool 下重新复核。
 ```
 
-因此 residual-gate 的机制已经跑通；最终主结果仍需要按目标 encoder backend 分别复核。
+因此 residual-gate 的机制已经跑通；不同 encoder backend 下需要使用各自的目标 embedding 训练和评估 residual adapter。
 
 ---
 
@@ -258,12 +248,35 @@ Graph-Bit NPU:
 
 ### 2.2 基本思想
 
-Graph-Bit 不把节点静态分配成固定比例的 P8/P6/P4。当前主线改为 nodewise predictor-free bound：
+Graph-Bit 的核心是把“节点重要性不同”转化成“encoder GEMM 内部算术努力不同”。  
+它不是简单把全图节点按固定比例分成 P8/P6/P4，也不是离线指定某些节点永远用低位宽。原因有两点：
+
+```text
+1. 不同数据集的 risk 分布不同，固定比例不稳。
+2. 同一个节点是否能提前停止，应该由当前 bit-plane 剩余误差上界决定，
+   而不是只由一个静态分组决定。
+```
+
+因此当前主线采用 nodewise predictor-free bound：
 
 ```text
 graph risk -> min_depth + tolerance
 runtime bound -> actual stop depth
 ```
+
+图风险只负责给每个 miss node 设置两类运行时约束：
+
+```text
+min_depth:
+    最低安全 bit-depth。
+    风险越高，min_depth 越高。
+
+tolerance:
+    剩余低位 bit-plane 可接受的误差上界。
+    风险越高，tolerance 越小。
+```
+
+之后 NPU 在 bit-serial GEMM 执行过程中，从高位到低位逐步累加 partial sum，并在每个候选 depth 检查剩余低位的理论上界。如果上界已经小于该节点的 tolerance，就停止继续执行低位。
 
 对每个 miss node：
 
@@ -283,19 +296,105 @@ for depth in min_depth..8:
 
 ```text
 高风险节点:
-    tolerance 小，更接近 P8。
+    tolerance 小，bound 不容易满足，更接近 P8。
 
 低风险节点:
-    tolerance 大，更容易提前停止。
+    tolerance 大，bound 更容易满足，更容易停在 P6/P5/P4。
 
 实际 P8/P7/P6/P5/P4 分布:
     由 runtime bound 逐节点产生，
     不是预设比例。
 ```
 
+这个机制保留了两层安全性：
+
+```text
+第一层:
+    graph risk 先给出 min_depth，避免低风险以外的节点过早停止。
+
+第二层:
+    predictor-free bound 再判断低位是否可以跳过，
+    避免只凭 degree/TSER 静态决定最终位宽。
+```
+
+从硬件角度看，Graph-Bit NPU 对 miss nodes 做的是：
+
+```text
+1. 按 graph risk 组织执行队列。
+2. 在 W-stationary systolic array 中加载 W tile。
+3. token rows 流过同一个 W tile。
+4. bit-serial controller 从高位 activation bit-plane 开始执行。
+5. runtime bound 满足后，停止后续低位 effort。
+```
+
+因此 Graph-Bit 的完整思想是：
+
+```text
+graph risk controls scheduling;
+runtime bound controls stop depth;
+W-stationary dataflow turns grouped miss nodes into tile reuse;
+bit-serial execution turns stop depth into arithmetic activity reduction.
+```
+
 ---
 
 ### 2.3 Predictor-Free Bound
+
+这一部分的思想来源于 HPCA'26 PADE 这类 predictor-free sparse attention accelerator。PADE 的核心观察是：不需要额外训练一个稀疏预测器，也可以在 bit-serial 计算过程中用数值上下界判断某些后续计算是否还可能改变最终重要性结论。
+
+PADE 的执行逻辑可以概括为：
+
+```text
+1. 按 bit-plane 从高位到低位逐步计算 attention score。
+2. 每执行一部分高位，就维护当前 partial sum。
+3. 用剩余低位 bit-plane 的最大可能贡献构造 upper/lower bound。
+4. 如果 bound 已经证明该 candidate 不可能影响 top-k / sparse attention 结果，
+   就停止后续低位计算。
+```
+
+因此 PADE 的 “prediction-free” 含义是：
+
+```text
+不额外训练 predictor；
+用 bit-level bound 在执行过程中做安全判断。
+```
+
+Graph-Bit 借鉴的是这个 predictor-free bound 思路，但应用对象和优化目标不同：
+
+```text
+PADE:
+    作用于 sparse attention。
+    bound 判断某个 attention candidate 是否还可能影响 top-k / sparse pattern。
+
+Graph-Bit:
+    作用于 graph-text encoder 的 projection / FFN GEMM。
+    bound 判断低位 activation bit-plane 是否还值得继续执行。
+```
+
+Graph-Bit 的新增点是把图后端风险接入 bound 策略：
+
+```text
+graph risk / degree / propagation risk
+    -> min_depth
+    -> tolerance
+    -> runtime stop depth
+```
+
+也就是说，同一个数值 bound 在不同节点上有不同的停止条件：
+
+```text
+high-risk node:
+    tolerance 小，需要更完整的 bit-depth。
+
+low-risk node:
+    tolerance 大，可以更早停止低位 bit-plane。
+```
+
+这使得 Graph-Bit 不是普通的 bit-serial early termination，而是：
+
+```text
+graph-conditioned predictor-free execution
+```
 
 activation 逻辑上是 A8：
 
@@ -463,70 +562,3 @@ normal / strong:
 这组比例是逐节点 bound 运行后得到的分布，不是预设 P8/P6/P5/P4 比例。
 
 ---
-
-## 3. 当前进展状态
-
-### 3.1 Residual-Gate
-
-已经完成：
-
-```text
-1. CAM fuzzy hit 的 residual correction 路径。
-2. learned accept gate。
-3. support-aware alpha / adapter。
-4. Cora/PubMed shared online residual-gate 实验。
-```
-
-仍需继续：
-
-```text
-1. 在当前代码下重跑 Llama2-7B W4A16/W4A8 family 的 residual-gate 结果。
-2. 明确 ST oracle / Llama oracle 的 target embedding 差异。
-3. 将最终前端配置固定为 Graph-Bit full-stack 的默认入口。
-```
-
-### 3.2 Graph-Bit NPU
-
-已经完成：
-
-```text
-1. nodewise predictor-free bound 逻辑。
-2. W4A7 支持，补齐 P8/P7/P6/P5/P4 validation。
-3. Cora quick sweep。
-4. ONNXim component + trace-driven replay 的初版链路。
-```
-
-仍需继续：
-
-```text
-1. PubMed / Arxiv 上复核 nodewise bound policy。
-2. 用更真实的 M = batch_nodes * seq_len 重跑 NPU component profile。
-3. 进一步区分 compute-bound 与 memory-bound GEMM 下 variable depth 的收益。
-4. 将 risk-bucket scheduler 的 W tile service window 和 SRAM 约束写成稳定主表。
-```
-
----
-
-## 4. 当前推荐叙述
-
-两条线可以合成一个完整 encoder execution hierarchy：
-
-```text
-SimHash/CAM:
-    找可复用 anchor。
-
-Residual-gate:
-    把 fuzzy match 从高风险 direct reuse 变成可控中间路径。
-
-Graph-Bit NPU:
-    对剩余 miss nodes，利用 graph risk 控制 bit-serial arithmetic effort 和 W-stationary scheduling。
-```
-
-这形成了从算法到硬件的闭环：
-
-```text
-reuse fewer encoder calls
-repair fuzzy reuse
-schedule remaining encoder work by graph risk
-reduce arithmetic effort and W tile reload inside NPU
-```
