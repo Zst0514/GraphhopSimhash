@@ -441,6 +441,8 @@ depth = 5:
 
 这个过程不使用 learned predictor，也不使用 oracle error。
 
+前期也探索过把 activation 改成 2-bit plane-group / bit-plane-major layout，希望在 early stop 后连低位 activation 加载也一起跳过。当前结论是这条路的 tradeoff 较高：一方面 activation 从 HBM 读取并不是主要瓶颈，另一方面 layout 修改会引入 reformat 和格式转换开销。因此当前主线保留 bit-serial early stop 对 PE / RF / psum 活动的约简，把主要数据流收益放在后面的 W-stationary bucket scheduling。
+
 ---
 
 ### 2.4 NPU 数据流
