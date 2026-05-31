@@ -74,63 +74,36 @@ CAM miss / rejected fuzzy hit:
 
 ## 1. SimHash Residual-Gate
 
-### 1.1 问题
+### 1.1 核心机制
 
-SimHash/CAM 前端会产生三类结果：
+SimHash/CAM 先负责找 anchor。当前主线使用 `8 heads x 16 bit`，`support` 表示 8 个 hash head 里有多少个 head 支持同一个 anchor：
 
 ```text
-exact / high-confidence hit:
-    锚点和目标节点高度相似，可以直接复用 embedding。
-    当前主线参数下对应 8 个 hash head 中 support >= 5。
+support >= 5:
+    high-confidence hit
+    直接复用 anchor embedding
 
-fuzzy / medium-confidence hit:
-    CAM 找到了相近锚点，但直接复用有误差风险。
-    当前主线参数下对应 support = 3..4。
+support = 3..4:
+    fuzzy hit
+    进入 residual-gate
 
-miss / rejected hit:
-    复用不可靠，需要重新运行 encoder。
-    当前主线参数下对应 support < 3，或 residual accept gate 拒绝。
+support < 3:
+    low-confidence / miss
+    重新运行 encoder 或进入 Graph-Bit NPU
 ```
 
-仅使用 direct reuse 时，fuzzy hit 是主要矛盾：
+Residual-gate 只处理中间态 fuzzy hit。它的思路很直接：
 
 ```text
-放开 fuzzy hit:
-    reuse 提高，但 drop 增大。
-
-只保留 exact hit:
-    drop 很低，但 reuse 太低。
+CAM 找到 anchor u
+MLP 根据 (v, u) 的轻量 pair feature 预测一个 residual delta
+accept gate 判断这个 fuzzy hit 是否值得继续复用
 ```
 
-Residual-gate 的目标是在 fuzzy hit 上加入中间路径：
+在线公式：
 
 ```text
-anchor embedding + residual correction + accept/reject gate
-```
-
----
-
-### 1.2 在线执行路径
-
-对目标节点 `v`，CAM/SimHash 找到锚点节点 `u` 后：
-
-```text
-support high:
-    E_hat(v) = E(u)
-
-support medium:
-    residual path
-
-support low:
-    compute / Graph-Bit encoder
-```
-
-Residual path 的在线计算为：
-
-```text
-z_vu = pair_feature(v, u)
-
-delta_vu, accept_score = Adapter(z_vu)
+delta_vu, accept_score = MLP(z_vu)
 
 if accept_score >= tau:
     E_hat(v) = E(u) + alpha * delta_vu
@@ -142,97 +115,55 @@ else:
 
 ```text
 E(u):
-    已缓存的 anchor embedding。
+    cache 中已有的 anchor embedding
 
-delta_vu:
-    residual adapter 预测的 embedding 修正量。
+z_vu:
+    cheap/context feature difference
+    + CAM support / distance / cosine
+    + degree / graph risk signals
 
 alpha:
-    residual 强度，可按 support bucket 调整。
+    residual 强度
 
 tau:
-    learned accept gate 的在线阈值。
+    accept gate 阈值
 ```
 
-代码实现中，验证阶段的 reject 会用 reference embedding 替代；部署语义上对应重新运行 encoder。
+### 1.2 MLP 如何训练
+
+Residual MLP 需要一小组 calibration pairs：
+
+```text
+(target node v, anchor node u)
+```
+
+训练时需要目标 encoder 的真实 embedding：
+
+```text
+E(v), E(u)
+```
+
+监督目标是让：
+
+```text
+E(u) + delta_vu  接近  E(v)
+```
+
+因此：
+
+```text
+如果当前目标 encoder 是 ST:
+    用 ST embedding 训练 residual MLP。
+
+如果当前目标 encoder 是 LLaMA-7B:
+    用 LLaMA-7B embedding 训练 residual MLP。
+```
+
+cheap feature 可以来自轻量模型，但监督目标必须来自当前要加速的目标 encoder。在线阶段不需要访问目标节点的 full embedding，只需要 anchor embedding 和轻量 pair feature。
 
 ---
 
-### 1.3 Pair Feature
-
-Residual adapter 不从 hash bit 直接还原 embedding。Hash/CAM 只负责找锚点，adapter 只需要判断“目标节点和锚点差多少、是否值得修”。
-
-```text
-pair_feature(v, u) =
-    cheap/context feature difference
-  + CAM confidence signals
-  + graph risk / degree signals
-```
-
-其中 CAM confidence signals 包括 Hamming distance、support count、候选 cosine 等；graph signals 包括 degree ratio 和 sensitivity/risk score。在线阶段只用这些轻量特征和已缓存的 anchor embedding，不访问目标节点的 full embedding。
-
----
-
-### 1.4 Adapter 和 Gate
-
-当前主要使用 MLP residual adapter：
-
-```text
-delta_vu = MLP(z_vu)
-accept_score = sigmoid(gate_head(z_vu))
-```
-
-训练目标包括：
-
-```text
-1. correction loss:
-   让 E(u) + delta_vu 接近目标 E(v)。
-
-2. gate / accept loss:
-   学习哪些 fuzzy candidate 适合继续复用，
-   哪些 candidate 应该打回 compute。
-
-3. residual regularization:
-   避免修正量过大导致 embedding 空间整体扰动。
-```
-
-当前支持两类 accept mode：
-
-```text
-separate:
-    correction gate 和 accept gate 分开学习。
-    适合 soft hit 相对干净、希望尽量保留复用的场景。
-
-shared:
-    correction strength 和 accept/reject 共用 learned signal。
-    更保守，适合 fuzzy hit 污染更重的场景。
-```
-
----
-
-### 1.5 技术作用
-
-Residual-gate 提供两个能力：
-
-```text
-1. 修正 fuzzy hit:
-   不改变复用率的前提下降低 embedding error / classification drop。
-
-2. 拒绝不可靠 fuzzy hit:
-   在高污染数据集上，把低质量 fuzzy candidate 打回 compute。
-```
-
-因此它不是单纯的 residual correction，而是：
-
-```text
-CAM provides anchor.
-Residual adapter corrects accepted fuzzy hits.
-Accept gate filters unsafe fuzzy hits.
-```
-
----
-
-### 1.6 当前实验进展
+### 1.3 当前实验进展
 
 共享在线 residual-gate 配置：
 
