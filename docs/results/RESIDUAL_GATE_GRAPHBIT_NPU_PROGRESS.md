@@ -727,7 +727,7 @@ Reuse + predictor-free Graph-Bit + risk-bucket W-stationary
 M = node_batch * sequence_length
 ```
 
-建议补：
+待验证的 M 取值：
 
 ```text
 M = 2048 / 4096 / 8192 / 16384

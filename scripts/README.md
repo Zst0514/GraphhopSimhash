@@ -58,6 +58,27 @@ onnxim_graphbit_microbench.py
     生成 LLaMA GEMM microbenchmark 并调用 ONNXim。
 ```
 
+## Git 同步
+
+```text
+push_to_github.sh
+    日常提交并推送当前分支到远端。
+```
+
+用法：
+
+```bash
+bash GraphhopSimhash/scripts/push_to_github.sh "docs: update graphbit notes"
+```
+
+脚本会执行：
+
+```text
+git add -A
+git commit -m "<message>"   # 如果有本地改动
+git push origin <current-branch>
+```
+
 更多复现实验命令见：
 
 ```text

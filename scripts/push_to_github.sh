@@ -1,73 +1,97 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-REPO_URL="${REPO_URL:-git@github-zst0514:Zst0514/GraphhopSimhash.git}"
-BRANCH="${BRANCH:-main}"
-COMMIT_MSG="${1:-Update GraphhopSimhash}"
+usage() {
+  cat <<'EOF'
+Usage:
+  bash scripts/push_to_github.sh "commit message"
+  bash scripts/push_to_github.sh -m "commit message"
+
+Optional environment variables:
+  REMOTE=origin          Git remote to push to.
+  BRANCH=<branch-name>   Branch to push. Defaults to current branch.
+
+Examples:
+  bash scripts/push_to_github.sh "docs: update graphbit notes"
+  REMOTE=origin BRANCH=main bash scripts/push_to_github.sh -m "feat: add script"
+EOF
+}
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
+REMOTE="${REMOTE:-origin}"
+BRANCH="${BRANCH:-}"
+COMMIT_MSG=""
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    -m|--message)
+      shift
+      if [[ $# -eq 0 ]]; then
+        echo "[Error] Missing commit message after -m/--message." >&2
+        exit 1
+      fi
+      COMMIT_MSG="$1"
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    *)
+      if [[ -z "${COMMIT_MSG}" ]]; then
+        COMMIT_MSG="$1"
+      else
+        COMMIT_MSG="${COMMIT_MSG} $1"
+      fi
+      ;;
+  esac
+  shift
+done
+
+if [[ -z "${COMMIT_MSG}" ]]; then
+  COMMIT_MSG="update: sync local changes"
+fi
+
 cd "${REPO_DIR}"
 
-echo "[GraphhopSimhash] Working directory: $(pwd)"
-echo "[GraphhopSimhash] Remote: ${REPO_URL}"
-echo "[GraphhopSimhash] Branch: ${BRANCH}"
-
-if ! command -v git >/dev/null 2>&1; then
-  echo "[Error] git is not installed or not in PATH." >&2
+if [[ ! -d .git ]]; then
+  echo "[Error] ${REPO_DIR} is not a git repository." >&2
   exit 1
 fi
 
-if [ ! -d .git ]; then
-  echo "[Git] Initializing repository..."
-  git init
+if [[ -z "${BRANCH}" ]]; then
+  BRANCH="$(git rev-parse --abbrev-ref HEAD)"
 fi
 
-git branch -M "${BRANCH}"
-
-if git remote get-url origin >/dev/null 2>&1; then
-  current_remote="$(git remote get-url origin)"
-  if [ "${current_remote}" != "${REPO_URL}" ]; then
-    echo "[Git] Updating origin remote:"
-    echo "      old: ${current_remote}"
-    echo "      new: ${REPO_URL}"
-    git remote set-url origin "${REPO_URL}"
-  fi
-else
-  echo "[Git] Adding origin remote..."
-  git remote add origin "${REPO_URL}"
+if [[ "${BRANCH}" == "HEAD" ]]; then
+  echo "[Error] Detached HEAD. Please checkout a branch before pushing." >&2
+  exit 1
 fi
 
-if ! git config user.name >/dev/null; then
-  echo "[Warn] git user.name is not set. Set it with:"
-  echo "       git config --global user.name \"Zst0514\""
+if ! git remote get-url "${REMOTE}" >/dev/null 2>&1; then
+  echo "[Error] Remote '${REMOTE}' does not exist." >&2
+  echo "Available remotes:"
+  git remote -v
+  exit 1
 fi
 
-if ! git config user.email >/dev/null; then
-  echo "[Warn] git user.email is not set. Set it with:"
-  echo "       git config --global user.email \"your_email@example.com\""
-fi
+echo "[Git] repo:   ${REPO_DIR}"
+echo "[Git] remote: ${REMOTE} ($(git remote get-url "${REMOTE}"))"
+echo "[Git] branch: ${BRANCH}"
 
-echo "[Git] Staging files..."
+git status --short
+
 git add -A
 
 if git diff --cached --quiet; then
-  echo "[Git] No local changes to commit."
+  echo "[Git] No staged changes. Pushing existing local commits, if any."
 else
-  echo "[Git] Committing: ${COMMIT_MSG}"
+  echo "[Git] commit: ${COMMIT_MSG}"
   git commit -m "${COMMIT_MSG}"
 fi
 
-echo "[Git] Checking remote branch..."
-if git ls-remote --exit-code --heads origin "${BRANCH}" >/dev/null 2>&1; then
-  echo "[Git] Remote ${BRANCH} exists. Pulling with rebase before push..."
-  git pull --rebase origin "${BRANCH}" --allow-unrelated-histories
-else
-  echo "[Git] Remote ${BRANCH} does not exist yet. Skipping pull."
-fi
+echo "[Git] push ${REMOTE} ${BRANCH}"
+git push "${REMOTE}" "${BRANCH}"
 
-echo "[Git] Pushing to origin/${BRANCH}..."
-git push -u origin "${BRANCH}"
-
-echo "[Done] GraphhopSimhash has been pushed to ${REPO_URL} (${BRANCH})."
+echo "[Done] Pushed to ${REMOTE}/${BRANCH}."
