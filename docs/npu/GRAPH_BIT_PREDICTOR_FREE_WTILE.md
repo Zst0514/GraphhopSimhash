@@ -19,6 +19,32 @@ Degree 如何具体映射到 `min_depth / tolerance / stop_depth` 见：
 docs/npu/GRAPH_BIT_DEGREE_BOUND_POLICY.md
 ```
 
+## 0. 全流程图
+
+下图把 `byte-major activation -> plane-group buffer -> predictor-free bound -> PE issue -> risk-bucket W tile reuse` 串成一个完整流程：
+
+![Graph-Bit plane-group activation buffer flow](../figures/graphbit_plane_group_flow.svg)
+
+图里的关键路径是：
+
+```text
+1. 传统 byte-major:
+   一次读完整 A8 byte，低位已经被搬入，early stop 很难减少 activation traffic。
+
+2. plane-group buffer:
+   NPU 内部把 activation tile 重排成 b7/b6、b5/b4、b3/b2、b1/b0 等 plane group。
+
+3. predictor-free bound:
+   graph risk 给出 min_depth/tolerance；
+   runtime bound 判断剩余低位贡献是否足够小。
+
+4. stop:
+   若 bound 满足，后续低位 group 不再 fetch、不进 RF、不发射 PE、不更新 psum。
+
+5. risk-bucket scheduler:
+   miss nodes 按 stop-depth 分桶，让同一 W tile 服务更多同 depth 节点，减少 Wloads。
+```
+
 ## 1. 当前方案的边界
 
 Graph-Bit 当前采用两阶段验证：
