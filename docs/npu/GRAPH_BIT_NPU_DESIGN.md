@@ -6,6 +6,9 @@
 GRAPH_BIT_NPU_DESIGN.md
     设计总览：datapath、scheduler、buffer、cost model、主结论。
 
+GRAPH_BIT_SYSTOLIC_FLASH_DATAFLOW.md
+    脉动阵列 + 类 FlashAttention IO-aware tiling 下的 W-stationary 数据流。
+
 GRAPH_BIT_EARLY_STOP_IMPLEMENTATION.md
     实现细节：CLI、runner、ONNXim/GemmWS、trace replay 中 bit-plane early stop 的代码路径。
 
@@ -17,6 +20,219 @@ LLAMA_ROOFLINE_PROFILE.md
 ```
 
 机制拆分和旧实验文档已移到 `docs/archive/npu/`，不作为主入口。
+
+## 0. 核心机制总览图
+
+脉动阵列和类 FlashAttention 数据流的展开版见：
+
+```text
+docs/npu/GRAPH_BIT_SYSTOLIC_FLASH_DATAFLOW.md
+```
+
+Graph-Bit 的主线不是“给节点换一个低精度 embedding pool”，而是把 graph-text workload 的两类信息接入 encoder 执行：
+
+```text
+1. SimHash/CAM 判断哪些节点可以不跑 encoder。
+2. Graph risk 判断剩余 miss nodes 如何组织 batch、如何复用 W tile、以及需要多少 bit-plane effort。
+```
+
+整体流程如下：
+
+```mermaid
+flowchart TD
+    A[Text-attributed graph nodes] --> B[Cheap graph/hash features]
+    A --> C[CAM / multi-head SimHash lookup]
+
+    C --> D{Reuse decision}
+    D -->|exact hit| E[P0: direct embedding cache read]
+    D -->|fuzzy hit + accepted| F[P1: residual-corrected reuse]
+    D -->|reject / miss| G[Miss-node queue]
+
+    B --> H[Graph risk score]
+    H --> I[Risk bucket scheduler]
+    G --> I
+
+    I --> J[High-risk bucket]
+    I --> K[Mid-risk bucket]
+    I --> L[Low-risk bucket]
+
+    J --> M[Graph-Bit W-stationary encoder]
+    K --> M
+    L --> M
+
+    M --> N[Load W tile once into on-chip SRAM/RF]
+    N --> O[Stream same-risk token rows through W tile]
+    O --> P[Bit-serial / bounded activation-depth execution]
+    P --> Q[Embedding output]
+
+    E --> R[Final embedding pool]
+    F --> R
+    Q --> R
+    R --> S[GNN classifier / downstream task]
+```
+
+同一张图用硬件执行语言可以写成：
+
+```text
+Input graph nodes
+    |
+    |-- CAM exact hit  --------------------> cache embedding
+    |
+    |-- CAM fuzzy hit + residual gate -----> anchor embedding + residual adapter
+    |
+    |-- CAM miss / reject -----------------> Graph-Bit NPU
+                                               |
+                                               |-- compute graph risk
+                                               |-- group miss nodes into risk buckets
+                                               |-- keep W tile stationary on chip
+                                               |-- stream same-risk token rows
+                                               |-- execute only required activation bit effort
+                                               v
+                                           encoder embedding
+```
+
+核心分工：
+
+```text
+CAM / SimHash:
+    决定是否跳过 encoder。
+
+Residual adapter:
+    修正 fuzzy hit 的 anchor embedding。
+
+Graph risk:
+    决定 miss nodes 的 batch order 和 NPU arithmetic effort。
+
+W-stationary bucket scheduler:
+    让同一个 W tile 连续服务更多同风险 token rows。
+
+Predictor-free bounded execution:
+    在 bit-serial GEMM 内判断低位 activation effort 是否还值得继续。
+```
+
+## 0.1 类 FlashAttention 的数据流思路
+
+Graph-Bit 借鉴的是 FlashAttention 的体系结构范式，而不是直接复用 FlashAttention 算法。
+
+```text
+FlashAttention:
+    面向 attention。
+    把 Q/K/V tile 放入 SRAM，online softmax，
+    避免把完整 N x N attention matrix 写回 HBM。
+
+Graph-Bit:
+    面向 encoder GEMM，尤其 QKV/O projection 和 FFN。
+    把 W tile 放入 SRAM/RF，
+    让 graph-risk bucket 内的 token rows 连续消费同一个 W tile，
+    减少 W tile 从 HBM 反复 reload。
+```
+
+二者共同点：
+
+```text
+不要把可复用的大 tile 反复搬进搬出 HBM；
+用 tile-level dataflow 把片上复用显式暴露出来。
+```
+
+Graph-Bit 多出来的图场景信息：
+
+```text
+1. SimHash/reuse 已经筛掉一批节点；
+2. 只有 miss nodes 需要进入 encoder；
+3. miss nodes 有 graph risk / degree / context risk；
+4. 同风险 miss nodes 可以被重排成 bucket；
+5. 同 bucket 内 token rows 使用相似 stop-depth / early-stop 策略；
+6. 同一个 W tile 可以连续服务更多同桶 token rows。
+```
+
+## 0.2 类 FlashAttention 数据流的具体过程
+
+传统 encoder 执行通常按输入顺序形成 micro-batch：
+
+```text
+for node batch in original_order:
+    for layer in encoder:
+        for GEMM in QKV/O/FFN:
+            load W tiles
+            compute X @ W
+            evict / reload W tiles for later batches
+```
+
+Graph-Bit 把 miss nodes 单独拿出来做 risk-aware scheduling：
+
+```text
+Step 1. Reuse front-end
+    exact hit:
+        直接读 embedding cache
+    fuzzy hit:
+        anchor embedding + residual correction
+    reject / miss:
+        进入 encoder queue
+
+Step 2. Risk tagging
+    对每个 miss node 计算 graph risk。
+    当前主线优先使用 Degree，TSER/Context 作为消融。
+
+Step 3. Risk bucket formation
+    high-risk nodes:
+        更保守，接近 Full P8
+    mid-risk nodes:
+        中等 stop-depth / tolerance
+    low-risk nodes:
+        更激进的 bounded early stop
+
+Step 4. W-stationary tile execution
+    对某个 Linear / FFN GEMM:
+        load one W tile into on-chip SRAM/RF
+        keep W tile stationary
+        stream token rows from the same risk bucket
+        accumulate partial sums
+        then move to the next W tile
+
+Step 5. Bounded bit-serial execution
+    对每个 same-risk token-row block:
+        execute high activation bits first
+        update partial sum
+        compute remaining low-bit bound
+        stop lower-bit effort if the bound is within tolerance
+
+Step 6. Output
+    写出 encoder embedding。
+    与 P0/P1 的 cache/reuse embedding 合并成最终 embedding pool。
+```
+
+对应到一块 W tile：
+
+```text
+Before:
+    load W tile for batch A
+    compute a small set of token rows
+    later load the same W tile again for batch B
+    later load the same W tile again for batch C
+
+Graph-Bit:
+    load W tile once
+    compute high-risk bucket token rows
+    compute mid-risk bucket token rows
+    compute low-risk bucket token rows
+    evict W tile
+```
+
+这里的“bucket”不是为了改变 W 的数值。所有节点仍然使用同一个模型权重。区别在于：
+
+```text
+同一个 W tile 在片上停留更久；
+更多 token rows 在它被 evict 前消费它；
+HBM 侧 W tile reload 次数减少。
+```
+
+因此 Graph-Bit 与普通 Transformer accelerator 的差异不是“发现了 W 可以复用”。普通 GEMM dataflow 本来就复用 W tile。Graph-Bit 的新增点是：
+
+```text
+用 graph risk 改变 encoder workload 的执行顺序，
+让 residual/reuse 之后的 miss nodes 更适合 W-stationary tile reuse，
+并让 bit-serial execution effort 与图任务风险匹配。
+```
 
 ## 1. 设计目标
 
