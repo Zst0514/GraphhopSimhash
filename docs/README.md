@@ -13,13 +13,10 @@
 
 - [GRAPH_BIT_NPU_DESIGN.md](npu/GRAPH_BIT_NPU_DESIGN.md): Graph-Bit NPU 主线设计，包含 datapath、scheduler、buffer、cost model。
 - [GRAPH_BIT_EARLY_STOP_IMPLEMENTATION.md](npu/GRAPH_BIT_EARLY_STOP_IMPLEMENTATION.md): bit-plane early stop 从 CLI、runner、ONNXim/GemmWS 到 trace replay 的代码级实现说明。
-- [GRAPH_BIT_DEGREE_BOUND_POLICY.md](npu/GRAPH_BIT_DEGREE_BOUND_POLICY.md): Degree 如何映射到 high/mid/low risk bucket、min_depth、tolerance 和 runtime stop depth。
-- [GRAPH_BIT_PREDICTOR_FREE_WTILE.md](npu/GRAPH_BIT_PREDICTOR_FREE_WTILE.md): predictor-free bound、bit-plane issue gating、W tile 搬运节省和 b32/b64 tradeoff。
-- [GRAPH_BIT_PREDICTOR_FREE_MEETING_NOTE.md](npu/GRAPH_BIT_PREDICTOR_FREE_MEETING_NOTE.md): 组会汇报版说明，集中介绍 predictor-free 变 bit 位宽计算、bound 开销和当前 roofline 结果。
-- [GRAPH_BIT_INTERNAL_ROOFLINE.md](npu/GRAPH_BIT_INTERNAL_ROOFLINE.md): 从 NPU 内部拆解 Q/K/V/O 与 FFN GEMM 的 W HBM、A HBM、PE bit-serial compute、RF/psum 活动。
 - [GRAPH_BIT_FULLSTACK_REPRODUCTION_GUIDE.md](npu/GRAPH_BIT_FULLSTACK_REPRODUCTION_GUIDE.md): Graph-Bit full-stack 复现实验流程、调参入口、输出文件和结果解读。
+- [LLAMA_ROOFLINE_PROFILE.md](npu/LLAMA_ROOFLINE_PROFILE.md): LLaMA-7B projection / FFN GEMM 的 roofline profile。
 
-历史 proxy、早期理论拆分和旧 scheduler 说明已移到 `docs/archive/npu/`。主线只维护上面五份文档。
+机制拆分、组会版说明和早期 proxy 已移到 `docs/archive/npu/`。
 
 ## Results
 
@@ -39,7 +36,7 @@
 
 ## Archive
 
-- `archive/npu/`: Graph-Bit 早期 proxy、旧理论拆分和旧 scheduler 说明。
+- `archive/npu/`: Graph-Bit 机制拆分、早期 proxy、旧理论拆分和旧 scheduler 说明。
 - `archive/results/`: 过往大规模 sweep 汇总，保留用于追溯，不作为主入口。
 
 ## Roadmap

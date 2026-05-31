@@ -19,7 +19,7 @@ docs/npu/GRAPH_BIT_FULLSTACK_REPRODUCTION_GUIDE.md
 Degree 到 `min_depth / tolerance / stop_depth` 的映射见：
 
 ```text
-docs/npu/GRAPH_BIT_DEGREE_BOUND_POLICY.md
+docs/archive/npu/GRAPH_BIT_DEGREE_BOUND_POLICY.md
 ```
 
 ## 1. Predictor-Free Early Stop

@@ -12,7 +12,7 @@ Degree 只决定节点进入 high / mid / low 哪个风险 bucket。
 相关机制背景见：
 
 ```text
-docs/npu/GRAPH_BIT_PREDICTOR_FREE_WTILE.md
+docs/archive/npu/GRAPH_BIT_PREDICTOR_FREE_WTILE.md
 docs/npu/GRAPH_BIT_EARLY_STOP_IMPLEMENTATION.md
 ```
 
