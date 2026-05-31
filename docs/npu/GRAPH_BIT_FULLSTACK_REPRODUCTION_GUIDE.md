@@ -205,6 +205,41 @@ W_HBM / A_HBM / A_RF / PE / W_RF / Psum / Out / Scheduler
 
 用于判断 mixed-depth 相比 FullP8-bucket 是否真的减少片上活动。
 
+如果要排查 P8/P6/P5 的 bit-depth 为什么没有明显转成 ONNXim wall cycles，可运行：
+
+```bash
+cd /home/zhangshangtong/Transformer/OFA
+
+/home/zhangshangtong/.conda/envs/OFA/bin/python \
+  GraphhopSimhash/scripts/diagnose_graphbit_cycle_sensitivity.py \
+  --component-root output/onnxim_graphbit/risk_bucket_components_s8 \
+  --output-dir output/onnxim_graphbit/cycle_sensitivity
+```
+
+输出：
+
+```text
+output/onnxim_graphbit/cycle_sensitivity/cycle_sensitivity.txt
+output/onnxim_graphbit/cycle_sensitivity/measured_components.tsv
+output/onnxim_graphbit/cycle_sensitivity/roofline_sensitivity.tsv
+```
+
+这个诊断会同时报告：
+
+```text
+ONNXim wall cycles:
+    当前 simulator 看到的组件总 cycles。
+
+Effective compute cycles:
+    Graph-Bit 按 depth 缩小后的 bit-plane compute 总量。
+
+PE critical proxy:
+    如果 bit-serial compute 成为瓶颈，理论上应暴露出来的 PE issue path。
+
+Roofline sensitivity:
+    memory path 压低到什么程度后，A8 -> A6/A5 才会转成 latency 收益。
+```
+
 ## 4. 分步跑法
 
 如果要调参数，建议分步跑，方便检查每一步。

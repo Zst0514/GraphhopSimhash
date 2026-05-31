@@ -523,9 +523,97 @@ python GraphhopSimhash/scripts/model_graphbit_activity_breakdown.py \
   --output-dir output/.../activity_breakdown
 ```
 
-## 7. 相对 PADE / HEAT / 普通 Transformer Accelerator 的区别
+## 7. Cycles 为什么对 P8/P6/P5 不敏感
 
-### 7.1 相对 PADE
+当前 ONNXim component 结果里，`p8_ws_b32 / p6_ws_b32 / p5_ws_b32` 的 wall cycles 很接近：
+
+| Case | ONNX Cycles / P8 | Effective Compute / P8 | PE Critical / P8 | W Read / P8 | A Read / P8 |
+|---|---:|---:|---:|---:|---:|
+| now P6 | 0.989 | 0.752 | 0.750 | 1.000 | 0.750 |
+| now P5 | 0.989 | 0.626 | 0.625 | 1.000 | 0.750 |
+| ws_b32 P6 | 0.999 | 0.752 | 0.750 | 1.000 | 0.750 |
+| ws_b32 P5 | 0.998 | 0.626 | 0.625 | 1.000 | 0.750 |
+| ws_b64 P6 | 0.997 | 0.752 | 0.750 | 1.000 | 0.750 |
+| ws_b64 P5 | 0.996 | 0.626 | 0.625 | 1.000 | 0.750 |
+
+这说明两件事：
+
+```text
+1. bit-serial compute 本身已经按 depth 缩小。
+   Effective Compute / P8 从 P8 的 1.0 降到 P6 的约 0.75、P5 的约 0.63。
+
+2. 但 ONNXim wall cycles 基本没跟着降。
+   当前暴露出来的 critical path 仍然是 memory / pipeline / fixed path，
+   saved bit-plane work 被 overlap 掩盖了。
+```
+
+因此不能直接把 `Effective Compute / P8` 当作 latency speedup。更准确的结论是：
+
+```text
+当前组件模型下：
+    mixed-depth 明确减少 bit-op / PE / RF / psum 活动；
+    但只有当 memory path 被 W tile reuse / bandwidth / overlap 进一步压低时，
+    A-depth 才会变成明显 latency 收益。
+```
+
+### 7.1 Roofline sensitivity
+
+为排查这个问题，新增了 cycles sensitivity 诊断：
+
+```bash
+python GraphhopSimhash/scripts/diagnose_graphbit_cycle_sensitivity.py \
+  --component-root output/onnxim_graphbit/risk_bucket_components_s8 \
+  --output-dir output/onnxim_graphbit/cycle_sensitivity
+```
+
+输出文件：
+
+```text
+output/onnxim_graphbit/cycle_sensitivity/cycle_sensitivity.txt
+output/onnxim_graphbit/cycle_sensitivity/measured_components.tsv
+output/onnxim_graphbit/cycle_sensitivity/roofline_sensitivity.tsv
+```
+
+关键结果：
+
+```text
+ws_b32:
+    memory path 仍保持当前水平时，P6/P5 latency save 约 0。
+    memory path 压到约 15% 以下后，P6/P5 开始出现 20%+ latency save。
+
+ws_b64:
+    memory path 压到约 20% 左右后，P6/P5 开始出现明显 latency save。
+```
+
+这给出当前更精确的定位：
+
+```text
+W-stationary risk-bucket:
+    先把 W memory path 压下来，是 latency speedup 的主因。
+
+Predictor-free mixed depth:
+    在 memory path 仍 dominant 时，主要体现为 energy/activity；
+    在 W reuse 足够强或 bit-serial array 更 compute-bound 时，才转化为 latency。
+```
+
+因此后续论文表述应避免写成：
+
+```text
+A8 -> A6/A5 一定带来端到端 latency 线性下降。
+```
+
+更稳的表述是：
+
+```text
+Graph-Bit exposes a tunable arithmetic-effort path.
+In the current memory-dominated configuration, it primarily saves on-chip activity;
+when combined with risk-bucket W-stationary scheduling, the memory path shrinks enough
+for bit-depth savings to become latency-visible.
+```
+
+## 8. 相对 PADE / HEAT / 普通 Transformer Accelerator 的区别
+
+### 8.1 相对 PADE
 
 PADE 类工作重点是：
 
@@ -548,7 +636,7 @@ Graph-Bit 的区别：
     miss nodes 才进入 Graph-Bit NPU。
 ```
 
-### 7.2 相对 HEAT-like degree precision
+### 8.2 相对 HEAT-like degree precision
 
 HEAT-like baseline 可以理解成：
 
@@ -569,7 +657,7 @@ risk-bucket scheduler:
     根据真实 stop-depth trace 重排 miss nodes，提高 W tile reuse
 ```
 
-### 7.3 相对普通 Transformer dataflow
+### 8.3 相对普通 Transformer dataflow
 
 普通 Transformer accelerator 也有 weight-stationary reuse。
 
@@ -588,7 +676,7 @@ stop-depth trace 告诉 scheduler 如何形成同风险 bucket。
 而是用 graph risk 让 W tile reuse 和 bit-serial early stop 对齐。
 ```
 
-## 8. 当前还缺什么
+## 9. 当前还缺什么
 
 当前已经足够支撑主线，但还可以补强：
 
