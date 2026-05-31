@@ -1303,6 +1303,15 @@ def run_residual_reuse_experiment(args):
                     gate_error_scale=args.residual_gate_error_scale,
                     gate_error_max=args.residual_gate_error_max,
                     gate_sparsity_weight=args.residual_gate_sparsity_weight,
+                    class_aware_accept=args.residual_class_aware_accept,
+                    classifier_accept_gate=args.residual_classifier_accept_gate,
+                    classifier_model=model,
+                    classifier_reference_logits=oracle_logits,
+                    classifier_accept_mode=args.residual_classifier_accept_mode,
+                    classifier_accept_scope=args.residual_classifier_accept_scope,
+                    classifier_accept_after_residual=args.residual_classifier_accept_after_residual,
+                    classifier_accept_probe_alpha=args.residual_classifier_accept_probe_alpha,
+                    classifier_accept_max_kl=args.residual_classifier_accept_max_kl,
                 )
 
                 if adapter is not None:
@@ -1518,6 +1527,13 @@ def run_residual_reuse_experiment(args):
                     f"| AvgErr={float(residual_err.mean().item()):.5f} "
                     f"| HitErr={residual_hit_err:.5f}"
                 )
+                if train_info.get("classifier_accept_gate"):
+                    log_important(
+                        "  ClassifierAccept: "
+                        f"positive={int(train_info.get('classifier_accept_positive', 0))}/"
+                        f"{int(train_info.get('classifier_accept_evaluated', 0))} "
+                        f"| mean_kl={float(train_info.get('classifier_accept_mean_kl', 0.0)):.4f}"
+                    )
                 if "alpha_by_support" in apply_info:
                     alpha_support_text = ", ".join(
                         f"{format_bucket_label(int(k), args.residual_bucket_mode)}={float(v):.3f}"
@@ -3012,6 +3028,15 @@ def run_residual_precision_depth_experiment(args):
                     gate_error_scale=run_args.residual_gate_error_scale,
                     gate_error_max=run_args.residual_gate_error_max,
                     gate_sparsity_weight=run_args.residual_gate_sparsity_weight,
+                    class_aware_accept=run_args.residual_class_aware_accept,
+                    classifier_accept_gate=run_args.residual_classifier_accept_gate,
+                    classifier_model=model,
+                    classifier_reference_logits=ref_logits,
+                    classifier_accept_mode=run_args.residual_classifier_accept_mode,
+                    classifier_accept_scope=run_args.residual_classifier_accept_scope,
+                    classifier_accept_after_residual=run_args.residual_classifier_accept_after_residual,
+                    classifier_accept_probe_alpha=run_args.residual_classifier_accept_probe_alpha,
+                    classifier_accept_max_kl=run_args.residual_classifier_accept_max_kl,
                 )
 
                 if adapter is not None:
@@ -3157,6 +3182,13 @@ def run_residual_precision_depth_experiment(args):
                     f"accepted={int(apply_info.get('accepted', 0))} | "
                     f"rejected={int(apply_info.get('rejected', 0))}"
                 )
+                if train_info.get("classifier_accept_gate"):
+                    log_important(
+                        "  ClassifierAccept: "
+                        f"positive={int(train_info.get('classifier_accept_positive', 0))}/"
+                        f"{int(train_info.get('classifier_accept_evaluated', 0))} "
+                        f"| mean_kl={float(train_info.get('classifier_accept_mean_kl', 0.0)):.4f}"
+                    )
 
                 oracle_priority = errors_by_bit[int(bits[0])]
                 predictor_priority = None
@@ -4055,6 +4087,37 @@ def run_hierarchical_encoder_experiment(args):
                     max_pairs=residual_fit_cfg["max_pairs"],
                     correction_mask=correction_mask,
                     min_dist=run_args.residual_min_dist,
+                    controller=controller,
+                    hash_route_features=route_bundle["hash_route_features"],
+                    extra_anchors_per_node=run_args.residual_offline_extra_anchors_per_node,
+                    extra_query_nodes=run_args.residual_offline_extra_query_nodes,
+                    positive_error_max=run_args.residual_positive_error_max,
+                    extra_negative_anchors_per_node=run_args.residual_offline_negative_anchors_per_node,
+                    negative_error_min=run_args.residual_negative_error_min,
+                    negative_gate_weight=run_args.residual_negative_gate_weight,
+                    adapter_type=run_args.residual_adapter_type,
+                    accept_mode=run_args.residual_accept_mode,
+                    hidden_dim=run_args.residual_hidden_dim,
+                    hidden_layers=run_args.residual_hidden_layers,
+                    dropout=run_args.residual_dropout,
+                    cosine_weight=run_args.residual_loss_cosine_weight,
+                    mse_weight=run_args.residual_loss_mse_weight,
+                    delta_weight=run_args.residual_loss_delta_weight,
+                    bucket_mode=run_args.residual_bucket_mode,
+                    gate_loss_weight=run_args.residual_gate_loss_weight,
+                    accept_loss_weight=run_args.residual_accept_loss_weight,
+                    gate_error_scale=run_args.residual_gate_error_scale,
+                    gate_error_max=run_args.residual_gate_error_max,
+                    gate_sparsity_weight=run_args.residual_gate_sparsity_weight,
+                    class_aware_accept=run_args.residual_class_aware_accept,
+                    classifier_accept_gate=run_args.residual_classifier_accept_gate,
+                    classifier_model=model,
+                    classifier_reference_logits=oracle_logits,
+                    classifier_accept_mode=run_args.residual_classifier_accept_mode,
+                    classifier_accept_scope=run_args.residual_classifier_accept_scope,
+                    classifier_accept_after_residual=run_args.residual_classifier_accept_after_residual,
+                    classifier_accept_probe_alpha=run_args.residual_classifier_accept_probe_alpha,
+                    classifier_accept_max_kl=run_args.residual_classifier_accept_max_kl,
                 )
 
                 if adapter is not None and float(run_args.residual_alpha) < 0.0:

@@ -340,6 +340,7 @@ def _compute_residual_loss(
     gate_error_scale=0.25,
     gate_error_max=0.45,
     gate_sparsity_weight=0.0,
+    accept_targets=None,
 ):
     pred_raw = anchors + residual
     pred_norm = F.normalize(pred_raw, p=2, dim=1)
@@ -372,7 +373,10 @@ def _compute_residual_loss(
                 delta_norm = raw_delta.pow(2).mean(dim=1, keepdim=True)
                 loss = loss + float(gate_sparsity_weight) * 0.5 * (delta_norm * low_error_weight).mean()
     if accept_gate is not None and float(accept_loss_weight) > 0.0:
-        accept_target = torch.ones_like(accept_gate)
+        if accept_targets is None:
+            accept_target = torch.ones_like(accept_gate)
+        else:
+            accept_target = accept_targets.to(device=accept_gate.device, dtype=accept_gate.dtype).view_as(accept_gate)
         loss = loss + float(accept_loss_weight) * F.smooth_l1_loss(accept_gate, accept_target)
     return loss
 
@@ -401,6 +405,7 @@ def _fit_residual_adapter(
     gate_sparsity_weight=0.0,
     x_neg=None,
     negative_gate_weight=1.0,
+    accept_targets=None,
 ):
     device = anchors.device
     adapter = _build_residual_adapter(
@@ -438,6 +443,7 @@ def _fit_residual_adapter(
             gate_error_scale=gate_error_scale,
             gate_error_max=gate_error_max,
             gate_sparsity_weight=gate_sparsity_weight,
+            accept_targets=accept_targets,
         )
         if x_neg is not None and int(x_neg.size(0)) > 0:
             neg_residual, neg_raw_delta, neg_correction_gate, neg_accept_gate = _adapter_forward(adapter, x_neg)
@@ -460,6 +466,136 @@ def _fit_residual_adapter(
         correction_gate_mean = 1.0 if correction_gate is None else float(correction_gate.detach().mean().item())
         accept_gate_mean = 1.0 if accept_gate is None else float(accept_gate.detach().mean().item())
     return adapter, last_loss, correction_gate_mean, accept_gate_mean
+
+
+def _build_class_accept_targets(data, pair_tensors, split):
+    if pair_tensors is None or pair_tensors["node_indices"].numel() == 0:
+        return None, 0, 0
+    if not hasattr(data, "y") or data.y is None:
+        return None, 0, 0
+
+    device = pair_tensors["node_indices"].device
+    labels = data.y.to(device=device)
+    if labels.dim() > 1:
+        labels = labels.argmax(dim=-1)
+    labels = labels.view(-1)
+
+    node_indices = pair_tensors["node_indices"].to(device=device, dtype=torch.long)
+    source_ids = pair_tensors["source_ids"].to(device=device, dtype=torch.long)
+    source_ok = (source_ids >= 0) & (source_ids < labels.numel())
+
+    known_mask = _split_mask_for_train_pairs(data, split, device)
+    safe_sources = source_ids.clamp(min=0, max=max(0, labels.numel() - 1))
+    label_known = source_ok & known_mask[node_indices] & known_mask[safe_sources]
+    if not bool(label_known.any().item()):
+        return torch.ones(node_indices.numel(), 1, dtype=torch.float32, device=device), 0, 0
+
+    targets = torch.ones(node_indices.numel(), 1, dtype=torch.float32, device=device)
+    same_label = labels[node_indices[label_known]] == labels[safe_sources[label_known]]
+    targets[label_known, 0] = same_label.to(dtype=torch.float32)
+    labelled = int(label_known.sum().item())
+    positives = int(same_label.sum().item())
+    return targets, labelled, positives
+
+
+def _build_classifier_accept_targets(
+    model,
+    data,
+    pair_tensors,
+    target_embeddings,
+    reference_logits,
+    mode="both",
+    scope="node",
+    max_kl=0.2,
+    candidate_embeddings=None,
+):
+    if (
+        model is None
+        or reference_logits is None
+        or pair_tensors is None
+        or pair_tensors["node_indices"].numel() == 0
+    ):
+        return None, 0, 0, 0.0
+
+    device = target_embeddings.device
+    node_indices = pair_tensors["node_indices"].to(device=device, dtype=torch.long)
+    source_ids = pair_tensors["source_ids"].to(device=device, dtype=torch.long)
+    reference_logits = reference_logits.to(device=device, dtype=torch.float32)
+    ref_pred = reference_logits.argmax(dim=1)
+    ref_prob = F.softmax(reference_logits, dim=1)
+    known_mask = (data.train_mask | data.val_mask).to(device=device, dtype=torch.bool)
+    local_nodes = None
+    if str(scope) == "local_trainval":
+        local_sets = [set([idx]) for idx in range(int(target_embeddings.size(0)))]
+        edge_cpu = data.edge_index.detach().cpu()
+        for u, v in edge_cpu.t().tolist():
+            local_sets[int(u)].add(int(v))
+            local_sets[int(v)].add(int(u))
+        local_nodes = [
+            torch.as_tensor(
+                sorted(n for n in nodes if bool(known_mask[int(n)].item())),
+                dtype=torch.long,
+                device=device,
+            )
+            for nodes in local_sets
+        ]
+
+    mode = str(mode)
+    max_kl = float(max_kl)
+    targets = torch.zeros(node_indices.numel(), 1, dtype=torch.float32, device=device)
+    kl_values = []
+    was_training = bool(model.training)
+    model.eval()
+
+    with torch.no_grad():
+        for pos in range(int(node_indices.numel())):
+            node_idx = int(node_indices[pos].item())
+            src = int(source_ids[pos].item())
+            if src < 0 or src >= int(target_embeddings.size(0)):
+                continue
+
+            candidate_raw = target_embeddings.clone()
+            if candidate_embeddings is None:
+                candidate_raw[node_idx] = target_embeddings[src]
+            else:
+                candidate_raw[node_idx] = candidate_embeddings[pos].to(
+                    device=device,
+                    dtype=target_embeddings.dtype,
+                )
+            candidate_emb = model.encoder(candidate_raw)
+            candidate_logits = model.forward_gnn_only(
+                candidate_emb,
+                data.edge_index,
+                data.edge_type,
+                data.edge_attr,
+            )
+            eval_nodes = local_nodes[node_idx] if local_nodes is not None else node_indices[pos : pos + 1]
+            if eval_nodes.numel() == 0:
+                eval_nodes = node_indices[pos : pos + 1]
+            node_logits = candidate_logits[eval_nodes]
+            pred_ok = bool((node_logits.argmax(dim=1) == ref_pred[eval_nodes]).all().item())
+            kl_value = F.kl_div(
+                F.log_softmax(node_logits, dim=1),
+                ref_prob[eval_nodes],
+                reduction="batchmean",
+            )
+            kl_scalar = float(kl_value.item())
+            kl_values.append(kl_scalar)
+            kl_ok = kl_scalar <= max_kl
+            if mode == "pred":
+                accept_ok = pred_ok
+            elif mode == "kl":
+                accept_ok = kl_ok
+            else:
+                accept_ok = pred_ok and kl_ok
+            targets[pos, 0] = 1.0 if accept_ok else 0.0
+
+    if was_training:
+        model.train()
+
+    positives = int(targets.sum().item())
+    mean_kl = float(sum(kl_values) / max(1, len(kl_values)))
+    return targets, int(node_indices.numel()), positives, mean_kl
 
 
 def _split_mask_for_train_pairs(data, split, device):
@@ -858,6 +994,15 @@ def train_residual_adapter(
     extra_negative_anchors_per_node=0,
     negative_error_min=0.45,
     negative_gate_weight=1.0,
+    class_aware_accept=False,
+    classifier_accept_gate=False,
+    classifier_model=None,
+    classifier_reference_logits=None,
+    classifier_accept_mode="both",
+    classifier_accept_scope="node",
+    classifier_accept_after_residual=False,
+    classifier_accept_probe_alpha=0.25,
+    classifier_accept_max_kl=0.2,
 ):
     device = target_embeddings.device
     train_nodes = select_residual_train_nodes(
@@ -907,6 +1052,13 @@ def train_residual_adapter(
         max(0, int(max_pairs)),
         negative_error_min,
     )
+    accept_targets = None
+    class_accept_labelled = 0
+    class_accept_positive = 0
+    classifier_accept_evaluated = 0
+    classifier_accept_positive = 0
+    classifier_accept_mean_kl = 0.0
+    class_targets = None
     if pair_tensors["node_indices"].numel() == 0:
         return None, {
             "train_pairs": 0,
@@ -926,7 +1078,41 @@ def train_residual_adapter(
             "adapter_type": str(adapter_type),
             "accept_mode": str(accept_mode),
             "bucket_mode": str(bucket_mode),
+            "class_aware_accept": bool(class_aware_accept),
+            "class_accept_labelled": 0,
+            "class_accept_positive": 0,
+            "classifier_accept_gate": bool(classifier_accept_gate),
+            "classifier_accept_evaluated": 0,
+            "classifier_accept_positive": 0,
+            "classifier_accept_mean_kl": 0.0,
+            "classifier_accept_after_residual": bool(classifier_accept_after_residual),
+            "classifier_accept_probe_alpha": float(classifier_accept_probe_alpha),
         }
+
+    if bool(classifier_accept_gate) and not bool(classifier_accept_after_residual):
+        (
+            accept_targets,
+            classifier_accept_evaluated,
+            classifier_accept_positive,
+            classifier_accept_mean_kl,
+        ) = _build_classifier_accept_targets(
+            classifier_model,
+            data,
+            pair_tensors,
+            target_embeddings,
+            classifier_reference_logits,
+            mode=classifier_accept_mode,
+            scope=classifier_accept_scope,
+            max_kl=classifier_accept_max_kl,
+        )
+    if bool(class_aware_accept):
+        class_targets, class_accept_labelled, class_accept_positive = _build_class_accept_targets(
+            data,
+            pair_tensors,
+            train_split,
+        )
+        if class_targets is not None:
+            accept_targets = class_targets if accept_targets is None else accept_targets * class_targets
 
     x_train = build_residual_pair_inputs(
         verify_features,
@@ -959,6 +1145,57 @@ def train_residual_adapter(
             winning_base_table_hit_counts=negative_pairs["winning_base_table_hit_counts"],
             best_cosines=negative_pairs["best_cosines"],
         )
+    if bool(classifier_accept_gate) and bool(classifier_accept_after_residual):
+        probe_epochs = max(20, int(epochs) // 2)
+        probe_adapter, _probe_loss, _probe_gate_mean, _probe_accept_gate_mean = _fit_residual_adapter(
+            x_train,
+            anchors,
+            targets,
+            rank=rank,
+            epochs=probe_epochs,
+            lr=lr,
+            weight_decay=weight_decay,
+            residual_l2=residual_l2,
+            adapter_type=adapter_type,
+            hidden_dim=hidden_dim,
+            hidden_layers=hidden_layers,
+            dropout=dropout,
+            accept_mode=accept_mode,
+            cosine_weight=cosine_weight,
+            mse_weight=mse_weight,
+            delta_weight=delta_weight,
+            gate_loss_weight=gate_loss_weight,
+            accept_loss_weight=accept_loss_weight,
+            gate_error_scale=gate_error_scale,
+            gate_error_max=gate_error_max,
+            gate_sparsity_weight=gate_sparsity_weight,
+            x_neg=x_train_neg,
+            negative_gate_weight=negative_gate_weight,
+            accept_targets=class_targets,
+        )
+        probe_adapter.eval()
+        with torch.no_grad():
+            probe_residual, _probe_raw_delta, _probe_gate, _probe_accept_gate = _adapter_forward(probe_adapter, x_train)
+            probe_candidates = anchors + float(classifier_accept_probe_alpha) * probe_residual
+        (
+            accept_targets,
+            classifier_accept_evaluated,
+            classifier_accept_positive,
+            classifier_accept_mean_kl,
+        ) = _build_classifier_accept_targets(
+            classifier_model,
+            data,
+            pair_tensors,
+            target_embeddings,
+            classifier_reference_logits,
+            mode=classifier_accept_mode,
+            scope=classifier_accept_scope,
+            max_kl=classifier_accept_max_kl,
+            candidate_embeddings=probe_candidates,
+        )
+        if class_targets is not None:
+            accept_targets = accept_targets * class_targets
+
     global_adapter, global_loss, global_gate_mean, global_accept_gate_mean = _fit_residual_adapter(
         x_train,
         anchors,
@@ -983,6 +1220,7 @@ def train_residual_adapter(
         gate_sparsity_weight=gate_sparsity_weight,
         x_neg=x_train_neg,
         negative_gate_weight=negative_gate_weight,
+        accept_targets=accept_targets,
     )
 
     support_hits = pair_tensors["winning_base_table_hit_counts"].to(device=device, dtype=torch.long)
@@ -1037,6 +1275,7 @@ def train_residual_adapter(
             gate_sparsity_weight=gate_sparsity_weight,
             x_neg=None if x_train_neg is None else x_train_neg[neg_bucket_values == int(support_value)],
             negative_gate_weight=negative_gate_weight,
+            accept_targets=None if accept_targets is None else accept_targets[bucket_mask],
         )
         adapters_by_support[int(support_value)] = bucket_adapter
         support_pair_counts[int(support_value)] = bucket_pairs
@@ -1071,6 +1310,15 @@ def train_residual_adapter(
         "adapter_type": str(adapter_type),
         "accept_mode": str(accept_mode),
         "bucket_mode": str(bucket_mode),
+        "class_aware_accept": bool(class_aware_accept),
+        "class_accept_labelled": int(class_accept_labelled),
+        "class_accept_positive": int(class_accept_positive),
+        "classifier_accept_gate": bool(classifier_accept_gate),
+        "classifier_accept_evaluated": int(classifier_accept_evaluated),
+        "classifier_accept_positive": int(classifier_accept_positive),
+        "classifier_accept_mean_kl": float(classifier_accept_mean_kl),
+        "classifier_accept_after_residual": bool(classifier_accept_after_residual),
+        "classifier_accept_probe_alpha": float(classifier_accept_probe_alpha),
     }
 
 

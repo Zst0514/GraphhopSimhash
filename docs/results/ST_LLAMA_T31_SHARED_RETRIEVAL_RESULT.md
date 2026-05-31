@@ -111,12 +111,20 @@ Llama/Cora 使用的新增关键参数：
 --residual_classifier_accept_gate
 --residual_classifier_accept_mode both
 --residual_classifier_accept_max_kl 0.2
---residual_classifier_accept_alpha 0.125
---residual_classifier_accept_epochs 80
---residual_classifier_accept_loss_weight 2.0
---residual_classifier_accept_neg_weight 2.0
---residual_classifier_accept_chunk_size 64
+--residual_classifier_accept_after_residual
+--residual_classifier_accept_probe_alpha 0.125
 ```
+
+当前实现里 classifier-aware accept gate 的监督信号来自冻结 GNN：
+
+```text
+reference embedding -> frozen GNN -> reference logits
+candidate reuse embedding -> frozen GNN -> candidate logits
+
+accept = prediction preserved AND KL(reference || candidate) <= max_kl
+```
+
+`--residual_classifier_accept_after_residual` 表示先用一个 probe residual adapter 生成候选修正结果，再用该结果构造 accept gate 的离线监督标签。在线阶段不跑 GNN、不读标签，只使用 residual adapter 的 accept score 和 `--residual_gate_accept_threshold`。
 
 ## 参数解释
 
@@ -145,4 +153,61 @@ Llama/Cora 使用的新增关键参数：
 /tmp/st_pubmed_T31_tau_refine_3run_20260530/tau065.log
 /tmp/llama_cora_T31_tau_relax_3run_20260530/tau040.log
 /tmp/llama_T31_final_3run_20260530/pubmed.log
+```
+
+## 当前 main 分支复现入口
+
+已提供统一脚本：
+
+```bash
+bash GraphhopSimhash/scripts/run_t31_shared_frontend_reuse.sh
+```
+
+只跑其中一组：
+
+```bash
+CASES="llama_cora" RUNS=3 \
+bash GraphhopSimhash/scripts/run_t31_shared_frontend_reuse.sh
+```
+
+四组 case 对应关系：
+
+| Case | Embedding 源 | 数据集 | gate 设置 |
+|---|---|---|---|
+| `st_cora` | `data.x` | Cora | `separate`, tau=0.575 |
+| `st_pubmed` | `data.x` | PubMed | `shared`, tau=0.65 |
+| `llama_cora` | `llama2_7b:W4A16` | Cora | classifier-aware `separate`, tau=0.40 |
+| `llama_pubmed` | `llama2_7b:W4A16` | PubMed | `shared`, tau=0.91 |
+
+输出目录：
+
+```text
+output/t31_shared_frontend_reuse/logs/
+```
+
+## 接入 Graph-Bit 全栈实验
+
+后续 Graph-Bit full-stack 默认使用同一套在线前端：
+
+```text
+8 heads x 16 bit
+radius = 2
+T = 31
+hard direct: support >= 5
+residual candidate: support = 3..4
+compute / Graph-Bit miss: support < 3 或 residual accept reject
+```
+
+入口脚本：
+
+```bash
+RUNS=10 DATASET=cora \
+bash GraphhopSimhash/scripts/run_graphbit_predictor_free_flow.sh
+```
+
+其中 Cora 默认启用 classifier-aware accept gate；PubMed 默认使用 shared accept gate 高阈值：
+
+```bash
+RUNS=3 DATASET=pubmed \
+bash GraphhopSimhash/scripts/run_graphbit_predictor_free_flow.sh
 ```

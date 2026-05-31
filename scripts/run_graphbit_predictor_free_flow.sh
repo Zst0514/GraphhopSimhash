@@ -4,8 +4,8 @@ set -euo pipefail
 # Generic Graph-Bit predictor-free validation flow.
 #
 # Fixed front-end:
-#   h8_{hard}{soft}_T{threshold}, R=2, 8 x 16-bit heads
-#   default: LLaMA-aware gate, hard>=5 direct reuse, soft=3..4 residual candidates
+#   T31 shared retrieval skeleton, R=2, 8 x 16-bit heads
+#   default: hard>=5 direct reuse, soft=3..4 residual candidates
 #   accepted misses -> Degree Graph-Bit
 #
 # Useful overrides:
@@ -29,7 +29,7 @@ PYTHON_BIN="${PYTHON_BIN:-/home/zhangshangtong/.conda/envs/OFA/bin/python}"
 
 DATASET="${DATASET:-cora}"
 HEADS="${HEADS:-h8}"
-THRESHOLD="${THRESHOLD:-30}"
+THRESHOLD="${THRESHOLD:-31}"
 BUDGET="${BUDGET:-p8heavy}"
 HARD_SUPPORT="${HARD_SUPPORT:-5}"
 SOFT_SUPPORT="${SOFT_SUPPORT:-3}"
@@ -41,8 +41,25 @@ RUN_ALGO="${RUN_ALGO:-0}"
 RUN_ONNXIM="${RUN_ONNXIM:-0}"
 BUILD_ONNXIM="${BUILD_ONNXIM:-0}"
 SEQ_LEN="${SEQ_LEN:-64}"
-RESIDUAL_ACCEPT_MODE="${RESIDUAL_ACCEPT_MODE:-shared}"
-RESIDUAL_GATE_THRESHOLD="${RESIDUAL_GATE_THRESHOLD:-0.60}"
+if [[ -z "${RESIDUAL_ACCEPT_MODE+x}" ]]; then
+  if [[ "${DATASET}" == "cora" ]]; then
+    RESIDUAL_ACCEPT_MODE="separate"
+  else
+    RESIDUAL_ACCEPT_MODE="shared"
+  fi
+fi
+if [[ -z "${RESIDUAL_GATE_THRESHOLD+x}" ]]; then
+  if [[ "${DATASET}" == "cora" ]]; then
+    RESIDUAL_GATE_THRESHOLD="0.40"
+  else
+    RESIDUAL_GATE_THRESHOLD="0.91"
+  fi
+fi
+CLASSIFIER_ACCEPT_GATE="${CLASSIFIER_ACCEPT_GATE:-$([[ "${DATASET}" == "cora" ]] && echo 1 || echo 0)}"
+CLASSIFIER_ACCEPT_MODE="${CLASSIFIER_ACCEPT_MODE:-both}"
+CLASSIFIER_ACCEPT_MAX_KL="${CLASSIFIER_ACCEPT_MAX_KL:-0.2}"
+CLASSIFIER_ACCEPT_AFTER_RESIDUAL="${CLASSIFIER_ACCEPT_AFTER_RESIDUAL:-1}"
+CLASSIFIER_ACCEPT_PROBE_ALPHA="${CLASSIFIER_ACCEPT_PROBE_ALPHA:-0.125}"
 RESIDUAL_EPOCHS="${RESIDUAL_EPOCHS:-200}"
 RESIDUAL_ALPHA_GRID=(${RESIDUAL_ALPHA_GRID:-0 0.03125 0.0625 0.125 0.25 0.5})
 PRECISION_DEPTH_TAGS=(${PRECISION_DEPTH_TAGS:-W4A6 W4A5 W4A4})
@@ -133,6 +150,18 @@ run_algo() {
       --precision_depth_trace_export_configs "${TRACE_EXPORT_CONFIGS[@]}"
     )
   fi
+  local classifier_args=()
+  if [[ "${CLASSIFIER_ACCEPT_GATE}" == "1" ]]; then
+    classifier_args=(
+      --residual_classifier_accept_gate
+      --residual_classifier_accept_mode "${CLASSIFIER_ACCEPT_MODE}"
+      --residual_classifier_accept_max_kl "${CLASSIFIER_ACCEPT_MAX_KL}"
+      --residual_classifier_accept_probe_alpha "${CLASSIFIER_ACCEPT_PROBE_ALPHA}"
+    )
+    if [[ "${CLASSIFIER_ACCEPT_AFTER_RESIDUAL}" == "1" ]]; then
+      classifier_args+=(--residual_classifier_accept_after_residual)
+    fi
+  fi
   echo "[$(timestamp)] [Algo] running ${DATASET} ${FRONTEND_ID} residual + Graph-Bit, runs=${RUNS}"
   set +e
   "${PYTHON_BIN}" -m GraphhopSimhash \
@@ -157,12 +186,14 @@ run_algo() {
     --learned_hash_epochs 10 \
     --learned_hash_dim 128 \
     --hamming_only_acceptor \
+    --disable_structure_check \
     --enable_score_gate \
     --allow_rare_fuzzy \
     --score_reuse_threshold "${THRESHOLD}" \
     --score_propagation_weight 3 \
     --score_graph_context_weight 1 \
     --score_low_unique_weight 1 \
+    --score_pair_confidence_discount 1 \
     --residual_fit_profile llama \
     --residual_rank 64 \
     --residual_epochs "${RESIDUAL_EPOCHS}" \
@@ -190,6 +221,7 @@ run_algo() {
     --residual_gate_error_scale 0.25 \
     --residual_gate_error_max 0.45 \
     --residual_gate_sparsity_weight 0.02 \
+    "${classifier_args[@]}" \
     --residual_gate_accept_threshold "${RESIDUAL_GATE_THRESHOLD}" \
     --residual_min_dist 1.0 2>&1 | tee "${MAIN_LOG}"
   local status="${PIPESTATUS[0]}"

@@ -385,6 +385,53 @@ def build_parser():
         help="Weight of per-sample accept gate supervision during residual training.",
     )
     parser.add_argument(
+        "--residual_class_aware_accept",
+        action="store_true",
+        help=(
+            "Train the residual accept gate with train/val label agreement when labels are available. "
+            "Online inference still uses only candidate features and does not read test labels."
+        ),
+    )
+    parser.add_argument(
+        "--residual_classifier_accept_gate",
+        action="store_true",
+        help=(
+            "Offline-only: supervise the residual accept gate with frozen-GNN prediction/logit preservation "
+            "on train/val reuse candidates. Online inference still uses only the learned accept score."
+        ),
+    )
+    parser.add_argument(
+        "--residual_classifier_accept_mode",
+        type=str,
+        default="both",
+        choices=["pred", "kl", "both"],
+        help="Classifier accept target: preserve prediction, keep KL below threshold, or require both.",
+    )
+    parser.add_argument(
+        "--residual_classifier_accept_scope",
+        type=str,
+        default="node",
+        choices=["node", "local_trainval"],
+        help="Classifier accept supervision scope: changed node only, or changed node plus train/val 1-hop neighbors.",
+    )
+    parser.add_argument(
+        "--residual_classifier_accept_after_residual",
+        action="store_true",
+        help="Build classifier accept targets from residual-corrected candidates using a first-stage probe adapter.",
+    )
+    parser.add_argument(
+        "--residual_classifier_accept_probe_alpha",
+        type=float,
+        default=0.25,
+        help="Residual scale used when generating classifier targets from the first-stage probe adapter.",
+    )
+    parser.add_argument(
+        "--residual_classifier_accept_max_kl",
+        type=float,
+        default=0.2,
+        help="Maximum KL(reference logits || candidate logits) for classifier-aware accept supervision.",
+    )
+    parser.add_argument(
         "--residual_gate_error_scale",
         type=float,
         default=0.25,
