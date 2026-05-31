@@ -220,6 +220,23 @@ Llama2-7B W4A16 旧日志显示该方向可行，
 
 因此 residual-gate 的机制已经跑通；不同 encoder backend 下需要使用各自的目标 embedding 训练和评估 residual adapter。
 
+Residual-gate 的几个边界也需要明确：
+
+```text
+1. 它不是 zero-calibration。
+   需要少量目标 encoder embedding 作为离线校准样本。
+   当前实验中的 train pairs 是几百级别，不是全图预编码。
+
+2. 它是 backend-specific。
+   ST 的 residual MLP 只能服务 ST embedding 空间；
+   LLaMA-7B 的 residual MLP 需要用 LLaMA-7B embedding 重新训练。
+
+3. 它解决的是 fuzzy bucket 的质量控制。
+   SoftDirectReuse 在 PubMed 上 reuse 很高但 drop 明显变大，
+   说明 support=3..4 不能无条件全收；
+   accept gate 的作用是把 fuzzy match 从“直接全收”变成“可控复用”。
+```
+
 ---
 
 ## 2. Graph-Bit Variable-Depth NPU Unit
@@ -435,7 +452,15 @@ depth = 5:
 
 这个过程不使用 learned predictor，也不使用 oracle error。
 
-前期也探索过把 activation 改成 2-bit plane-group / bit-plane-major layout，希望在 early stop 后连低位 activation 加载也一起跳过。当前结论是这条路的 tradeoff 较高：一方面 activation 从 HBM 读取并不是主要瓶颈，另一方面 layout 修改会引入 reformat 和格式转换开销。因此当前主线保留 bit-serial early stop 对 PE / RF / psum 活动的约简，把主要数据流收益放在后面的 W-stationary bucket scheduling。
+前期也探索过把 activation 改成 2-bit plane-group / bit-plane-major layout，希望在 early stop 后连低位 activation 加载也一起跳过。当前结论是这条路的 tradeoff 较高：
+
+```text
+1. activation HBM traffic 不是当前主要瓶颈；
+2. layout 修改会引入 reformat / 格式转换开销；
+3. 因此不把 activation layout 改造作为主线。
+```
+
+当前主线保留 bit-serial early stop 对 PE / RF / psum 活动的约简，把主要数据流收益放在后面的 W-stationary bucket scheduling。
 
 ---
 
@@ -482,6 +507,26 @@ for each layer:
    让同风险 miss nodes 连续消费同一个 W tile，
    减少 W tile reload。
 ```
+
+两类收益的定位不同：
+
+```text
+variable activation depth:
+    主要是 compute / RF / psum activity saving。
+    它不应该单独被包装成主要 HBM latency 来源。
+
+risk-bucket W-stationary scheduling:
+    主要是 W tile reload / memory traffic saving。
+    这是端到端 cycles/traffic 更敏感的部分。
+```
+
+硬件 profile 需要使用真实 encoder GEMM 行数：
+
+```text
+M = node_batch * sequence_length
+```
+
+小 M microbenchmark 容易低估 variable-depth 对 compute path 的影响；面向 TAPE / DyLGNN 这类 graph-text encoder 前端时，`M` 通常来自多个节点和 padding 后 token rows 的乘积，应按真实 batch / sequence setting 重新 profile。
 
 ---
 
