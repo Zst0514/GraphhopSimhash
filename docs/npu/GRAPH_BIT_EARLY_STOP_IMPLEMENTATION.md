@@ -239,11 +239,53 @@ module_p90_w50  0.5/0.5 6.01      59.0/0.0%     2.40%  0.82%      21.07%
 4. 当前 Cora 上 module_p90_node / module_p90_w20 是更稳的折中点。
 ```
 
+PubMed 3-run 结果如下：
+
+```text
+policy          node/w  AvgDepth  P6/P5          Drop   ExtraDrop  CostSave
+no_w_node       1.0/0.0 5.32      17.0/40.6%    3.27%  1.38%      28.33%
+module_p75_node 1.0/0.0 5.58      29.5/27.0%    3.10%  1.25%      25.85%
+module_p75_w20  0.8/0.2 6.02      57.6/0.0%     2.94%  1.05%      21.16%
+module_p75_w50  0.5/0.5 6.01      58.3/0.0%     2.93%  1.05%      21.16%
+module_p90_node 1.0/0.0 6.04      56.4/0.0%     2.85%  1.01%      21.09%
+module_p90_w20  0.8/0.2 6.04      56.3/0.0%     2.89%  1.01%      20.82%
+module_p90_w50  0.5/0.5 6.04      56.4/0.0%     2.85%  1.01%      21.09%
+```
+
+跨 Cora / PubMed 合并看，当前更稳的折中点是 `module_p90_node` 或 `module_p90_w50`：
+
+```text
+policy          CoraDrop  PubMedDrop  MaxDrop  MeanCostSave  MeanAvgDepth
+module_p90_node 2.27%     2.85%       2.85%    21.05%        6.02
+module_p90_w20  2.27%     2.89%       2.89%    20.91%        6.02
+module_p90_w50  2.40%     2.85%       2.85%    21.08%        6.02
+module_p75_w20  2.30%     2.94%       2.94%    21.24%        6.01
+no_w_node       2.55%     3.27%       3.27%    28.00%        5.35
+```
+
+解释：
+
+```text
+No-W:
+    更激进，平均 depth 更低，cost saving 更高；
+    但 PubMed 会有大量 P5，drop 超过 3%。
+
+Module/W-bound:
+    用 W tile 强度约束 runtime-bound；
+    把 PubMed 的 P5 拉回 P6/P7，drop 回到 3% 内。
+
+当前默认建议:
+    module_p90_node 或 module_p90_w50。
+    两者都保持约 21% miss-encoder cost saving，跨 Cora/PubMed 的 maxDrop 约 2.85%。
+```
+
 对应输出：
 
 ```text
 output/graphbit_weighted_bound_validation_cora_runs3/summary.tsv
 output/graphbit_weighted_bound_validation_cora_runs3/pareto.tsv
+output/graphbit_weighted_bound_validation_pubmed_runs3/summary.tsv
+output/graphbit_weighted_bound_validation_pubmed_runs3/pareto.tsv
 ```
 
 ## 2. CLI 参数入口

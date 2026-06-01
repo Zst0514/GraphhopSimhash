@@ -250,6 +250,36 @@ column -t -s $'\t' \
   output/graphbit_weighted_bound_validation_cora_runs3/summary.tsv
 ```
 
+PubMed 3-run 结果：
+
+```text
+policy          node/w  AvgDepth  Drop   ExtraDrop  CostSaveVsFull
+no_w_node       1.0/0.0 5.32      3.27%  1.38%      28.33%
+module_p75_w20  0.8/0.2 6.02      2.94%  1.05%      21.16%
+module_p90_node 1.0/0.0 6.04      2.85%  1.01%      21.09%
+module_p90_w20  0.8/0.2 6.04      2.89%  1.01%      20.82%
+module_p90_w50  0.5/0.5 6.04      2.85%  1.01%      21.09%
+```
+
+读取 PubMed 完整结果：
+
+```bash
+column -t -s $'\t' \
+  output/graphbit_weighted_bound_validation_pubmed_runs3/summary.tsv
+```
+
+跨 Cora / PubMed 的当前折中点：
+
+```text
+policy          MaxDrop  MeanCostSave  MeanAvgDepth
+module_p90_node 2.85%    21.05%        6.02
+module_p90_w50  2.85%    21.08%        6.02
+module_p75_w20  2.94%    21.24%        6.01
+no_w_node       3.27%    28.00%        5.35
+```
+
+`no_w_node` 说明只看 node tolerance 会过激；`module_p90_*` 说明加入 W tile strength 后，PubMed 的 P5 stop 被拉回到 P6/P7，精度更稳。
+
 一键 nodewise sweep：
 
 ```bash

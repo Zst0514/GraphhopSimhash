@@ -101,6 +101,39 @@ Variable activation depth:
     mainly reduces PE / psum / activation-side activity.
 ```
 
+## 3. Nodewise Bound Policy Validation
+
+The current nodewise bound sweep fixes the T31 reuse/residual front-end and only changes the miss-node Graph-Bit bound policy.
+
+Across Cora and PubMed, the useful policy family is `module_p90_*`:
+
+| Policy | Cora Drop | PubMed Drop | Max Drop | Mean Cost Save vs FullP8-miss | Mean AvgDepth |
+|---|---:|---:|---:|---:|---:|
+| no_w_node | 2.55% | 3.27% | 3.27% | 28.00% | 5.35 |
+| module_p75_w20 | 2.30% | 2.94% | 2.94% | 21.24% | 6.01 |
+| module_p90_node | 2.27% | 2.85% | 2.85% | 21.05% | 6.02 |
+| module_p90_w50 | 2.40% | 2.85% | 2.85% | 21.08% | 6.02 |
+
+Interpretation:
+
+```text
+no_w_node:
+    lower AvgDepth and higher cost saving,
+    but PubMed receives many P5 stops and exceeds 3% drop.
+
+module_p90_*:
+    uses W tile strength in the runtime bound,
+    keeps most miss nodes around P6/P7,
+    and keeps both Cora and PubMed below 3% drop.
+```
+
+Output:
+
+```text
+output/graphbit_weighted_bound_validation_cora_runs3/summary.tsv
+output/graphbit_weighted_bound_validation_pubmed_runs3/summary.tsv
+```
+
 Output:
 
 ```text
@@ -114,7 +147,7 @@ cd /home/zhangshangtong/Transformer/OFA
 RUNS=3 DATASET=cora bash GraphhopSimhash/scripts/run_graphbit_trace_replay.sh
 ```
 
-## 3. PubMed And Arxiv Scope
+## 4. PubMed And Arxiv Scope
 
 PubMed uses the same full-stack trace replay table as Cora:
 
