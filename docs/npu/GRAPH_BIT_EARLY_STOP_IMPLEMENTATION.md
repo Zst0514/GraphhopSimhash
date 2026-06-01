@@ -5,7 +5,7 @@
 ```text
 一个 miss node 进入 LLaMA encoder 后，
 系统如何决定它算到几 bit，
-ONNXim 里又如何把这个 stop depth 反映到 activation fetch、bit-plane issue、weight/RF、psum update 和最终 trace replay。
+ONNXim 里又如何把这个 stop depth 反映到 activation-side issue、psum update 和最终 trace replay。
 ```
 
 相关设计总览见：
@@ -80,6 +80,21 @@ P6: b7..b2
 P5: b7..b3
 P4: b7..b4
 ```
+
+当前第一版不加入 operator sensitivity LUT。主线使用：
+
+```text
+node tolerance:
+    degree / propagation risk
+
+runtime bound:
+    A_low_bound(depth) * W_tile_abs_bound
+
+op sensitivity:
+    统一设为 1
+```
+
+因此图风险不直接指定最终 P8/P6/P5/P4，而是给出节点级 tolerance；当前 tile 的 stop depth 由剩余 activation 低位上界和 W tile 强度共同决定。
 
 ## 2. CLI 参数入口
 

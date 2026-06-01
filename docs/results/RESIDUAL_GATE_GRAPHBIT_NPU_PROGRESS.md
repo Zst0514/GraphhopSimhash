@@ -247,6 +247,21 @@ tolerance:
 
 之后 NPU 在 bit-serial GEMM 执行过程中，从高位到低位逐步累加 partial sum，并在每个候选 depth 检查剩余低位的理论上界。如果上界已经小于该节点的 tolerance，就停止继续执行低位。
 
+当前第一版不引入复杂的算子敏感度表，先采用最轻量的三项：
+
+```text
+node tolerance:
+    degree / propagation risk
+
+runtime bound:
+    A_low_bound(depth) * W_tile_abs_bound
+
+op sensitivity:
+    统一设为 1
+```
+
+因此 degree / propagation risk 只提供节点级误差容忍度；实际 stop depth 由当前 activation 剩余低位上界和 W tile 数值强度决定。Q/K、V/O、FFN up/down、layer index 等 operator sensitivity 不进入当前主线，后续只作为消融增强项。
+
 对每个 miss node：
 
 ```text
@@ -713,4 +728,3 @@ Reuse + predictor-free Graph-Bit + risk-bucket W-stationary
 ```
 
 这张表用于拆分收益来源：reuse/residual、runtime bound、risk-bucket W tile reuse 各自贡献多少。
-

@@ -232,6 +232,21 @@ for depth in min_depth..8:
         break
 ```
 
+当前第一版保持机制轻量，不引入复杂的 operator sensitivity 表：
+
+```text
+node tolerance:
+    degree / propagation risk
+
+runtime bound:
+    A_low_bound(depth) * W_tile_abs_bound
+
+op sensitivity:
+    统一设为 1
+```
+
+也就是说，degree / propagation risk 只决定节点级容忍度；当前 GEMM tile 是否能跳过低位，由 activation 剩余低位上界和 W tile 强度共同决定。Q/K、V/O、FFN up/down 等算子敏感度先不进入主线，只作为后续消融项。
+
 关键点：
 
 ```text
