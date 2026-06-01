@@ -167,6 +167,14 @@ def remaining_ratio_bound(
     return float(scale) * remaining / max(1.0e-12, partial + remaining) * k_scale
 
 
+def low_bit_budget(depth: int, full_depth: int = 8) -> float:
+    if depth >= full_depth:
+        return 0.0
+    omitted = (1 << (full_depth - depth)) - 1
+    denom = (1 << full_depth) - 1
+    return float(omitted) / float(denom)
+
+
 def tolerance_from_risk(risk_q: torch.Tensor, min_tol: float, max_tol: float, gamma: float, risk_max: float) -> torch.Tensor:
     risk_norm = torch.clamp(risk_q.float() / max(risk_max, 1.0e-12), 0.0, 1.0)
     return float(min_tol) + (float(max_tol) - float(min_tol)) * torch.pow(1.0 - risk_norm, float(gamma))
@@ -208,6 +216,17 @@ def main() -> None:
     parser.add_argument("--gamma", type=float, default=1.0)
     parser.add_argument("--risk_max", type=float, default=15.0)
     parser.add_argument("--bound_scale", type=float, default=1.0)
+    parser.add_argument(
+        "--score_taus",
+        type=float,
+        nargs="+",
+        default=[0.0001, 0.0002, 0.0005, 0.001, 0.002, 0.005, 0.01, 0.02],
+    )
+    parser.add_argument("--score_alpha", type=float, default=1.0)
+    parser.add_argument("--score_beta", type=float, default=1.0)
+    parser.add_argument("--score_w_cap", type=float, default=2.0)
+    parser.add_argument("--score_w_reference_quantile", type=float, default=0.90)
+    parser.add_argument("--score_node_floor", type=float, default=0.0)
     parser.add_argument("--output_dir", default="output/graphbit_tile_bound_numeric/cora_quick")
     parser.add_argument("--write_samples", action="store_true")
     args = parser.parse_args()
@@ -241,6 +260,7 @@ def main() -> None:
     module_summaries: list[dict[str, Any]] = []
     depth_rows: list[dict[str, Any]] = []
     decision_rows: list[dict[str, Any]] = []
+    tile_score_records: list[dict[str, Any]] = []
     rng = random.Random(args.seed)
     current_node_ids: torch.Tensor | None = None
     current_mask: torch.Tensor | None = None
@@ -380,20 +400,42 @@ def main() -> None:
                         )
 
             actual_by_depth[8] = torch.zeros_like(y_norm)
+            row_oracle_depths: list[int] = []
+            for row_idx in range(flat.size(0)):
+                tol = float(tolerances[row_idx].item())
+                oracle_depth = 8
+                for depth in sorted(args.available_depths):
+                    if depth == 8:
+                        actual_val = 0.0
+                    elif depth in actual_by_depth:
+                        actual_val = float(actual_by_depth[depth][row_idx].item())
+                    else:
+                        continue
+                    if actual_val <= tol + 1e-12:
+                        oracle_depth = depth
+                        break
+                row_oracle_depths.append(nearest_depth(oracle_depth, args.available_depths))
+                record: dict[str, Any] = {
+                    "module": name,
+                    "node_id": int(row_node_ids[row_idx].item()),
+                    "degree_q": float(risk_q[row_idx].item()),
+                    "tolerance": tol,
+                    "oracle_depth": int(row_oracle_depths[-1]),
+                    "tile_k": int(tile_k),
+                    "tile_n": int(n1 - n0),
+                    "strength_mean": float(strength_mean),
+                    "strength_p95": float(strength_p95),
+                    "strength_max": float(strength_max),
+                }
+                for depth in sorted(set(args.depths)):
+                    if depth in actual_by_depth:
+                        record[f"actual_p{depth}"] = float(actual_by_depth[depth][row_idx].item())
+                tile_score_records.append(record)
+
             for mode, depth_bounds in bounds_by_mode_depth.items():
                 for row_idx in range(flat.size(0)):
                     tol = float(tolerances[row_idx].item())
-                    oracle_depth = 8
-                    for depth in sorted(args.available_depths):
-                        if depth == 8:
-                            actual_val = 0.0
-                        elif depth in actual_by_depth:
-                            actual_val = float(actual_by_depth[depth][row_idx].item())
-                        else:
-                            continue
-                        if actual_val <= tol + 1e-12:
-                            oracle_depth = depth
-                            break
+                    oracle_depth = row_oracle_depths[row_idx]
                     runtime_depth = 8
                     for depth in sorted(args.available_depths):
                         if depth == 8:
@@ -409,7 +451,6 @@ def main() -> None:
                             runtime_depth = depth
                             break
                     runtime_depth = nearest_depth(runtime_depth, args.available_depths)
-                    oracle_depth = nearest_depth(oracle_depth, args.available_depths)
                     module_decision_gap[mode].append(runtime_depth - oracle_depth)
                     decision_rows.append(
                         {
@@ -543,10 +584,77 @@ def main() -> None:
             }
         )
 
+    score_rows: list[dict[str, Any]] = []
+    if tile_score_records:
+        ref_values = [float(r["strength_p95"]) for r in tile_score_records]
+        reference_strength = max(1.0e-12, quantile(ref_values, args.score_w_reference_quantile))
+        for tau in sorted(set(float(x) for x in args.score_taus)):
+            runtime_depths: list[int] = []
+            oracle_depths: list[int] = []
+            gaps: list[int] = []
+            actual_at_stop: list[float] = []
+            score_at_stop: list[float] = []
+            depth_hist: dict[int, int] = defaultdict(int)
+            for record in tile_score_records:
+                node_norm = float(record["degree_q"]) / max(float(args.risk_max), 1.0e-12)
+                node_norm = max(float(args.score_node_floor), min(1.0, node_norm))
+                w_norm = float(record["strength_p95"]) / reference_strength
+                w_norm = max(0.0, min(float(args.score_w_cap), w_norm))
+                runtime_depth = 8
+                runtime_score = 0.0
+                # Choose the lowest depth whose joint risk score is within the budget.
+                for depth in sorted(args.available_depths):
+                    score = (
+                        math.pow(node_norm, float(args.score_alpha))
+                        * math.pow(w_norm, float(args.score_beta))
+                        * low_bit_budget(depth, full_depth=8)
+                    )
+                    if score <= tau + 1e-12:
+                        runtime_depth = int(depth)
+                        runtime_score = float(score)
+                        break
+                runtime_depth = nearest_depth(runtime_depth, args.available_depths)
+                oracle_depth = int(record["oracle_depth"])
+                actual = 0.0 if runtime_depth == 8 else float(record.get(f"actual_p{runtime_depth}", 0.0))
+                runtime_depths.append(runtime_depth)
+                oracle_depths.append(oracle_depth)
+                gaps.append(runtime_depth - oracle_depth)
+                actual_at_stop.append(actual)
+                score_at_stop.append(runtime_score)
+                depth_hist[runtime_depth] += 1
+            total = max(1, len(runtime_depths))
+            hist_str = ",".join(f"P{d}:{depth_hist.get(d, 0) / total * 100:.1f}%" for d in sorted(args.available_depths))
+            score_rows.append(
+                {
+                    "policy": "tile_score_v2",
+                    "tau": tau,
+                    "samples": total,
+                    "reference_strength_q": args.score_w_reference_quantile,
+                    "reference_strength": reference_strength,
+                    "alpha": args.score_alpha,
+                    "beta": args.score_beta,
+                    "w_cap": args.score_w_cap,
+                    "node_floor": args.score_node_floor,
+                    "runtime_avg_depth": sum(runtime_depths) / total,
+                    "oracle_avg_depth": sum(oracle_depths) / total,
+                    "exact_match": sum(1 for g in gaps if g == 0) / total,
+                    "conservative": sum(1 for g in gaps if g > 0) / total,
+                    "aggressive": sum(1 for g in gaps if g < 0) / total,
+                    "gap_mean": sum(gaps) / total,
+                    "gap_p90": quantile([float(g) for g in gaps], 0.90),
+                    "actual_at_stop_mean": summarize(actual_at_stop)["mean"],
+                    "actual_at_stop_p90": summarize(actual_at_stop)["p90"],
+                    "actual_at_stop_p95": summarize(actual_at_stop)["p95"],
+                    "score_at_stop_mean": summarize(score_at_stop)["mean"],
+                    "depth_hist": hist_str,
+                }
+            )
+
     write_tsv(out_dir / "depth_summary.tsv", depth_rows)
     write_tsv(out_dir / "global_depth_summary.tsv", global_rows)
     write_tsv(out_dir / "decision_summary.tsv", module_summaries)
     write_tsv(out_dir / "global_decision_summary.tsv", decision_global)
+    write_tsv(out_dir / "tile_score_v2_summary.tsv", score_rows)
     if args.write_samples:
         write_tsv(out_dir / "samples.tsv", sample_rows)
     manifest = {
@@ -569,9 +677,18 @@ def main() -> None:
             "gamma": args.gamma,
             "risk_max": args.risk_max,
         },
+        "tile_score_v2": {
+            "score_taus": args.score_taus,
+            "score_alpha": args.score_alpha,
+            "score_beta": args.score_beta,
+            "score_w_cap": args.score_w_cap,
+            "score_w_reference_quantile": args.score_w_reference_quantile,
+            "score_node_floor": args.score_node_floor,
+        },
         "outputs": {
             "global_depth_summary": str(out_dir / "global_depth_summary.tsv"),
             "global_decision_summary": str(out_dir / "global_decision_summary.tsv"),
+            "tile_score_v2_summary": str(out_dir / "tile_score_v2_summary.tsv"),
         },
     }
     (out_dir / "manifest.json").write_text(json.dumps(manifest, indent=2), encoding="utf-8")
@@ -589,6 +706,12 @@ def main() -> None:
             f"[TileBound] decision {row['mode']} runtime_avg={row['runtime_avg_depth']:.2f} "
             f"oracle_avg={row['oracle_avg_depth']:.2f} exact={row['exact_match']:.3f} "
             f"cons={row['conservative']:.3f} aggr={row['aggressive']:.3f}"
+        )
+    for row in score_rows:
+        print(
+            f"[TileScoreV2] tau={row['tau']:.5f} runtime_avg={row['runtime_avg_depth']:.2f} "
+            f"oracle_avg={row['oracle_avg_depth']:.2f} aggr={row['aggressive']:.3f} "
+            f"actual_p90={row['actual_at_stop_p90']:.5f} hist={row['depth_hist']}"
         )
 
 

@@ -269,7 +269,6 @@ class PaperHashReuseController(HeatPlusPlus_NDP_Controller):
             self._build_hash_route_state(route_name, route_bits)
             for route_name, route_bits in zip(self.hash_route_names, self.hash_route_bits)
         ]
-        self._neighbor_masks_cache = {}
         self.memo_table = self.hash_routes[0]["memo_table"]
         self.hash_population = self.hash_routes[0]["hash_population"]
         self.node_policies = None
@@ -417,23 +416,6 @@ class PaperHashReuseController(HeatPlusPlus_NDP_Controller):
         self.memo_table = self.hash_routes[0]["memo_table"]
         self.hash_population = self.hash_routes[0]["hash_population"]
         self._time_counter = 0
-
-    def _get_neighbor_masks(self, route_bits, allowed_r):
-        route_bits = int(route_bits)
-        allowed_r = int(allowed_r)
-        cache_key = (route_bits, allowed_r)
-        masks = self._neighbor_masks_cache.get(cache_key)
-        if masks is not None:
-            return masks
-        masks = []
-        for radius in range(1, allowed_r + 1):
-            for bit_ids in combinations(range(route_bits), radius):
-                mask = 0
-                for bit_id in bit_ids:
-                    mask ^= (1 << bit_id)
-                masks.append((radius, mask))
-        self._neighbor_masks_cache[cache_key] = masks
-        return masks
 
     def _cache_computed_entry(self, query_hashes, entry):
         for route_idx, route_hash in enumerate(query_hashes):
@@ -666,19 +648,6 @@ class PaperHashReuseController(HeatPlusPlus_NDP_Controller):
         ranked_candidates = []
         seen_hashes = set()
         route_bits = int(route_state["route_bits"])
-
-        if route_bits <= 20 and allowed_r <= 2:
-            for radius, mask in self._get_neighbor_masks(route_bits, allowed_r):
-                neighbor = h ^ mask
-                if neighbor in seen_hashes:
-                    continue
-                entries = route_state["memo_table"].get(neighbor)
-                if entries:
-                    ranked_candidates.append((radius, 0, neighbor))
-                    seen_hashes.add(neighbor)
-                    if len(ranked_candidates) >= max_candidates:
-                        break
-            return [cand for _, _, cand in ranked_candidates[:max_candidates]]
 
         if route_state["mih_enabled"]:
             chunks = self._get_route_chunks(h, route_idx)
@@ -922,15 +891,6 @@ class PaperHashReuseController(HeatPlusPlus_NDP_Controller):
             )
         return (-item["route_score"], item["dist"], -item["cos"], -item["entry"]["timestamp"])
 
-    def _candidate_leaf_sort_key(self, dist, route_score, cos, timestamp):
-        if self.hamming_only_acceptor:
-            return (dist, -route_score, -timestamp)
-        return (-route_score, dist, -cos, -timestamp)
-
-    @staticmethod
-    def _popcount(value):
-        return bin(int(value)).count("1")
-
     def _required_cosine_tau(self, hamming_dist):
         if hamming_dist <= 0:
             return max(0.0, self.second_stage_tau - 0.10)
@@ -948,8 +908,13 @@ class PaperHashReuseController(HeatPlusPlus_NDP_Controller):
         for route_idx, query_hash in enumerate(query_hashes):
             route_state = self._get_route_state(route_idx)
             if route_state["memo_table"].get(query_hash):
-                query_hash = int(query_hash)
-                candidate_refs.append((route_idx, query_hash, query_hash, 0))
+                candidate_refs.append(
+                    {
+                        "route_idx": route_idx,
+                        "hash": query_hash,
+                        "query_hash": query_hash,
+                    }
+                )
         return candidate_refs
 
     def _collect_union_candidate_refs(self, query_hashes, allowed_r):
@@ -964,16 +929,19 @@ class PaperHashReuseController(HeatPlusPlus_NDP_Controller):
                 max_candidates=self.max_candidates_per_route,
             )
             for cand_hash in candidate_hashes:
-                query_hash_int = int(query_hash)
-                cand_hash_int = int(cand_hash)
-                pair = (route_idx, cand_hash_int)
+                pair = (route_idx, cand_hash)
                 if pair in seen_pairs:
                     continue
-                hash_dist = bin(query_hash_int ^ cand_hash_int).count("1")
-                candidate_refs.append((route_idx, cand_hash_int, query_hash_int, hash_dist))
+                candidate_refs.append(
+                    {
+                        "route_idx": route_idx,
+                        "hash": cand_hash,
+                        "query_hash": query_hash,
+                    }
+                )
                 seen_pairs.add(pair)
 
-        candidate_refs.sort(key=lambda item: (item[3], item[0]))
+        candidate_refs.sort(key=lambda item: (bin(item["query_hash"] ^ item["hash"]).count("1"), item["route_idx"]))
         return candidate_refs[: self.max_total_candidates]
 
     def _collect_scored_candidates(
@@ -985,28 +953,18 @@ class PaperHashReuseController(HeatPlusPlus_NDP_Controller):
         prefer_fine_representative=False,
         prefer_main_fine_representative=False,
     ):
-        if (
-            self.hamming_only_acceptor
-            and self.coarse_union_bits_max is None
-            and not prefer_fine_representative
-            and not prefer_main_fine_representative
-            and len(set(int(idx) for idx in self.route_base_indices)) == 1
-        ):
-            return self._collect_scored_candidates_fast_hamming_single_base(
-                candidate_refs,
-                exclude_node_id=exclude_node_id,
-                allowed_node_ids=allowed_node_ids,
-            )
-
         best_by_node_route = {}
         if allowed_node_ids is not None and not isinstance(allowed_node_ids, set):
             allowed_node_ids = set(allowed_node_ids)
         for cand_ref in candidate_refs:
-            route_idx, cand_hash, _query_hash, hash_dist = cand_ref
+            route_idx = cand_ref["route_idx"]
+            cand_hash = cand_ref["hash"]
+            query_hash = cand_ref["query_hash"]
             route_state = self._get_route_state(route_idx)
             entries = route_state["memo_table"].get(cand_hash, [])
             if not entries:
                 continue
+            hash_dist = bin(query_hash ^ cand_hash).count("1")
             for entry in entries:
                 node_id = entry["node_id"]
                 if exclude_node_id is not None and node_id == exclude_node_id:
@@ -1017,16 +975,21 @@ class PaperHashReuseController(HeatPlusPlus_NDP_Controller):
                     cos = self._compute_hamming_match_score(route_idx, hash_dist)
                 else:
                     cos = self._compute_entry_cosine(entry, query_feat)
-                route_score = cos * self.route_score_weights[route_idx]
-                leaf_sort_key = self._candidate_leaf_sort_key(
-                    hash_dist,
-                    route_score,
-                    cos,
-                    int(entry["timestamp"]),
-                )
-                item = (route_idx, cand_hash, entry, cos, route_score, hash_dist, leaf_sort_key)
+                item = {
+                    "route_idx": route_idx,
+                    "route_name": self.hash_route_names[route_idx],
+                    "route_bits": self.hash_route_bits[route_idx],
+                    "base_route_idx": self.route_base_indices[route_idx],
+                    "base_route_name": self.route_base_names[self.route_base_indices[route_idx]],
+                    "route_weight": self.route_score_weights[route_idx],
+                    "hash": cand_hash,
+                    "entry": entry,
+                    "cos": cos,
+                    "route_score": cos * self.route_score_weights[route_idx],
+                    "dist": hash_dist,
+                }
                 best_item = best_by_node_route.get((node_id, route_idx))
-                if best_item is None or leaf_sort_key < best_item[6]:
+                if best_item is None or self._candidate_sort_key(item) < self._candidate_sort_key(best_item):
                     best_by_node_route[(node_id, route_idx)] = item
 
         aggregated_by_node = {}
@@ -1044,8 +1007,8 @@ class PaperHashReuseController(HeatPlusPlus_NDP_Controller):
                     main_fine_route_items = [
                         item
                         for item in route_items
-                        if int(self.route_base_indices[int(item[0])]) == 0
-                        and int(self.hash_route_bits[int(item[0])]) >= fine_bits_min
+                        if int(item.get("base_route_idx", 0)) == 0
+                        and int(item.get("route_bits", self.sketch_bits)) >= fine_bits_min
                     ]
                     if main_fine_route_items:
                         representative_items = main_fine_route_items
@@ -1053,7 +1016,7 @@ class PaperHashReuseController(HeatPlusPlus_NDP_Controller):
                         fine_route_items = [
                             item
                             for item in route_items
-                            if int(self.hash_route_bits[int(item[0])]) >= fine_bits_min
+                            if int(item.get("route_bits", self.sketch_bits)) >= fine_bits_min
                         ]
                         if fine_route_items:
                             representative_items = fine_route_items
@@ -1061,26 +1024,24 @@ class PaperHashReuseController(HeatPlusPlus_NDP_Controller):
                     fine_route_items = [
                         item
                         for item in route_items
-                        if int(self.hash_route_bits[int(item[0])]) >= fine_bits_min
+                        if int(item.get("route_bits", self.sketch_bits)) >= fine_bits_min
                     ]
                     if fine_route_items:
                         representative_items = fine_route_items
-            best_item = min(representative_items, key=lambda item: item[6])
-            best_route_idx, best_hash, best_entry, best_cos, best_route_score, best_dist, _best_sort_key = best_item
+            best_item = min(representative_items, key=self._candidate_sort_key)
             route_hit_count = len(route_items)
-            route_idxs = tuple(sorted(int(item[0]) for item in route_items))
-            route_names = tuple(sorted(self.hash_route_names[idx] for idx in route_idxs))
-            base_route_idxs = tuple(sorted({int(self.route_base_indices[int(item[0])]) for item in route_items}))
+            route_names = tuple(sorted(item["route_name"] for item in route_items))
+            base_route_idxs = tuple(sorted({int(item["base_route_idx"]) for item in route_items}))
             base_route_names = tuple(self.route_base_names[idx] for idx in base_route_idxs)
-            winning_base_route_idx = int(self.route_base_indices[int(best_route_idx)])
+            winning_base_route_idx = int(best_item["base_route_idx"])
             max_base_route_idx = max(self.route_base_indices) if self.route_base_indices else -1
             base_route_table_hit_counts = [0] * (max_base_route_idx + 1)
             for item in route_items:
-                base_route_table_hit_counts[int(self.route_base_indices[int(item[0])])] += 1
+                base_route_table_hit_counts[int(item["base_route_idx"])] += 1
             winning_base_table_hit_count = sum(
-                1 for item in route_items if int(self.route_base_indices[int(item[0])]) == winning_base_route_idx
+                1 for item in route_items if int(item["base_route_idx"]) == winning_base_route_idx
             )
-            winning_route_idx = int(best_route_idx)
+            winning_route_idx = int(best_item["route_idx"])
             winning_route_fine_support_count = 0
             cross_route_fine_support_count = 0
             winning_base_fine_support_count = 0
@@ -1090,39 +1051,25 @@ class PaperHashReuseController(HeatPlusPlus_NDP_Controller):
             fine_head_support_count = 0
             if fine_bits_min is not None or self.coarse_union_bits_max is not None:
                 for item in route_items:
-                    route_idx = int(item[0])
-                    route_bits = int(self.hash_route_bits[route_idx])
-                    base_route_idx = int(self.route_base_indices[route_idx])
+                    route_bits = int(item.get("route_bits", self.sketch_bits))
                     if fine_bits_min is not None and route_bits >= fine_bits_min:
                         fine_head_support_count += 1
-                        if base_route_idx == 0:
+                        if int(item["base_route_idx"]) == 0:
                             main_route_fine_support_count += 1
                         else:
                             union_route_fine_support_count += 1
-                        if route_idx == winning_route_idx:
+                        if int(item["route_idx"]) == winning_route_idx:
                             winning_route_fine_support_count += 1
                         else:
                             cross_route_fine_support_count += 1
-                        if base_route_idx == winning_base_route_idx:
+                        if int(item["base_route_idx"]) == winning_base_route_idx:
                             winning_base_fine_support_count += 1
                     if self.coarse_union_bits_max is not None and route_bits <= self.coarse_union_bits_max:
                         coarse_head_support_count += 1
-            aggregate_item = {
-                "route_idx": int(best_route_idx),
-                "route_name": self.hash_route_names[int(best_route_idx)],
-                "route_bits": int(self.hash_route_bits[int(best_route_idx)]),
-                "base_route_idx": int(self.route_base_indices[int(best_route_idx)]),
-                "base_route_name": self.route_base_names[int(self.route_base_indices[int(best_route_idx)])],
-                "route_weight": float(self.route_score_weights[int(best_route_idx)]),
-                "hash": int(best_hash),
-                "entry": best_entry,
-                "cos": float(best_cos),
-                "route_score": float(best_route_score),
-                "dist": int(best_dist),
-            }
+            aggregate_item = dict(best_item)
             aggregate_item["route_hit_count"] = route_hit_count
             aggregate_item["route_names"] = route_names
-            aggregate_item["route_idxs"] = route_idxs
+            aggregate_item["route_idxs"] = tuple(sorted(item["route_idx"] for item in route_items))
             aggregate_item["base_route_hit_count"] = len(base_route_idxs)
             aggregate_item["base_route_idxs"] = base_route_idxs
             aggregate_item["base_route_names"] = base_route_names
@@ -1137,102 +1084,7 @@ class PaperHashReuseController(HeatPlusPlus_NDP_Controller):
             aggregate_item["union_route_fine_support_count"] = union_route_fine_support_count
             aggregate_item["coarse_head_support_count"] = coarse_head_support_count
             aggregate_item["fine_head_support_count"] = fine_head_support_count
-            scored.append(aggregate_item)
-        scored.sort(key=self._candidate_sort_key)
-        return scored
-
-    def _collect_scored_candidates_fast_hamming_single_base(
-        self,
-        candidate_refs,
-        exclude_node_id=None,
-        allowed_node_ids=None,
-    ):
-        if allowed_node_ids is not None and not isinstance(allowed_node_ids, set):
-            allowed_node_ids = set(allowed_node_ids)
-
-        aggregated = {}
-        for route_idx, cand_hash, _query_hash, hash_dist in candidate_refs:
-            route_state = self._get_route_state(route_idx)
-            entries = route_state["memo_table"].get(cand_hash, [])
-            if not entries:
-                continue
-            cos = self._compute_hamming_match_score(route_idx, hash_dist)
-            route_score = cos * self.route_score_weights[route_idx]
-            route_bit = 1 << int(route_idx)
-            for entry in entries:
-                node_id = int(entry["node_id"])
-                if exclude_node_id is not None and node_id == exclude_node_id:
-                    continue
-                if allowed_node_ids is not None and node_id not in allowed_node_ids:
-                    continue
-
-                timestamp = int(entry["timestamp"])
-                leaf_sort_key = self._candidate_leaf_sort_key(hash_dist, route_score, cos, timestamp)
-                item = aggregated.get(node_id)
-                if item is None:
-                    aggregated[node_id] = [
-                        route_bit,
-                        leaf_sort_key,
-                        int(route_idx),
-                        int(cand_hash),
-                        entry,
-                        float(cos),
-                        float(route_score),
-                        int(hash_dist),
-                    ]
-                    continue
-
-                item[0] |= route_bit
-                if leaf_sort_key < item[1]:
-                    item[1] = leaf_sort_key
-                    item[2] = int(route_idx)
-                    item[3] = int(cand_hash)
-                    item[4] = entry
-                    item[5] = float(cos)
-                    item[6] = float(route_score)
-                    item[7] = int(hash_dist)
-
-        if not aggregated:
-            return []
-
-        base_route_idx = int(self.route_base_indices[0]) if self.route_base_indices else 0
-        max_base_route_idx = max(self.route_base_indices) if self.route_base_indices else 0
-        scored = []
-        for route_mask, _sort_key, best_route_idx, best_hash, best_entry, best_cos, best_route_score, best_dist in aggregated.values():
-            route_idxs = tuple(idx for idx in range(len(self.hash_route_names)) if route_mask & (1 << idx))
-            route_hit_count = len(route_idxs)
-            base_route_table_hit_counts = [0] * (max_base_route_idx + 1)
-            base_route_table_hit_counts[base_route_idx] = route_hit_count
-            aggregate_item = {
-                "route_idx": best_route_idx,
-                "route_name": self.hash_route_names[best_route_idx],
-                "route_bits": int(self.hash_route_bits[best_route_idx]),
-                "base_route_idx": base_route_idx,
-                "base_route_name": self.route_base_names[base_route_idx],
-                "route_weight": float(self.route_score_weights[best_route_idx]),
-                "hash": best_hash,
-                "entry": best_entry,
-                "cos": best_cos,
-                "route_score": best_route_score,
-                "dist": best_dist,
-                "route_hit_count": route_hit_count,
-                "route_names": tuple(self.hash_route_names[idx] for idx in route_idxs),
-                "route_idxs": route_idxs,
-                "base_route_hit_count": 1,
-                "base_route_idxs": (base_route_idx,),
-                "base_route_names": (self.route_base_names[base_route_idx],),
-                "base_route_table_hit_counts": tuple(base_route_table_hit_counts),
-                "winning_base_route_idx": base_route_idx,
-                "winning_base_route_name": self.route_base_names[base_route_idx],
-                "winning_base_table_hit_count": route_hit_count,
-                "winning_route_fine_support_count": 0,
-                "cross_route_fine_support_count": 0,
-                "winning_base_fine_support_count": 0,
-                "main_route_fine_support_count": 0,
-                "union_route_fine_support_count": 0,
-                "coarse_head_support_count": 0,
-                "fine_head_support_count": 0,
-            }
+            aggregate_item["route_score"] = best_item["route_score"]
             scored.append(aggregate_item)
         scored.sort(key=self._candidate_sort_key)
         return scored
@@ -1388,8 +1240,8 @@ class PaperHashReuseController(HeatPlusPlus_NDP_Controller):
             exact_candidate_refs = self._find_exact_candidate_refs(query_hashes)
             if exact_candidate_refs:
                 exact_guard = any(
-                    self._should_guard_exact_bucket(cand_hash, route_idx=route_idx)
-                    for route_idx, cand_hash, _query_hash, _hash_dist in exact_candidate_refs
+                    self._should_guard_exact_bucket(ref["hash"], route_idx=ref["route_idx"])
+                    for ref in exact_candidate_refs
                 )
                 if exact_guard:
                     self.stats["exact_guarded"] += 1

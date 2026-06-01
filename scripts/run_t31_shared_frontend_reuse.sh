@@ -10,8 +10,6 @@ RUNS="${RUNS:-3}"
 SEED="${SEED:-42}"
 RESIDUAL_EPOCHS="${RESIDUAL_EPOCHS:-200}"
 RESIDUAL_MAX_TRAIN_PAIRS="${RESIDUAL_MAX_TRAIN_PAIRS:-4096}"
-ST_CORA_PATH="${ST_CORA_PATH:-cache_data/cora_ST_oracle_W4A16.pt}"
-ST_PUBMED_PATH="${ST_PUBMED_PATH:-cache_data/pubmed_ST_oracle_W4A16.pt}"
 
 # CASES can be overridden, for example:
 #   CASES="llama_cora" RUNS=1 bash GraphhopSimhash/scripts/run_t31_shared_frontend_reuse.sh
@@ -74,7 +72,7 @@ run_case() {
       dataset="cora"
       case_args=(
         --datasets "${dataset}"
-        --residual_embedding_path "${ST_CORA_PATH}"
+        --residual_embedding_source data_x
         --residual_fit_profile st
         --residual_accept_mode separate
         --residual_positive_error_max -1
@@ -89,7 +87,7 @@ run_case() {
       dataset="pubmed"
       case_args=(
         --datasets "${dataset}"
-        --residual_embedding_path "${ST_PUBMED_PATH}"
+        --residual_embedding_source data_x
         --residual_fit_profile st
         --residual_accept_mode shared
         --residual_positive_error_max 0.40

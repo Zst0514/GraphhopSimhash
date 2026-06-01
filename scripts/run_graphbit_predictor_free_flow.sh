@@ -18,6 +18,8 @@ set -euo pipefail
 #   RESIDUAL_GATE_THRESHOLD=0.60   fixed soft-hit accept threshold
 #   RUN_ALGO=1      rerun residual_precision_depth even if a log exists
 #   BOUND_ENABLE=1  use graph-conditioned runtime-bound depth policies
+#   BOUND_RULE=tile_score  use node risk * W strength * low-bit budget stop score
+#   BOUND_SCORE_TAU=0.001  threshold for tile_score
 #   TRACE_EXPORT=1  export per-node Graph-Bit replay traces
 #   RUN_ONNXIM=1    rerun ONNXim LLaMA GEMM microbenchmarks
 #   BUILD_ONNXIM=1  try to build ONNXim before running microbenchmarks
@@ -80,11 +82,12 @@ if [[ -z "${RESIDUAL_ACCEPT_LOSS_WEIGHT+x}" ]]; then
   fi
 fi
 RESIDUAL_GATE_SPARSITY_WEIGHT="${RESIDUAL_GATE_SPARSITY_WEIGHT:-0.02}"
-PRECISION_DEPTH_TAGS=(${PRECISION_DEPTH_TAGS:-W4A6 W4A5 W4A4})
-PRECISION_DEPTH_BITS=(${PRECISION_DEPTH_BITS:-6 5 4})
+PRECISION_DEPTH_TAGS=(${PRECISION_DEPTH_TAGS:-W4A8_TRUNC7 W4A8_TRUNC6 W4A8_TRUNC5 W4A8_TRUNC4})
+PRECISION_DEPTH_BITS=(${PRECISION_DEPTH_BITS:-7 6 5 4})
 BOUND_ENABLE="${BOUND_ENABLE:-1}"
 BOUND_PRIORITIES=(${BOUND_PRIORITIES:-degree tser})
 BOUND_ASSIGNMENT="${BOUND_ASSIGNMENT:-bucket_ratio}"
+BOUND_RULE="${BOUND_RULE:-remaining_bound}"
 BOUND_HIGH_MIN="${BOUND_HIGH_MIN:-8}"
 BOUND_MID_MIN="${BOUND_MID_MIN:-6}"
 BOUND_LOW_MIN="${BOUND_LOW_MIN:-4}"
@@ -99,6 +102,12 @@ BOUND_NODEWISE_MIN_TOL="${BOUND_NODEWISE_MIN_TOL:-0.0}"
 BOUND_NODEWISE_MAX_TOL="${BOUND_NODEWISE_MAX_TOL:-0.04}"
 BOUND_NODEWISE_GAMMA="${BOUND_NODEWISE_GAMMA:-1.0}"
 BOUND_NODEWISE_RISK_MAX="${BOUND_NODEWISE_RISK_MAX:-15.0}"
+BOUND_SCORE_TAU="${BOUND_SCORE_TAU:-0.001}"
+BOUND_SCORE_ALPHA="${BOUND_SCORE_ALPHA:-1.0}"
+BOUND_SCORE_BETA="${BOUND_SCORE_BETA:-1.0}"
+BOUND_SCORE_W_CAP="${BOUND_SCORE_W_CAP:-2.0}"
+BOUND_SCORE_W_REFERENCE="${BOUND_SCORE_W_REFERENCE:-1.0}"
+BOUND_SCORE_NODE_FLOOR="${BOUND_SCORE_NODE_FLOOR:-0.0}"
 TRACE_EXPORT="${TRACE_EXPORT:-0}"
 TRACE_EXPORT_DIR="${TRACE_EXPORT_DIR:-${OUT_DIR}/node_traces}"
 TRACE_EXPORT_CONFIGS=(${TRACE_EXPORT_CONFIGS:-DegBound})
@@ -129,7 +138,12 @@ esac
 SUMMARY_TSV="${OUT_DIR}/summary.tsv"
 SUMMARY_TXT="${OUT_DIR}/summary.txt"
 MICROBENCH_JSON="${OFA_DIR}/output/onnxim_graphbit/microbench_s${SEQ_LEN}/aggregate.json"
-MAIN_LOG="${LOG_DIR}/T${THRESHOLD}_${BUDGET}_runs${RUNS}.log"
+BOUND_ID="${BOUND_ID:-${BOUND_RULE}}"
+if [[ "${BOUND_RULE}" == "tile_score" ]]; then
+  BOUND_ID="score_tau${BOUND_SCORE_TAU}"
+fi
+BUDGET_ID="${BUDGET}_${BOUND_ID}"
+MAIN_LOG="${LOG_DIR}/T${THRESHOLD}_${BUDGET_ID}_runs${RUNS}.log"
 DONE_PATH="${MAIN_LOG}.done"
 
 mkdir -p "${LOG_DIR}" "${OUT_DIR}"
@@ -159,6 +173,7 @@ run_algo() {
       --precision_depth_bound_enable
       --precision_depth_bound_priorities "${BOUND_PRIORITIES[@]}"
       --precision_depth_bound_assignment "${BOUND_ASSIGNMENT}"
+      --precision_depth_bound_rule "${BOUND_RULE}"
       --precision_depth_bound_high_min_depth "${BOUND_HIGH_MIN}"
       --precision_depth_bound_mid_min_depth "${BOUND_MID_MIN}"
       --precision_depth_bound_low_min_depth "${BOUND_LOW_MIN}"
@@ -176,6 +191,12 @@ run_algo() {
       --precision_depth_bound_nodewise_max_tolerance "${BOUND_NODEWISE_MAX_TOL}"
       --precision_depth_bound_nodewise_gamma "${BOUND_NODEWISE_GAMMA}"
       --precision_depth_bound_nodewise_risk_max "${BOUND_NODEWISE_RISK_MAX}"
+      --precision_depth_score_tau "${BOUND_SCORE_TAU}"
+      --precision_depth_score_alpha "${BOUND_SCORE_ALPHA}"
+      --precision_depth_score_beta "${BOUND_SCORE_BETA}"
+      --precision_depth_score_w_cap "${BOUND_SCORE_W_CAP}"
+      --precision_depth_score_w_reference "${BOUND_SCORE_W_REFERENCE}"
+      --precision_depth_score_node_floor "${BOUND_SCORE_NODE_FLOOR}"
     )
   fi
   local trace_args=()
@@ -309,7 +330,7 @@ maybe_run_onnxim
   --dataset "${DATASET}" \
   --heads "${HEADS}" \
   --threshold "${THRESHOLD}" \
-  --budget "${BUDGET}" \
+  --budget "${BUDGET_ID}" \
   --runs "${RUNS}" \
   --frontend-id "${FRONTEND_ID}" \
   --hard-support "${HARD_SUPPORT}" \

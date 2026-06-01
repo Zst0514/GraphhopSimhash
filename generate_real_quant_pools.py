@@ -57,6 +57,10 @@ CONFIG_SPECS = {
     "W4A6": {"tag": "W4A6", "kind": "awq_act", "w_bit": 4, "a_bit": 6},
     "W4A5": {"tag": "W4A5", "kind": "awq_act", "w_bit": 4, "a_bit": 5},
     "W4A4": {"tag": "W4A4", "kind": "awq_act", "w_bit": 4, "a_bit": 4},
+    "W4A8_TRUNC7": {"tag": "W4A8_TRUNC7", "kind": "awq_act_trunc", "w_bit": 4, "a_bit": 8, "trunc_bit": 7},
+    "W4A8_TRUNC6": {"tag": "W4A8_TRUNC6", "kind": "awq_act_trunc", "w_bit": 4, "a_bit": 8, "trunc_bit": 6},
+    "W4A8_TRUNC5": {"tag": "W4A8_TRUNC5", "kind": "awq_act_trunc", "w_bit": 4, "a_bit": 8, "trunc_bit": 5},
+    "W4A8_TRUNC4": {"tag": "W4A8_TRUNC4", "kind": "awq_act_trunc", "w_bit": 4, "a_bit": 8, "trunc_bit": 4},
     "W4A16_FAKE": {"tag": "W4A16_FAKE", "kind": "fake_wa", "w_bit": 4, "a_bit": 16},
     "W4A8_FAKE": {"tag": "W4A8_FAKE", "kind": "fake_wa", "w_bit": 4, "a_bit": 8},
     "W4A7_FAKE": {"tag": "W4A7_FAKE", "kind": "fake_wa", "w_bit": 4, "a_bit": 7},
@@ -308,6 +312,40 @@ def affine_fake_quantize(x, bit_width, mode="per_tensor", dim=-1):
     return torch.nan_to_num((quantized - zero_point) * scale, nan=0.0, posinf=0.0, neginf=0.0)
 
 
+def affine_a8_trunc_fake_quantize(x, trunc_bit, mode="per_tensor", dim=-1):
+    """Quantize with A8 affine scale, then clear low integer-code bits.
+
+    This models bit-serial early-stop more closely than re-quantizing with
+    a smaller activation bit-width: A8 scale/zero-point stay fixed, and
+    depth controls how many high bits of the same A8 code are retained.
+    """
+    trunc_bit = int(trunc_bit)
+    if trunc_bit >= 8:
+        return affine_fake_quantize(x, 8, mode=mode, dim=dim)
+    if trunc_bit <= 0:
+        raise ValueError(f"trunc_bit must be positive, got {trunc_bit}")
+
+    x = torch.nan_to_num(x, nan=0.0, posinf=0.0, neginf=0.0)
+    q_min = 0
+    q_max = 255
+    if mode == "per_tensor":
+        min_val = torch.min(x)
+        max_val = torch.max(x)
+    elif mode == "per_channel":
+        min_val = torch.min(x, dim=dim, keepdim=True).values
+        max_val = torch.max(x, dim=dim, keepdim=True).values
+    else:
+        raise ValueError(f"Invalid fake quant mode: {mode}")
+
+    scale = torch.clamp(max_val - min_val, min=1e-8) / q_max
+    zero_point = torch.round(q_min - min_val / scale).clamp(q_min, q_max)
+    q8 = torch.round(x / scale + zero_point).clamp(q_min, q_max)
+    shift = 8 - trunc_bit
+    q8_int = q8.to(torch.int32)
+    q_trunc = ((q8_int >> shift) << shift).to(dtype=x.dtype)
+    return torch.nan_to_num((q_trunc - zero_point) * scale, nan=0.0, posinf=0.0, neginf=0.0)
+
+
 def _clip_activation_with_channel_thresholds(x, clip_abs=None, channel_clip_abs=None):
     if clip_abs is None and channel_clip_abs is None:
         return x
@@ -423,10 +461,11 @@ def replace_linear_with_fake_quant(module, w_bit, a_bit, awq_grid=21, skip_names
 
 
 class ActivationQuantLinear(nn.Module):
-    def __init__(self, original_linear, a_bit=8, module_name=None, clip_config=None):
+    def __init__(self, original_linear, a_bit=8, module_name=None, clip_config=None, trunc_bit=None):
         super().__init__()
         self.linear = original_linear
         self.a_bit = int(a_bit)
+        self.trunc_bit = None if trunc_bit is None else int(trunc_bit)
         self.in_features = int(original_linear.in_features)
         self.out_features = int(original_linear.out_features)
         self.module_name = module_name or ""
@@ -463,11 +502,21 @@ class ActivationQuantLinear(nn.Module):
             clip_abs=self.clip_abs,
             channel_clip_abs=self.channel_clip_abs,
         )
-        qx = affine_fake_quantize(clipped, self.a_bit, mode="per_channel", dim=-1)
+        if self.trunc_bit is not None:
+            qx = affine_a8_trunc_fake_quantize(clipped, self.trunc_bit, mode="per_channel", dim=-1)
+        else:
+            qx = affine_fake_quantize(clipped, self.a_bit, mode="per_channel", dim=-1)
         return self.linear(qx)
 
 
-def replace_linear_with_activation_quant(module, a_bit, skip_names=("lm_head",), clip_config_by_name=None, prefix=""):
+def replace_linear_with_activation_quant(
+    module,
+    a_bit,
+    skip_names=("lm_head",),
+    clip_config_by_name=None,
+    prefix="",
+    trunc_bit=None,
+):
     clip_config_by_name = clip_config_by_name or {}
     for name, child in list(module.named_children()):
         full_name = f"{prefix}.{name}" if prefix else name
@@ -480,6 +529,7 @@ def replace_linear_with_activation_quant(module, a_bit, skip_names=("lm_head",),
                     a_bit=a_bit,
                     module_name=full_name,
                     clip_config=clip_config_by_name.get(full_name),
+                    trunc_bit=trunc_bit,
                 ),
             )
         else:
@@ -489,6 +539,7 @@ def replace_linear_with_activation_quant(module, a_bit, skip_names=("lm_head",),
                 skip_names=skip_names,
                 clip_config_by_name=clip_config_by_name,
                 prefix=full_name,
+                trunc_bit=trunc_bit,
             )
 
 
@@ -1111,12 +1162,13 @@ def generate_pool(dataset, llm_name, config_name, args):
         print("[Info] Reducing LLaMA batch_size to 4 to avoid OOM.")
         batch_size = 4
 
-    load_config_name = "fp16" if config_spec["kind"] in ("fake_wa", "awq", "awq_act") else config_name
+    awq_kinds = ("awq", "awq_act", "awq_act_trunc")
+    load_config_name = "fp16" if config_spec["kind"] in ("fake_wa", *awq_kinds) else config_name
     model, tokenizer, _tag = load_model_and_tokenizer(
         llm_name,
         load_config_name,
         args.cache_dir,
-        force_cpu=config_spec["kind"] in ("awq", "awq_act"),
+        force_cpu=config_spec["kind"] in awq_kinds,
     )
     device = next(model.parameters()).device
 
@@ -1137,10 +1189,16 @@ def generate_pool(dataset, llm_name, config_name, args):
         if calib_count > 0:
             print(f"[FakeWA] Running calibration pass on {calib_count} node texts...")
             _ = encode_texts(model, tokenizer, texts[:calib_count], batch_size, args.max_length, device)
-    elif config_spec["kind"] in ("awq", "awq_act"):
+    elif config_spec["kind"] in awq_kinds:
+        trunc_bit = config_spec.get("trunc_bit")
+        target_suffix = (
+            f"W4A8_TRUNC{int(trunc_bit)}"
+            if config_spec["kind"] == "awq_act_trunc"
+            else f"W4A{int(config_spec['a_bit'])}"
+        )
         print(
             "[AWQ] Installing official llm-awq W4 weight quantization path "
-            f"| target=W4A{int(config_spec['a_bit'])}"
+            f"| target={target_suffix}"
         )
         model, device = apply_official_awq_w4(
             model=model,
@@ -1151,21 +1209,28 @@ def generate_pool(dataset, llm_name, config_name, args):
             args=args,
             activation_bit=int(config_spec["a_bit"]),
         )
-        if config_spec["kind"] == "awq_act":
+        if config_spec["kind"] in ("awq_act", "awq_act_trunc"):
             act_clip_config = load_activation_outlier_clip_config(
                 dataset,
                 llm_name,
                 int(config_spec["a_bit"]),
                 args,
             )
-            print(
-                f"[AWQ] Installing activation fake quant wrappers | A{int(config_spec['a_bit'])} "
-                f"| outlier_clip_layers={len(act_clip_config)}"
-            )
+            if config_spec["kind"] == "awq_act_trunc":
+                print(
+                    "[AWQ] Installing activation truncation wrappers "
+                    f"| A8->T{int(trunc_bit)} | outlier_clip_layers={len(act_clip_config)}"
+                )
+            else:
+                print(
+                    f"[AWQ] Installing activation fake quant wrappers | A{int(config_spec['a_bit'])} "
+                    f"| outlier_clip_layers={len(act_clip_config)}"
+                )
             replace_linear_with_activation_quant(
                 model,
                 a_bit=int(config_spec["a_bit"]),
                 clip_config_by_name=act_clip_config,
+                trunc_bit=trunc_bit,
             )
 
     encode_texts_input = compact_texts_for_encoder(texts, dataset, tokenizer, args)

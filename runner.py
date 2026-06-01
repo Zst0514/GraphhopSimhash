@@ -452,285 +452,6 @@ def build_controller(
     )
 
 
-_REUSE_TRACE_CACHE_VERSION = 1
-_REUSE_TRACE_METADATA_ARG_KEYS = (
-    "radius",
-    "sketch_bits",
-    "hash_view",
-    "hash_mix_weights",
-    "union_hash_views",
-    "cosine_tau",
-    "cache_size",
-    "memo_k",
-    "vote_top_m",
-    "vote_relax_margin",
-    "learned_hash_projection",
-    "learned_hash_dim",
-    "learned_hash_epochs",
-    "learned_hash_lr",
-    "learned_hash_weight_decay",
-    "learned_hash_batch_size",
-    "learned_hash_supervision",
-    "learned_hash_supervision_limit",
-    "learned_hash_topk",
-    "learned_hash_pos_per_anchor",
-    "learned_hash_neg_per_anchor",
-    "learned_hash_pos_tau",
-    "learned_hash_neg_tau",
-    "learned_hash_neg_margin",
-    "learned_hash_balance_lambda",
-    "hash_heads_per_route",
-    "hash_head_seed",
-    "controller_seed",
-    "hash_head_bits",
-    "main_hash_head_bits",
-    "union_hash_head_bits",
-    "enable_topology_retrieval_route",
-    "topology_hash_head_bits",
-    "route_score_weights",
-    "route_accept_tau_offsets",
-    "route_min_accept_votes",
-    "route_min_support_hits",
-    "union_route_weight",
-    "union_accept_tau_bonus",
-    "union_min_accept_votes",
-    "union_min_support_hits",
-    "table_route_weight_decay",
-    "min_base_route_hits",
-    "max_candidates_per_route",
-    "max_total_candidates",
-    "max_structure_checks",
-    "coarse_union_bits_max",
-    "structure_neighbor_tau",
-    "structure_degree_ratio_max",
-    "structure_homophily_gap_max",
-    "structure_check_mode",
-    "enable_homophily_bucket_guard",
-    "topology_sketch_bits",
-    "topology_sketch_radius",
-    "topology_degree_bucket_gap",
-    "topology_homophily_bins",
-    "topology_homophily_bucket_gap",
-    "topology_sketch_seed",
-    "disable_structure_check",
-    "exact_guard_low_bits",
-    "exact_guard_min_bucket_size",
-    "exact_guard_large_bucket_size",
-    "exact_guard_min_margin",
-    "exact_guard_cosine_bonus",
-    "hamming_only_acceptor",
-    "disable_score_gate",
-    "score_reuse_threshold",
-    "score_hub_threshold",
-    "score_rare_threshold",
-    "score_protect_hub_exact",
-    "allow_hub_fuzzy",
-    "allow_rare_fuzzy",
-    "disable_score_support_discount",
-    "score_rare_gate_mode",
-    "score_rare_min_dist",
-    "score_rare_min_route_hits",
-    "score_rare_min_base_hits",
-    "score_pair_confidence_discount",
-    "score_pair_confidence_max_dist",
-    "score_pair_confidence_min_route_hits",
-    "score_pair_confidence_min_base_hits",
-    "score_pair_confidence_min_cos_margin",
-    "score_rarity_bits",
-    "score_rarity_seed",
-    "score_propagation_weight",
-    "score_graph_context_weight",
-    "score_low_unique_weight",
-    "score_use_continuous_risk",
-    "residual_embedding_source",
-    "residual_embedding_path",
-    "real_quant_model_name",
-    "real_quant_fp_tag",
-    "real_quant_fp_path",
-)
-
-
-def _trace_cache_jsonable(value):
-    if isinstance(value, np.generic):
-        return value.item()
-    if isinstance(value, torch.Tensor):
-        return value.detach().cpu().tolist()
-    if isinstance(value, (list, tuple)):
-        return [_trace_cache_jsonable(item) for item in value]
-    if isinstance(value, dict):
-        return {str(key): _trace_cache_jsonable(val) for key, val in sorted(value.items())}
-    return value
-
-
-def resolve_reuse_trace_cache_path(cache_path, ds_key, seed, run_idx, multi_run=False):
-    if not cache_path:
-        return None
-    template = str(cache_path)
-    try:
-        path = template.format(dataset=ds_key, seed=int(seed), run=int(run_idx))
-    except (KeyError, IndexError, ValueError):
-        path = template
-    if path.endswith(os.sep) or os.path.isdir(path):
-        return os.path.join(path, f"{ds_key}_seed{int(seed)}_reuse_trace.pt")
-    if multi_run and path == template:
-        root, ext = os.path.splitext(path)
-        if not ext:
-            ext = ".pt"
-        return f"{root}_{ds_key}_seed{int(seed)}{ext}"
-    return path
-
-
-def build_reuse_trace_cache_metadata(ds_key, seed, args, route_bundle, target_features, verify_features):
-    arg_values = {
-        key: _trace_cache_jsonable(getattr(args, key))
-        for key in _REUSE_TRACE_METADATA_ARG_KEYS
-        if hasattr(args, key)
-    }
-    return {
-        "cache_version": _REUSE_TRACE_CACHE_VERSION,
-        "dataset": str(ds_key),
-        "seed": int(seed),
-        "num_nodes": int(target_features.size(0)),
-        "target_shape": [int(dim) for dim in target_features.shape],
-        "verify_shape": [int(dim) for dim in verify_features.shape],
-        "route_names": list(route_bundle["hash_route_names"]),
-        "route_bits": [int(bit) for bit in route_bundle["hash_route_bits"]],
-        "route_base_indices": [int(idx) for idx in route_bundle["route_base_indices"]],
-        "route_base_names": list(route_bundle["route_base_names"]),
-        "route_score_weights": [float(weight) for weight in route_bundle["route_score_weights"]],
-        "route_accept_tau_offsets": [float(offset) for offset in route_bundle["route_accept_tau_offsets"]],
-        "route_min_accept_votes": [int(vote) for vote in route_bundle["route_min_accept_votes"]],
-        "route_min_support_hits": [int(hit) for hit in route_bundle["route_min_support_hits"]],
-        "args": arg_values,
-    }
-
-
-def _reuse_trace_metadata_mismatch(cached_metadata, current_metadata):
-    if not isinstance(cached_metadata, dict):
-        return "missing metadata"
-    for key, current_value in current_metadata.items():
-        if cached_metadata.get(key) != current_value:
-            return key
-    return None
-
-
-def _reuse_trace_to_cpu(trace):
-    trace_cpu = {}
-    for key, value in trace.items():
-        if torch.is_tensor(value):
-            trace_cpu[key] = value.detach().cpu()
-        elif isinstance(value, tuple):
-            trace_cpu[key] = list(value)
-        elif isinstance(value, list):
-            trace_cpu[key] = list(value)
-        else:
-            trace_cpu[key] = value
-    return trace_cpu
-
-
-def _reuse_trace_to_device(trace, device):
-    trace_device = {}
-    for key, value in trace.items():
-        if torch.is_tensor(value):
-            trace_device[key] = value.to(device=device)
-        elif isinstance(value, tuple):
-            trace_device[key] = list(value)
-        elif isinstance(value, list):
-            trace_device[key] = list(value)
-        else:
-            trace_device[key] = value
-    return trace_device
-
-
-def load_reuse_trace_cache(cache_path, metadata, device, log_important):
-    if cache_path is None or not os.path.exists(cache_path):
-        return None
-    try:
-        payload = torch.load(cache_path, map_location="cpu")
-    except Exception as exc:
-        log_important(f"[ReuseTraceCache] load skipped: {cache_path} ({exc})")
-        return None
-    if not isinstance(payload, dict) or payload.get("cache_version") != _REUSE_TRACE_CACHE_VERSION:
-        log_important(f"[ReuseTraceCache] load skipped: incompatible cache version at {cache_path}")
-        return None
-    mismatch = _reuse_trace_metadata_mismatch(payload.get("metadata"), metadata)
-    if mismatch is not None:
-        log_important(f"[ReuseTraceCache] load skipped: metadata mismatch on {mismatch}")
-        return None
-    trace = payload.get("trace")
-    stats = payload.get("stats")
-    required_keys = {"hit_mask", "source_ids", "hit_kinds", "best_dists", "best_cosines"}
-    if not isinstance(trace, dict) or not required_keys.issubset(trace.keys()) or not isinstance(stats, dict):
-        log_important(f"[ReuseTraceCache] load skipped: malformed trace at {cache_path}")
-        return None
-    trace = _reuse_trace_to_device(trace, device)
-    stats = dict(stats)
-    log_important(
-        f"[ReuseTraceCache] loaded {cache_path} "
-        f"| reuse={int(stats.get('reuse', 0))}/{int(stats.get('reuse_denominator', metadata['num_nodes']))}"
-    )
-    return trace, stats
-
-
-def save_reuse_trace_cache(cache_path, metadata, trace, stats, log_important):
-    if cache_path is None:
-        return
-    parent = os.path.dirname(cache_path)
-    if parent:
-        os.makedirs(parent, exist_ok=True)
-    payload = {
-        "cache_version": _REUSE_TRACE_CACHE_VERSION,
-        "metadata": metadata,
-        "trace": _reuse_trace_to_cpu(trace),
-        "stats": _trace_cache_jsonable(dict(stats)),
-    }
-    tmp_path = f"{cache_path}.tmp"
-    try:
-        torch.save(payload, tmp_path)
-        os.replace(tmp_path, cache_path)
-    except Exception as exc:
-        if os.path.exists(tmp_path):
-            os.remove(tmp_path)
-        log_important(f"[ReuseTraceCache] save failed: {cache_path} ({exc})")
-        return
-    log_important(
-        f"[ReuseTraceCache] saved {cache_path} "
-        f"| reuse={int(stats.get('reuse', 0))}/{int(stats.get('reuse_denominator', metadata['num_nodes']))}"
-    )
-
-
-def rebuild_controller_cache_from_reuse_trace(controller, route_bundle, verify_features, target_features, trace, log_important):
-    if controller is None or trace is None:
-        return
-    if not hasattr(controller, "_reset_route_caches") or not hasattr(controller, "_cache_computed_entry"):
-        return
-    hit_mask = trace.get("hit_mask")
-    if hit_mask is None or not torch.is_tensor(hit_mask):
-        return
-
-    controller._reset_route_caches()
-    hash_feature_routes = controller._normalize_hash_feature_routes(route_bundle["hash_route_features"])
-    all_hashes = [
-        controller._compute_route_fingerprint(route_features, route_idx)
-        for route_idx, route_features in enumerate(hash_feature_routes)
-    ]
-    computed_nodes = (~hit_mask.to(device=verify_features.device, dtype=torch.bool)).nonzero(as_tuple=False).view(-1)
-    for node_idx in computed_nodes.detach().cpu().tolist():
-        query_hashes = [route_hashes[int(node_idx)] for route_hashes in all_hashes]
-        entry = {
-            "node_id": int(node_idx),
-            "cheap_feat": verify_features[int(node_idx)].detach().clone(),
-            "cached_emb": target_features[int(node_idx)].detach().clone(),
-            "timestamp": controller._time_counter,
-        }
-        controller._time_counter += 1
-        controller._cache_computed_entry(query_hashes, entry)
-    log_important(
-        f"[ReuseTraceCache] rebuilt controller memo tables from trace "
-        f"| computed={int(computed_nodes.numel())}"
-    )
-
-
 def evaluate_with_controller(model, data, controller, route_bundle, verify_features, oracle_embs, args):
     reconstructed_embs, _hits = controller.query_full_batch(
         route_bundle["hash_route_features"],
@@ -1506,65 +1227,12 @@ def run_residual_reuse_experiment(args):
                     device,
                 )
 
-                trace_cache_path = resolve_reuse_trace_cache_path(
-                    getattr(args, "reuse_trace_cache_path", None),
-                    ds_key,
-                    seed,
-                    run_idx,
-                    multi_run=(len(target_datasets) > 1 or int(args.runs) > 1),
-                )
-                trace_cache_metadata = build_reuse_trace_cache_metadata(
-                    ds_key,
-                    seed,
-                    run_args,
-                    route_bundle,
-                    target_features,
+                direct_features, _hits = controller.query_full_batch(
+                    route_bundle["hash_route_features"],
                     verify_features,
+                    target_features,
                 )
-                trace = None
-                stats = None
-                direct_features = None
-                if trace_cache_path is not None and bool(getattr(run_args, "enable_quant_policy", False)):
-                    log_important(
-                        "[ReuseTraceCache] disabled for this run because quant policy can alter computed miss embeddings"
-                    )
-                elif trace_cache_path is not None and not bool(getattr(args, "reuse_trace_cache_overwrite", False)):
-                    cached_trace = load_reuse_trace_cache(
-                        trace_cache_path,
-                        trace_cache_metadata,
-                        device,
-                        log_important,
-                    )
-                    if cached_trace is not None:
-                        trace, stats = cached_trace
-                        direct_features, _hits = apply_reuse_trace_to_embeddings(trace, target_features)
-                        rebuild_controller_cache_from_reuse_trace(
-                            controller,
-                            route_bundle,
-                            verify_features,
-                            target_features,
-                            trace,
-                            log_important,
-                        )
-                        controller.last_query_trace = trace
-                        controller.stats = stats
-
-                if trace is None:
-                    direct_features, _hits = controller.query_full_batch(
-                        route_bundle["hash_route_features"],
-                        verify_features,
-                        target_features,
-                    )
-                    trace = controller.last_query_trace
-                    stats = controller.stats
-                    if trace_cache_path is not None and not bool(getattr(run_args, "enable_quant_policy", False)):
-                        save_reuse_trace_cache(
-                            trace_cache_path,
-                            trace_cache_metadata,
-                            trace,
-                            stats,
-                            log_important,
-                        )
+                trace = controller.last_query_trace
                 if args.residual_anchor_mode == "random":
                     trace, direct_features, anchor_info = replace_reuse_anchors_with_random(
                         trace,
@@ -1575,7 +1243,7 @@ def run_residual_reuse_experiment(args):
                     )
                 else:
                     anchor_info = {"randomized": 0}
-                stats = controller.stats if stats is None else stats
+                stats = controller.stats
                 hit_mask = trace["hit_mask"]
                 correction_mask, correction_info = build_residual_correction_mask(
                     trace,
@@ -1899,31 +1567,6 @@ def run_residual_reuse_experiment(args):
                     f"| AvgErr={float(residual_err.mean().item()):.5f} "
                     f"| HitErr={residual_hit_err:.5f}"
                 )
-                extra_pair_stats = train_info.get("extra_pair_stats") or {}
-                if extra_pair_stats:
-                    log_important(
-                        "  ExtraPairStats: "
-                        f"q={int(extra_pair_stats.get('query_nodes', 0))} "
-                        f"| cand={int(extra_pair_stats.get('candidate_refs', 0))} "
-                        f"| scored={int(extra_pair_stats.get('scored', 0))} "
-                        f"| same={int(extra_pair_stats.get('reject_same_source', 0))} "
-                        f"| dist={int(extra_pair_stats.get('reject_min_dist', 0))} "
-                        f"| support={int(extra_pair_stats.get('reject_support', 0))} "
-                        f"| error={int(extra_pair_stats.get('reject_error', 0))} "
-                        f"| accepted={int(extra_pair_stats.get('accepted', 0))}"
-                    )
-                negative_pair_stats = train_info.get("negative_pair_stats") or {}
-                if negative_pair_stats:
-                    log_important(
-                        "  NegativePairStats: "
-                        f"q={int(negative_pair_stats.get('query_nodes', 0))} "
-                        f"| cand={int(negative_pair_stats.get('candidate_refs', 0))} "
-                        f"| scored={int(negative_pair_stats.get('scored', 0))} "
-                        f"| same={int(negative_pair_stats.get('reject_same_source', 0))} "
-                        f"| support={int(negative_pair_stats.get('reject_support', 0))} "
-                        f"| error={int(negative_pair_stats.get('reject_error', 0))} "
-                        f"| accepted={int(negative_pair_stats.get('accepted', 0))}"
-                    )
                 if train_info.get("classifier_accept_gate"):
                     log_important(
                         "  ClassifierAccept: "
@@ -2375,6 +2018,48 @@ def precision_depth_remaining_bit_bound(depth, ref_bit, args, w_strength=None):
     )
 
 
+def precision_depth_low_bit_budget(depth, ref_bit):
+    """Normalized low-bit range omitted when stopping at `depth`."""
+    depth = int(depth)
+    ref_bit = int(ref_bit)
+    if depth >= ref_bit:
+        return 0.0
+    omitted = (2 ** (ref_bit - depth)) - 1
+    denom = max(1, (2 ** ref_bit) - 1)
+    return float(omitted) / float(denom)
+
+
+def precision_depth_tile_score(depth, node_risk_norm, ref_bit, args, w_strength=None):
+    """Graph-Bit task-budgeted stop score.
+
+    The score is deliberately predictor-free: it uses online graph risk,
+    W-tile strength metadata, and the remaining low-bit budget.  A smaller
+    score means the skipped low activation bit-planes are less risky.
+    """
+    node_floor = float(getattr(args, "precision_depth_score_node_floor", 0.0))
+    node_norm = float(np.clip(max(float(node_risk_norm), node_floor), 0.0, 1.0))
+    alpha = float(getattr(args, "precision_depth_score_alpha", 1.0))
+
+    strength = precision_depth_bound_w_strength(args) if w_strength is None else max(1e-12, float(w_strength))
+    w_reference = max(1e-12, float(getattr(args, "precision_depth_score_w_reference", 1.0)))
+    w_cap = max(1e-12, float(getattr(args, "precision_depth_score_w_cap", 2.0)))
+    w_norm = float(np.clip(strength / w_reference, 0.0, w_cap))
+    beta = float(getattr(args, "precision_depth_score_beta", 1.0))
+
+    low_norm = precision_depth_low_bit_budget(depth, ref_bit)
+    return (node_norm ** alpha) * (w_norm ** beta) * low_norm
+
+
+def select_runtime_score_depth(min_depth, node_risk_norm, ref_bit, args, w_strength=None):
+    """Return the first depth accepted by the tile-score rule."""
+    min_depth = max(1, min(int(min_depth), int(ref_bit)))
+    tau = max(0.0, float(getattr(args, "precision_depth_score_tau", 0.001)))
+    for depth in range(min_depth, int(ref_bit) + 1):
+        if precision_depth_tile_score(depth, node_risk_norm, ref_bit, args, w_strength=w_strength) <= tau:
+            return int(depth)
+    return int(ref_bit)
+
+
 def select_runtime_bound_depth(min_depth, tolerance, ref_bit, args, w_strength=None):
     """Return the first depth accepted by runtime bound, respecting min_depth."""
     min_depth = max(1, min(int(min_depth), int(ref_bit)))
@@ -2443,13 +2128,24 @@ def select_nodewise_bound_actions(priority, eligible_idx, args, num_nodes, bits,
     w_strength = precision_depth_bound_w_strength(args)
 
     node_risks = torch.clamp(priority[eligible_idx].to(dtype=torch.float32) / max(risk_max, 1e-12), 0.0, 1.0)
-    risks = precision_depth_effective_risk(node_risks, args, w_strength=w_strength)
-    tolerances = min_tol + (max_tol - min_tol) * torch.pow(1.0 - risks, gamma)
-
+    rule = str(getattr(args, "precision_depth_bound_rule", "remaining_bound"))
     selected = []
-    for tol in tolerances.detach().cpu().tolist():
-        runtime_depth = select_runtime_bound_depth(min_depth, float(tol), ref_bit, args, w_strength=w_strength)
-        selected.append(nearest_available_precision_depth(runtime_depth, bits, ref_bit))
+    if rule == "tile_score":
+        for risk_norm in node_risks.detach().cpu().tolist():
+            runtime_depth = select_runtime_score_depth(
+                min_depth,
+                float(risk_norm),
+                ref_bit,
+                args,
+                w_strength=w_strength,
+            )
+            selected.append(nearest_available_precision_depth(runtime_depth, bits, ref_bit))
+    else:
+        risks = precision_depth_effective_risk(node_risks, args, w_strength=w_strength)
+        tolerances = min_tol + (max_tol - min_tol) * torch.pow(1.0 - risks, gamma)
+        for tol in tolerances.detach().cpu().tolist():
+            runtime_depth = select_runtime_bound_depth(min_depth, float(tol), ref_bit, args, w_strength=w_strength)
+            selected.append(nearest_available_precision_depth(runtime_depth, bits, ref_bit))
     actions[eligible_idx] = torch.tensor(selected, dtype=torch.int64, device=device)
     return actions
 
@@ -2756,6 +2452,7 @@ def export_residual_precision_depth_node_trace(
         "ratios": ratios,
         "bound": {
             "enabled": bool(getattr(args, "precision_depth_bound_enable", False)),
+            "rule": str(getattr(args, "precision_depth_bound_rule", "remaining_bound")),
             "high_min_depth": int(getattr(args, "precision_depth_bound_high_min_depth", ref_bit)),
             "mid_min_depth": int(getattr(args, "precision_depth_bound_mid_min_depth", 6)),
             "low_min_depth": int(getattr(args, "precision_depth_bound_low_min_depth", 4)),
@@ -2765,6 +2462,12 @@ def export_residual_precision_depth_node_trace(
             "scale": float(getattr(args, "precision_depth_bound_scale", 1.0)),
             "tile_k": int(getattr(args, "precision_depth_bound_tile_k", 128)),
             "w_strength": precision_depth_bound_w_strength(args),
+            "score_tau": float(getattr(args, "precision_depth_score_tau", 0.001)),
+            "score_alpha": float(getattr(args, "precision_depth_score_alpha", 1.0)),
+            "score_beta": float(getattr(args, "precision_depth_score_beta", 1.0)),
+            "score_w_cap": float(getattr(args, "precision_depth_score_w_cap", 2.0)),
+            "score_w_reference": float(getattr(args, "precision_depth_score_w_reference", 1.0)),
+            "score_node_floor": float(getattr(args, "precision_depth_score_node_floor", 0.0)),
         },
     }
     score_tensors = {
@@ -2800,6 +2503,25 @@ def export_residual_precision_depth_node_trace(
                 "stop_depth": bit if role == "miss" else 0,
                 "bound_w_strength": precision_depth_bound_w_strength(args) if role == "miss" else 0.0,
             }
+            if role == "miss":
+                risk_key_by_priority = {
+                    "degree": "degree_q",
+                    "tser": "tser_q",
+                    "context": "context_q",
+                    "low_unique": "low_unique_q",
+                }
+                risk_key = risk_key_by_priority.get(priority, "degree_q")
+                risk_max = float(getattr(args, "precision_depth_bound_nodewise_risk_max", 15.0))
+                node_norm = float(score_tensors[risk_key][node_id].item()) / max(risk_max, 1e-12)
+                row["bound_rule"] = str(getattr(args, "precision_depth_bound_rule", "remaining_bound"))
+                row["node_risk_norm"] = float(np.clip(node_norm, 0.0, 1.0))
+                row["tile_score"] = precision_depth_tile_score(
+                    bit,
+                    row["node_risk_norm"],
+                    ref_bit,
+                    args,
+                    w_strength=precision_depth_bound_w_strength(args),
+                )
             for key, tensor in score_tensors.items():
                 row[key] = float(tensor[node_id].item())
             handle.write(json.dumps(row, sort_keys=True) + "\n")
@@ -3342,10 +3064,16 @@ def run_residual_precision_depth_experiment(args):
                     log_important(
                         "[GraphBitBound] "
                         "assignment=nodewise | "
+                        f"rule={str(getattr(args, 'precision_depth_bound_rule', 'remaining_bound'))} | "
                         f"priorities={list(getattr(args, 'precision_depth_bound_priorities', []))} | "
                         f"tile_k={int(getattr(args, 'precision_depth_bound_tile_k', 128))} | "
                         f"scale={float(getattr(args, 'precision_depth_bound_scale', 1.0)):.3f} | "
                         f"w_strength={precision_depth_bound_w_strength(args):.3f} | "
+                        f"score=[tau={float(getattr(args, 'precision_depth_score_tau', 0.001)):.5f},"
+                        f"alpha={float(getattr(args, 'precision_depth_score_alpha', 1.0)):.2f},"
+                        f"beta={float(getattr(args, 'precision_depth_score_beta', 1.0)):.2f},"
+                        f"wref={float(getattr(args, 'precision_depth_score_w_reference', 1.0)):.3f},"
+                        f"wcap={float(getattr(args, 'precision_depth_score_w_cap', 2.0)):.2f}] | "
                         f"risk_w=[node={float(getattr(args, 'precision_depth_bound_node_risk_weight', 1.0)):.2f},"
                         f"w={float(getattr(args, 'precision_depth_bound_w_risk_weight', 0.0)):.2f},"
                         f"wref={float(getattr(args, 'precision_depth_bound_w_risk_reference', 1.5)):.2f}] | "

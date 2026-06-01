@@ -481,20 +481,6 @@ def build_parser():
         help="Optional explicit target embedding path for residual reuse. Overrides --real_quant_fp_path when set.",
     )
     parser.add_argument(
-        "--reuse_trace_cache_path",
-        type=str,
-        default=None,
-        help=(
-            "Optional path for caching the online hash-reuse trace used by residual_reuse. "
-            "Use {dataset}, {seed}, and {run} placeholders for multi-run sweeps."
-        ),
-    )
-    parser.add_argument(
-        "--reuse_trace_cache_overwrite",
-        action="store_true",
-        help="Recompute and overwrite --reuse_trace_cache_path instead of loading an existing compatible trace.",
-    )
-    parser.add_argument(
         "--residual_alpha",
         type=float,
         default=-1.0,
@@ -874,6 +860,18 @@ def build_parser():
         ),
     )
     parser.add_argument(
+        "--precision_depth_bound_rule",
+        type=str,
+        default="remaining_bound",
+        choices=["remaining_bound", "tile_score"],
+        help=(
+            "Runtime stop rule used by graph-conditioned bound policies. "
+            "remaining_bound compares an omitted-low-bit bound to tolerance. "
+            "tile_score uses node risk, W-tile strength, and low-bit budget "
+            "with --precision_depth_score_tau."
+        ),
+    )
+    parser.add_argument(
         "--precision_depth_bound_high_min_depth",
         type=int,
         default=8,
@@ -981,6 +979,42 @@ def build_parser():
         type=float,
         default=15.0,
         help="Risk value treated as maximum risk when mapping graph risk to tolerance.",
+    )
+    parser.add_argument(
+        "--precision_depth_score_tau",
+        type=float,
+        default=0.001,
+        help="Stop threshold for --precision_depth_bound_rule tile_score.",
+    )
+    parser.add_argument(
+        "--precision_depth_score_alpha",
+        type=float,
+        default=1.0,
+        help="Exponent applied to node risk in tile_score stop rule.",
+    )
+    parser.add_argument(
+        "--precision_depth_score_beta",
+        type=float,
+        default=1.0,
+        help="Exponent applied to W-tile strength risk in tile_score stop rule.",
+    )
+    parser.add_argument(
+        "--precision_depth_score_w_cap",
+        type=float,
+        default=2.0,
+        help="Upper clamp for normalized W-tile strength in tile_score stop rule.",
+    )
+    parser.add_argument(
+        "--precision_depth_score_w_reference",
+        type=float,
+        default=1.0,
+        help="W-tile strength treated as normalized risk 1.0 in tile_score stop rule.",
+    )
+    parser.add_argument(
+        "--precision_depth_score_node_floor",
+        type=float,
+        default=0.0,
+        help="Optional floor for normalized node risk in tile_score stop rule.",
     )
     parser.add_argument(
         "--precision_depth_trace_export_dir",
@@ -1503,6 +1537,18 @@ def validate_args(parser, args):
         parser.error("--precision_depth_bound_nodewise_gamma must be positive")
     if args.precision_depth_bound_nodewise_risk_max <= 0:
         parser.error("--precision_depth_bound_nodewise_risk_max must be positive")
+    if args.precision_depth_score_tau < 0:
+        parser.error("--precision_depth_score_tau must be non-negative")
+    if args.precision_depth_score_alpha <= 0:
+        parser.error("--precision_depth_score_alpha must be positive")
+    if args.precision_depth_score_beta <= 0:
+        parser.error("--precision_depth_score_beta must be positive")
+    if args.precision_depth_score_w_cap <= 0:
+        parser.error("--precision_depth_score_w_cap must be positive")
+    if args.precision_depth_score_w_reference <= 0:
+        parser.error("--precision_depth_score_w_reference must be positive")
+    if args.precision_depth_score_node_floor < 0:
+        parser.error("--precision_depth_score_node_floor must be non-negative")
     if not args.token_compaction_tags:
         parser.error("--token_compaction_tags must contain at least one tag")
     if args.token_compaction_names is not None and len(args.token_compaction_names) != len(args.token_compaction_tags):

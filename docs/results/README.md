@@ -10,6 +10,9 @@ This folder keeps current result summaries. Long historical sweeps are under `do
 - [GRAPH_BIT_TILE_BOUND_NUMERIC_VALIDATION.md](GRAPH_BIT_TILE_BOUND_NUMERIC_VALIDATION.md)
   Tile-level numeric validation for Graph-Bit predictor-free stop bounds.
 
+- [GRAPH_BIT_TILE_SCORE_V2_VALIDATION.md](GRAPH_BIT_TILE_SCORE_V2_VALIDATION.md)
+  Tile-aware `node risk + W tile risk + low-bit budget` stop-score validation.
+
 - [RESIDUAL_GATE_GRAPHBIT_NPU_PROGRESS.md](RESIDUAL_GATE_GRAPHBIT_NPU_PROGRESS.md)
   Technical progress note covering Residual-Gate and Graph-Bit NPU.
 
