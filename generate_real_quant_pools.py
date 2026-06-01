@@ -535,10 +535,23 @@ def apply_official_awq_w4(model, tokenizer, texts, dataset, llm_name, args, acti
 
     awq_already_applied = False
     mse_range = not bool(args.awq_disable_mse_clip)
-    if model.__class__.__name__ == "DistilBertModel" and not bool(getattr(args, "awq_force_mse_clip", False)):
-        if mse_range:
-            print("[AWQ] DistilBERT adapter disables MSE clip by default to avoid large activation-clip memory spikes.")
-        mse_range = False
+    if model.__class__.__name__ == "DistilBertModel":
+        force_mse = bool(getattr(args, "awq_force_mse_clip", False))
+        prefer_mse = int(activation_bit) >= 8 and str(dataset).lower() == "cora"
+        if prefer_mse:
+            if mse_range:
+                print(
+                    "[AWQ] DistilBERT adapter keeps MSE clip enabled for CORA W4A16/W4A8 "
+                    "because those ST pools share the same AWQ W4 search and it materially "
+                    "reduces downstream error."
+                )
+        elif not force_mse:
+            if mse_range:
+                print(
+                    "[AWQ] DistilBERT adapter disables MSE clip by default here; "
+                    "use --awq_force_mse_clip to override."
+                )
+            mse_range = False
 
     if os.path.exists(awq_results_path) and not bool(args.awq_overwrite_results):
         print(f"[AWQ] Loading cached AWQ search results from {awq_results_path}")
