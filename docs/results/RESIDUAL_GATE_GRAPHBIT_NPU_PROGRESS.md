@@ -660,19 +660,6 @@ normal / strong:
 
 ---
 
-### 2.8 PubMed / Arxiv 实验口径
-
-PubMed 和 Arxiv 后续按同一套 Graph-Bit 流程处理，但实验粒度不同：
-
-| Dataset | 实验目标 | 输出指标 |
-|---|---|---|
-| PubMed | 补齐 full-stack trace replay | `FullP8-miss / GraphBit-now / RiskBucket-b32 / RiskBucket-b64` 的 `Reuse / Miss / AvgDepth / Wloads / Cycles / Traffic / Energy / Drop` |
-| Arxiv | 先做 feasibility-only | `reuse/miss profile`、`risk bucket size`、`stop-depth histogram`、`Wloads/Wscale`、`SRAM feasibility` |
-
-PubMed 用来验证 Cora 上的 Graph-Bit full-stack 结果是否能迁移到更大图；Arxiv 节点规模更大，优先验证 risk bucket 是否足够大、W tile service window 是否更容易被填满。
-
----
-
 ## 3. 当前缺口与待验证项
 
 当前机制链路已经跑通，但还需要补齐以下验证，才能形成更完整的 full-stack 证据：
@@ -726,3 +713,4 @@ Reuse + predictor-free Graph-Bit + risk-bucket W-stationary
 ```
 
 这张表用于拆分收益来源：reuse/residual、runtime bound、risk-bucket W tile reuse 各自贡献多少。
+
