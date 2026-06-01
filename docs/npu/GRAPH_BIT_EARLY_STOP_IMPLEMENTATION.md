@@ -275,8 +275,9 @@ Module/W-bound:
     把 PubMed 的 P5 拉回 P6/P7，drop 回到 3% 内。
 
 当前默认建议:
-    module_p90_node 或 module_p90_w50。
-    两者都保持约 21% miss-encoder cost saving，跨 Cora/PubMed 的 maxDrop 约 2.85%。
+    module_p90_node / module_p90_w20 / module_p90_w50 都是可用折中点。
+    如果强调“node risk + W risk 联合控制”的叙事，module_p90_w20 更直接；
+    如果强调跨数据集 maxDrop，module_p90_node / module_p90_w50 更稳。
 ```
 
 对应输出：
@@ -288,7 +289,75 @@ output/graphbit_weighted_bound_validation_pubmed_runs3/summary.tsv
 output/graphbit_weighted_bound_validation_pubmed_runs3/pareto.tsv
 ```
 
-## 2. CLI 参数入口
+## 2. `max_tol` 不是固定常数
+
+`max_tol` 控制低风险 miss node 的最大误差容忍度。它不是常数真理，而是 Graph-Bit 的核心调参旋钮之一。
+
+固定当前前端和 W-bound：
+
+```text
+front-end: h8_53_T31
+hard direct: support >= 5
+residual: support = 3..4
+Graph-Bit: support < 3 或 residual gate reject
+W policy: module_p90_w20
+node/W risk weight: 0.8 / 0.2
+```
+
+只扫描 `max_tol`，Cora 3-run 结果如下：
+
+```text
+max_tol  P7     P6     P5     AvgDepth  Drop   ExtraDrop  CostSaveVsFull
+0.02     46.9%  12.5%  0.0%   6.79      2.01%  0.43%      12.71%
+0.03      4.9%  54.7%  0.0%   6.08      2.29%  0.82%      20.33%
+0.04      0.6%  59.1%  0.0%   6.01      2.26%  0.79%      21.00%
+0.05      0.3%  33.3%  26.1%  5.57      2.45%  1.00%      25.67%
+0.06      0.1%   9.5%  50.1%  5.16      2.98%  1.51%      30.00%
+0.08      0.1%   1.1%  58.4%  5.02      3.13%  1.55%      31.44%
+```
+
+解释：
+
+```text
+max_tol=0.02:
+    很保守，大量节点停在 P7，drop 低，但 cost saving 小。
+
+max_tol=0.03 / 0.04:
+    主要停在 P6，是当前 Cora 上较稳的 P6 平台区间。
+
+max_tol=0.05:
+    开始释放 P5，cost saving 提升到 25%+，drop 仍在 2.5% 左右。
+
+max_tol>=0.06:
+    大量节点停在 P5，cost saving 更高，但 drop 接近或超过 3%。
+```
+
+当前结论：
+
+```text
+0.04 不是固定真理，只是较稳的 P6 区间点。
+如果主目标是稳定精度，优先 0.03 / 0.04。
+如果主目标是更高省算，0.05 是值得保留的激进候选。
+0.06 / 0.08 更适合作为上界对照，不建议作为默认主线。
+```
+
+复现命令：
+
+```bash
+POLICIES=$'tol002:4:0.0:0.02:1.0:15:1.0:1.295612:0.8:0.2:1.473038\ntol003:4:0.0:0.03:1.0:15:1.0:1.295612:0.8:0.2:1.473038\ntol004:4:0.0:0.04:1.0:15:1.0:1.295612:0.8:0.2:1.473038\ntol005:4:0.0:0.05:1.0:15:1.0:1.295612:0.8:0.2:1.473038\ntol006:4:0.0:0.06:1.0:15:1.0:1.295612:0.8:0.2:1.473038\ntol008:4:0.0:0.08:1.0:15:1.0:1.295612:0.8:0.2:1.473038' \
+DATASETS="cora" RUNS=3 \
+OUT_ROOT="output/graphbit_maxtol_sweep_cora_runs3" \
+bash GraphhopSimhash/scripts/run_t31_graphbit_nodewise_bound_sweep.sh
+```
+
+输出：
+
+```text
+output/graphbit_maxtol_sweep_cora_runs3/summary.tsv
+output/graphbit_maxtol_sweep_cora_runs3/pareto.tsv
+```
+
+## 3. CLI 参数入口
 
 参数定义在：
 
@@ -356,7 +425,7 @@ BOUND_LOW_TOL=0.04
 BOUND_TILE_K=128
 ```
 
-## 3. Runner 里的 stop depth 计算
+## 4. Runner 里的 stop depth 计算
 
 主要实现在：
 
@@ -545,7 +614,7 @@ actions[next mid_count] = mid pool_bit
 
 因此即使 `LOW_RATIO=0.0`，没有被 high/mid 覆盖的 miss nodes 仍然会走 low bucket。这也是当前 quick flow 中 `HIGH_RATIO=0.20, MID_RATIO=0.50, LOW_RATIO=0.0` 仍会得到约 30% low-depth nodes 的原因。
 
-## 4. 与 residual reuse 的结合
+## 5. 与 residual reuse 的结合
 
 Graph-Bit 不是直接作用于所有节点，而是在 reuse/residual 之后只处理 miss nodes。
 
@@ -583,7 +652,7 @@ miss:
     使用 Graph-Bit action_bit 对应的 P8/P6/P5/P4 pool
 ```
 
-## 5. Per-node trace 导出
+## 6. Per-node trace 导出
 
 函数：
 
@@ -642,7 +711,7 @@ degree_q / tser_q / context_q / low_unique_q:
 
 这个 trace 是后续 trace-driven scheduler replay 的输入。
 
-## 6. ONNXim 里的 datapath 实现
+## 7. ONNXim 里的 datapath 实现
 
 ONNXim 侧的核心文件：
 
@@ -839,7 +908,7 @@ graphbit_weight_stationary_enable = true
 
 更完整的 full workload 里，不直接手动套这个比例，而是由 trace-driven scheduler replay 统计真实 `Wloads / Wscale`。
 
-## 7. ONNXim 统计项
+## 8. ONNXim 统计项
 
 `Common.h` 给每条 instruction 增加 Graph-Bit 字段：
 
@@ -879,7 +948,7 @@ summary.tsv
 aggregate.json
 ```
 
-## 8. Trace-driven full-stack replay
+## 9. Trace-driven full-stack replay
 
 脚本：
 
@@ -928,7 +997,7 @@ Cycles / Traffic / Energy:
     用 ONNXim component lookup 按真实 depth histogram 和 scheduler replay 组合得到。
 ```
 
-## 9. 一个 Cora h8_54_T40 例子
+## 10. 一个 Cora h8_54_T40 例子
 
 常用快速命令：
 
@@ -1000,7 +1069,7 @@ output/graphbit_trace_replay/.../replay/*_component_lookup.tsv
     ONNXim projection / FFN component cost lookup。
 ```
 
-## 10. 当前实现边界
+## 11. 当前实现边界
 
 已经实现：
 

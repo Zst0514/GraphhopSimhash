@@ -826,7 +826,7 @@ BOUND_NODEWISE_RISK_MAX=15.0
 BOUND_TILE_K=128
 ```
 
-执行时，每个 miss node 都根据自己的 `risk_norm` 得到单独的 `tolerance(v)`。因此最终 P8/P7/P6/P5/P4 分布来自 runtime bound，而不是来自预设节点比例。
+这里的 `0.04` 是当前主线的稳健起点，不是固定常数。执行时，每个 miss node 都根据自己的 `risk_norm` 得到单独的 `tolerance(v)`。因此最终 P8/P7/P6/P5/P4 分布来自 runtime bound，而不是来自预设节点比例。
 
 影响：
 
@@ -854,6 +854,40 @@ gamma 越大:
 ```bash
 POLICIES=$'mild:4:0.0:0.02:1.0:15:1.0:1.0\nnormal:4:0.0:0.04:1.0:15:1.0:1.25' \
 RUNS=1 DATASETS="cora" \
+bash GraphhopSimhash/scripts/run_t31_graphbit_nodewise_bound_sweep.sh
+```
+
+当前 Cora 3-run 的 `module_p90_w20` max-tolerance sweep：
+
+```text
+max_tol  AvgDepth  Drop   ExtraDrop  CostSaveVsFull
+0.02     6.79      2.01%  0.43%      12.71%
+0.03     6.08      2.29%  0.82%      20.33%
+0.04     6.01      2.26%  0.79%      21.00%
+0.05     5.57      2.45%  1.00%      25.67%
+0.06     5.16      2.98%  1.51%      30.00%
+0.08     5.02      3.13%  1.55%      31.44%
+```
+
+这组结果说明：
+
+```text
+0.03 / 0.04:
+    主要停在 P6，属于稳健区间。
+
+0.05:
+    开始释放 P5，是更激进的省算候选。
+
+0.06 / 0.08:
+    P5 占比过高，主要作为 aggressive upper bound。
+```
+
+对应命令：
+
+```bash
+POLICIES=$'tol002:4:0.0:0.02:1.0:15:1.0:1.295612:0.8:0.2:1.473038\ntol003:4:0.0:0.03:1.0:15:1.0:1.295612:0.8:0.2:1.473038\ntol004:4:0.0:0.04:1.0:15:1.0:1.295612:0.8:0.2:1.473038\ntol005:4:0.0:0.05:1.0:15:1.0:1.295612:0.8:0.2:1.473038\ntol006:4:0.0:0.06:1.0:15:1.0:1.295612:0.8:0.2:1.473038\ntol008:4:0.0:0.08:1.0:15:1.0:1.295612:0.8:0.2:1.473038' \
+DATASETS="cora" RUNS=3 \
+OUT_ROOT="output/graphbit_maxtol_sweep_cora_runs3" \
 bash GraphhopSimhash/scripts/run_t31_graphbit_nodewise_bound_sweep.sh
 ```
 
