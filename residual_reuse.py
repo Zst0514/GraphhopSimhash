@@ -127,6 +127,32 @@ def format_bucket_label(bucket_value, bucket_mode="support"):
     return str(bucket_value)
 
 
+def _offline_bucket_rank(query_support, query_dist, cand_support, cand_dist, bucket_mode="support_dist"):
+    query_support = int(query_support)
+    query_dist = int(query_dist)
+    cand_support = int(cand_support)
+    cand_dist = int(cand_dist)
+    bucket_mode = str(bucket_mode)
+
+    if bucket_mode == "support":
+        if cand_support == query_support:
+            return 0
+        if abs(cand_support - query_support) <= 1:
+            return 1
+        return None
+
+    if bucket_mode == "support_dist":
+        if cand_support == query_support and cand_dist == query_dist:
+            return 0
+        if cand_support == query_support and abs(cand_dist - query_dist) <= 1:
+            return 1
+        if abs(cand_support - query_support) <= 1 and abs(cand_dist - query_dist) <= 1:
+            return 2
+        return None
+
+    raise ValueError(f"Unknown residual bucket mode: {bucket_mode}")
+
+
 def compute_total_degree(edge_index, num_nodes, device):
     row, col = edge_index
     sym_nodes = torch.cat([row, col], dim=0)
@@ -654,6 +680,14 @@ def _filter_positive_pairs_by_error(pair_tensors, target_embeddings, positive_er
     return filtered, kept, total
 
 
+def _candidate_ref_identity(ref):
+    if isinstance(ref, dict):
+        return int(ref["route_idx"]), int(ref["hash"])
+    if isinstance(ref, (tuple, list)) and len(ref) >= 2:
+        return int(ref[0]), int(ref[1])
+    raise TypeError(f"Unsupported candidate ref type: {type(ref)!r}")
+
+
 def _harvest_extra_anchor_pairs(
     controller,
     hash_route_features,
@@ -668,6 +702,7 @@ def _harvest_extra_anchor_pairs(
     extra_query_nodes,
     max_extra_pairs,
     positive_error_max,
+    bucket_mode="support_dist",
 ):
     if (
         controller is None
@@ -676,20 +711,36 @@ def _harvest_extra_anchor_pairs(
         or int(max_extra_pairs) <= 0
         or train_nodes.numel() == 0
     ):
-        return None
+        return None, {
+            "query_nodes": 0,
+            "candidate_refs": 0,
+            "scored": 0,
+            "reject_same_source": 0,
+            "reject_min_dist": 0,
+            "reject_support": 0,
+            "reject_error": 0,
+            "accepted": 0,
+        }
 
     device = verify_features.device
     allowed_mask = _split_mask_for_train_pairs(data, split, device)
     allowed_ids = set(int(idx) for idx in allowed_mask.nonzero(as_tuple=False).view(-1).detach().cpu().tolist())
     if not allowed_ids:
-        return None
-
-    candidate_support_values = set(
-        int(value)
-        for value in trace["winning_base_table_hit_counts"][train_nodes].detach().cpu().tolist()
-    )
+        return None, {
+            "query_nodes": 0,
+            "candidate_refs": 0,
+            "scored": 0,
+            "reject_same_source": 0,
+            "reject_min_dist": 0,
+            "reject_support": 0,
+            "reject_error": 0,
+            "accepted": 0,
+        }
 
     train_node_set = set(int(idx) for idx in train_nodes.detach().cpu().tolist())
+    candidate_support_floor = min(
+        int(value) for value in trace["winning_base_table_hit_counts"][train_nodes].detach().cpu().tolist()
+    )
     query_nodes = list(train_node_set)
     if int(extra_query_nodes) > 0:
         extra_candidates = allowed_mask.nonzero(as_tuple=False).view(-1).detach().cpu().tolist()
@@ -715,6 +766,18 @@ def _harvest_extra_anchor_pairs(
     extra_base_hits = []
     extra_support_hits = []
     extra_best_cos = []
+    stats = {
+        "query_nodes": int(len(query_nodes)),
+        "candidate_refs": 0,
+        "scored": 0,
+        "reject_same_source": 0,
+        "reject_min_dist": 0,
+        "reject_support": 0,
+        "reject_error": 0,
+        "accepted_exact_bucket": 0,
+        "accepted_relaxed_bucket": 0,
+        "accepted": 0,
+    }
 
     for node_idx in query_nodes:
         if len(extra_node_indices) >= int(max_extra_pairs):
@@ -725,60 +788,88 @@ def _harvest_extra_anchor_pairs(
         seen_pairs = set()
         candidate_refs = []
         for ref in exact_refs + fuzzy_refs:
-            key = (int(ref["route_idx"]), int(ref["hash"]))
+            key = _candidate_ref_identity(ref)
             if key in seen_pairs:
                 continue
             seen_pairs.add(key)
             candidate_refs.append(ref)
+        stats["candidate_refs"] += int(len(candidate_refs))
         scored = controller._collect_scored_candidates(
             candidate_refs,
             verify_features[int(node_idx)],
             exclude_node_id=int(node_idx),
             allowed_node_ids=allowed_ids,
         )
+        stats["scored"] += int(len(scored))
         primary_source = int(trace["source_ids"][int(node_idx)].item())
         seen_sources = {primary_source} if primary_source >= 0 else set()
         query_target = target_embeddings_cpu[int(node_idx)]
+        query_support = int(trace["winning_base_table_hit_counts"][int(node_idx)].item())
+        query_dist = int(trace["best_dists"][int(node_idx)].item())
         taken = 0
+        ranked_items = {0: [], 1: [], 2: []}
         for item in scored:
-            if len(extra_node_indices) >= int(max_extra_pairs):
-                break
             src = int(item["entry"]["node_id"])
             support_hits = int(item.get("winning_base_table_hit_count", 1))
             dist = int(item.get("dist", 0))
             if src in seen_sources:
+                stats["reject_same_source"] += 1
                 continue
             if float(dist) < float(min_dist):
+                stats["reject_min_dist"] += 1
                 continue
-            if candidate_support_values and support_hits not in candidate_support_values:
+            if support_hits < candidate_support_floor:
+                stats["reject_support"] += 1
                 continue
-            if float(positive_error_max) >= 0.0:
-                anchor_error = float(
-                    (
-                        1.0
-                        - F.cosine_similarity(
-                            query_target.unsqueeze(0),
-                            target_embeddings_cpu[src].unsqueeze(0),
-                            dim=1,
-                        )
-                    ).item()
-                )
-                if anchor_error > float(positive_error_max):
-                    continue
-            seen_sources.add(src)
-            extra_node_indices.append(int(node_idx))
-            extra_source_ids.append(src)
-            extra_best_dists.append(dist)
-            extra_route_hits.append(int(item.get("route_hit_count", 1)))
-            extra_base_hits.append(int(item.get("base_route_hit_count", 1)))
-            extra_support_hits.append(support_hits)
-            extra_best_cos.append(float(item.get("cos", 0.0)))
-            taken += 1
-            if taken >= int(extra_anchors_per_node):
+            bucket_rank = _offline_bucket_rank(
+                query_support,
+                query_dist,
+                support_hits,
+                dist,
+                bucket_mode=bucket_mode,
+            )
+            if bucket_rank is None:
+                stats["reject_support"] += 1
+                continue
+            ranked_items[bucket_rank].append((item, src, support_hits, dist))
+
+        for bucket_rank in (0, 1, 2):
+            if len(extra_node_indices) >= int(max_extra_pairs) or taken >= int(extra_anchors_per_node):
                 break
+            for item, src, support_hits, dist in ranked_items[bucket_rank]:
+                if len(extra_node_indices) >= int(max_extra_pairs) or taken >= int(extra_anchors_per_node):
+                    break
+                if float(positive_error_max) >= 0.0:
+                    anchor_error = float(
+                        (
+                            1.0
+                            - F.cosine_similarity(
+                                query_target.unsqueeze(0),
+                                target_embeddings_cpu[src].unsqueeze(0),
+                                dim=1,
+                            )
+                        ).item()
+                    )
+                    if anchor_error > float(positive_error_max):
+                        stats["reject_error"] += 1
+                        continue
+                seen_sources.add(src)
+                extra_node_indices.append(int(node_idx))
+                extra_source_ids.append(src)
+                extra_best_dists.append(dist)
+                extra_route_hits.append(int(item.get("route_hit_count", 1)))
+                extra_base_hits.append(int(item.get("base_route_hit_count", 1)))
+                extra_support_hits.append(support_hits)
+                extra_best_cos.append(float(item.get("cos", 0.0)))
+                taken += 1
+                stats["accepted"] += 1
+                if bucket_rank == 0:
+                    stats["accepted_exact_bucket"] += 1
+                else:
+                    stats["accepted_relaxed_bucket"] += 1
 
     if not extra_node_indices:
-        return None
+        return None, stats
 
     return {
         "node_indices": torch.as_tensor(extra_node_indices, dtype=torch.long, device=device),
@@ -788,7 +879,7 @@ def _harvest_extra_anchor_pairs(
         "base_route_hit_counts": torch.as_tensor(extra_base_hits, dtype=torch.long, device=device),
         "winning_base_table_hit_counts": torch.as_tensor(extra_support_hits, dtype=torch.long, device=device),
         "best_cosines": torch.as_tensor(extra_best_cos, dtype=torch.float32, device=device),
-    }
+    }, stats
 
 
 def _harvest_negative_anchor_pairs(
@@ -804,6 +895,7 @@ def _harvest_negative_anchor_pairs(
     extra_query_nodes,
     max_extra_pairs,
     negative_error_min,
+    bucket_mode="support_dist",
 ):
     if (
         controller is None
@@ -812,20 +904,34 @@ def _harvest_negative_anchor_pairs(
         or int(max_extra_pairs) <= 0
         or train_nodes.numel() == 0
     ):
-        return None
+        return None, {
+            "query_nodes": 0,
+            "candidate_refs": 0,
+            "scored": 0,
+            "reject_same_source": 0,
+            "reject_support": 0,
+            "reject_error": 0,
+            "accepted": 0,
+        }
 
     device = verify_features.device
     allowed_mask = _split_mask_for_train_pairs(data, split, device)
     allowed_ids = set(int(idx) for idx in allowed_mask.nonzero(as_tuple=False).view(-1).detach().cpu().tolist())
     if not allowed_ids:
-        return None
-
-    candidate_support_values = set(
-        int(value)
-        for value in trace["winning_base_table_hit_counts"][train_nodes].detach().cpu().tolist()
-    )
+        return None, {
+            "query_nodes": 0,
+            "candidate_refs": 0,
+            "scored": 0,
+            "reject_same_source": 0,
+            "reject_support": 0,
+            "reject_error": 0,
+            "accepted": 0,
+        }
 
     train_node_set = set(int(idx) for idx in train_nodes.detach().cpu().tolist())
+    candidate_support_floor = min(
+        int(value) for value in trace["winning_base_table_hit_counts"][train_nodes].detach().cpu().tolist()
+    )
     query_nodes = list(train_node_set)
     if int(extra_query_nodes) > 0:
         extra_candidates = allowed_mask.nonzero(as_tuple=False).view(-1).detach().cpu().tolist()
@@ -851,6 +957,17 @@ def _harvest_negative_anchor_pairs(
     negative_base_hits = []
     negative_support_hits = []
     negative_best_cos = []
+    stats = {
+        "query_nodes": int(len(query_nodes)),
+        "candidate_refs": 0,
+        "scored": 0,
+        "reject_same_source": 0,
+        "reject_support": 0,
+        "reject_error": 0,
+        "accepted_exact_bucket": 0,
+        "accepted_relaxed_bucket": 0,
+        "accepted": 0,
+    }
 
     for node_idx in query_nodes:
         if len(negative_node_indices) >= int(max_extra_pairs):
@@ -863,11 +980,12 @@ def _harvest_negative_anchor_pairs(
         seen_pairs = set()
         candidate_refs = []
         for ref in exact_refs + fuzzy_refs:
-            key = (int(ref["route_idx"]), int(ref["hash"]))
+            key = _candidate_ref_identity(ref)
             if key in seen_pairs:
                 continue
             seen_pairs.add(key)
             candidate_refs.append(ref)
+        stats["candidate_refs"] += int(len(candidate_refs))
 
         scored = controller._collect_scored_candidates(
             candidate_refs,
@@ -875,46 +993,73 @@ def _harvest_negative_anchor_pairs(
             exclude_node_id=int(node_idx),
             allowed_node_ids=allowed_ids,
         )
+        stats["scored"] += int(len(scored))
 
         primary_source = int(trace["source_ids"][int(node_idx)].item())
         seen_sources = {primary_source} if primary_source >= 0 else set()
         query_target = target_embeddings_cpu[int(node_idx)]
+        query_support = int(trace["winning_base_table_hit_counts"][int(node_idx)].item())
+        query_dist = int(trace["best_dists"][int(node_idx)].item())
         taken = 0
+        ranked_items = {0: [], 1: [], 2: []}
         for item in reversed(scored):
-            if len(negative_node_indices) >= int(max_extra_pairs):
-                break
             src = int(item["entry"]["node_id"])
             support_hits = int(item.get("winning_base_table_hit_count", 1))
+            dist = int(item.get("dist", 0))
             if src in seen_sources:
+                stats["reject_same_source"] += 1
                 continue
-            if candidate_support_values and support_hits not in candidate_support_values:
+            if support_hits < candidate_support_floor:
+                stats["reject_support"] += 1
                 continue
-            anchor_error = float(
-                (
-                    1.0
-                    - F.cosine_similarity(
-                        query_target.unsqueeze(0),
-                        target_embeddings_cpu[src].unsqueeze(0),
-                        dim=1,
-                    )
-                ).item()
+            bucket_rank = _offline_bucket_rank(
+                query_support,
+                query_dist,
+                support_hits,
+                dist,
+                bucket_mode=bucket_mode,
             )
-            if anchor_error < float(negative_error_min):
+            if bucket_rank is None:
+                stats["reject_support"] += 1
                 continue
-            seen_sources.add(src)
-            negative_node_indices.append(int(node_idx))
-            negative_source_ids.append(src)
-            negative_best_dists.append(int(item.get("dist", 0)))
-            negative_route_hits.append(int(item.get("route_hit_count", 1)))
-            negative_base_hits.append(int(item.get("base_route_hit_count", 1)))
-            negative_support_hits.append(support_hits)
-            negative_best_cos.append(float(item.get("cos", 0.0)))
-            taken += 1
-            if taken >= int(extra_anchors_per_node):
+            ranked_items[bucket_rank].append((item, src, support_hits, dist))
+
+        for bucket_rank in (0, 1, 2):
+            if len(negative_node_indices) >= int(max_extra_pairs) or taken >= int(extra_anchors_per_node):
                 break
+            for item, src, support_hits, dist in ranked_items[bucket_rank]:
+                if len(negative_node_indices) >= int(max_extra_pairs) or taken >= int(extra_anchors_per_node):
+                    break
+                anchor_error = float(
+                    (
+                        1.0
+                        - F.cosine_similarity(
+                            query_target.unsqueeze(0),
+                            target_embeddings_cpu[src].unsqueeze(0),
+                            dim=1,
+                        )
+                    ).item()
+                )
+                if anchor_error < float(negative_error_min):
+                    stats["reject_error"] += 1
+                    continue
+                seen_sources.add(src)
+                negative_node_indices.append(int(node_idx))
+                negative_source_ids.append(src)
+                negative_best_dists.append(dist)
+                negative_route_hits.append(int(item.get("route_hit_count", 1)))
+                negative_base_hits.append(int(item.get("base_route_hit_count", 1)))
+                negative_support_hits.append(support_hits)
+                negative_best_cos.append(float(item.get("cos", 0.0)))
+                taken += 1
+                stats["accepted"] += 1
+                if bucket_rank == 0:
+                    stats["accepted_exact_bucket"] += 1
+                else:
+                    stats["accepted_relaxed_bucket"] += 1
 
     if not negative_node_indices:
-        return None
+        return None, stats
 
     return {
         "node_indices": torch.as_tensor(negative_node_indices, dtype=torch.long, device=device),
@@ -924,7 +1069,7 @@ def _harvest_negative_anchor_pairs(
         "base_route_hit_counts": torch.as_tensor(negative_base_hits, dtype=torch.long, device=device),
         "winning_base_table_hit_counts": torch.as_tensor(negative_support_hits, dtype=torch.long, device=device),
         "best_cosines": torch.as_tensor(negative_best_cos, dtype=torch.float32, device=device),
-    }
+    }, stats
 
 
 def select_residual_train_nodes(
@@ -1022,7 +1167,7 @@ def train_residual_adapter(
         target_embeddings,
         positive_error_max,
     )
-    extra_pairs = _harvest_extra_anchor_pairs(
+    extra_pairs, extra_pair_stats = _harvest_extra_anchor_pairs(
         controller,
         hash_route_features,
         verify_features,
@@ -1036,6 +1181,7 @@ def train_residual_adapter(
         extra_query_nodes,
         max(0, int(max_pairs) - int(train_nodes.numel())),
         positive_error_max,
+        bucket_mode=bucket_mode,
     )
     pair_tensors = _append_training_pairs(pair_tensors, extra_pairs)
     accept_targets = None
@@ -1069,7 +1215,7 @@ def train_residual_adapter(
         )
         if class_targets is not None:
             accept_targets = class_targets if accept_targets is None else accept_targets * class_targets
-    negative_pairs = _harvest_negative_anchor_pairs(
+    negative_pairs, negative_pair_stats = _harvest_negative_anchor_pairs(
         controller,
         hash_route_features,
         verify_features,
@@ -1082,6 +1228,7 @@ def train_residual_adapter(
         extra_query_nodes,
         max(0, int(max_pairs)),
         negative_error_min,
+        bucket_mode=bucket_mode,
     )
     accept_targets = None
     class_accept_labelled = 0
@@ -1097,7 +1244,9 @@ def train_residual_adapter(
             "base_pairs_kept": int(base_pairs_kept),
             "base_pairs_total": int(base_pairs_total),
             "extra_pairs": 0 if extra_pairs is None else int(extra_pairs["node_indices"].numel()),
+            "extra_pair_stats": dict(extra_pair_stats or {}),
             "negative_pairs": 0 if negative_pairs is None else int(negative_pairs["node_indices"].numel()),
+            "negative_pair_stats": dict(negative_pair_stats or {}),
             "loss": 0.0,
             "gate_mean": 0.0,
             "accept_gate_mean": 0.0,
@@ -1328,7 +1477,9 @@ def train_residual_adapter(
         "base_pairs_kept": int(base_pairs_kept),
         "base_pairs_total": int(base_pairs_total),
         "extra_pairs": 0 if extra_pairs is None else int(extra_pairs["node_indices"].numel()),
+        "extra_pair_stats": dict(extra_pair_stats or {}),
         "negative_pairs": 0 if negative_pairs is None else int(negative_pairs["node_indices"].numel()),
+        "negative_pair_stats": dict(negative_pair_stats or {}),
         "loss": global_loss,
         "gate_mean": global_gate_mean,
         "accept_gate_mean": global_accept_gate_mean,

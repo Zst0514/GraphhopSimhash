@@ -1,46 +1,40 @@
-# ST 与 Llama 共享检索骨架的残差复用结果
+# ST full 768d 与 Llama 共享检索骨架结果
 
-日期：2026-05-31
+日期：2026-06-01
 
-本文档是对 2026-05-30 版本的纠错重跑记录。旧版本中的 ST 行写成了 `ST full/HQ cache (data.x)`，但实际日志是：
+本文档记录当前 `GraphhopSimhash-main` 主线代码下，`ST full embedding` 与 `Llama2-7B W4A16` 共享同一套在线检索骨架时的有效结果。
 
-```text
-[ResidualTarget] source=data_x | path=<data.x> | shape=(2708, 384)
-[ResidualTarget] source=data_x | path=<data.x> | shape=(19717, 384)
-```
+## 重要说明
 
-这不是我们原意里的 ST 全量 embedding。按照残差复用实验的原意，ST 目标 embedding 应该来自独立的 ST oracle pool。本次重跑改为：
+这里的 `ST` 不再是 `data.x` 这条 384 维缓存特征线，而是显式读取的 768 维目标 embedding：
 
 ```text
-Cora:   cache_data/cora_ST_oracle_W4A16.pt    shape=(2708, 768)
-PubMed: cache_data/pubmed_ST_oracle_W4A16.pt  shape=(19717, 768)
+cache_data/cora_ST_oracle_W4A16.pt
+cache_data/pubmed_ST_oracle_W4A16.pt
 ```
 
-因此，旧文档中的 ST 两行结果作废，不能再作为“ST full embedding”结论使用。
-
-## 当前结论
-
-纠错后，原来的结论需要收回：
+也就是说，本文里的 `ST` 含义是：
 
 ```text
-同一套 T31 在线检索骨架
-不能证明 ST 与 Llama2-7B W4A16
-同时在 Cora/PubMed 上达到 40%+ 复用和 2% 内掉点
+完整 ST 前向应得到的目标 embedding 真值
+维度 = 768
+当前使用的池 = W4A16 版本
 ```
 
-本次只重跑了 ST 的真实 768 维 oracle embedding。Llama2-7B W4A16 旧行不受 `data_x` 误用影响，因为它原本就是通过 `real_quant_fp` 读取独立 Llama embedding pool；但如果要写入最终论文或主结果表，Llama 也建议按同一脚本重新复核一次。
+当前脚本也已经改成显式读取这两份文件：
+
+- `st_cora -> cache_data/cora_ST_oracle_W4A16.pt`
+- `st_pubmed -> cache_data/pubmed_ST_oracle_W4A16.pt`
 
 ## 共享在线检索骨架
 
-原始共享在线骨架为：
+四条结果都基于同一套在线检索骨架：
 
 ```text
-8 个 head
-每个 head 16 bit
+8 heads x 16 bits
 radius = 2
 关闭结构检查
-score gate 打开
-score 权重 = 3 / 1 / 1
+开启 score gate
 score reuse threshold T = 31
 
 support >= 5   -> hard direct reuse
@@ -66,186 +60,129 @@ support < 3    -> compute
 --residual_soft_min_support_hits 3
 ```
 
-## 纠错重跑结果
-
-### 严格 T31 复核
-
-| Embedding 源 | 数据集 | Baseline Acc | ResidualReuse | Acc | Drop | gate 设置 | 结论 |
-|---|---|---:|---:|---:|---:|---|---|
-| ST:W4A16 768d | Cora | 0.6789 | 39.4% | 0.6562 | 2.27% | separate, tau=0.575 | 未达标：复用低于 40%，掉点高于 2% |
-| ST:W4A16 768d | PubMed | 0.7710 | 35.7% | 0.7520 | 1.90% | shared, tau=0.65 | 未达标：复用低于 40% |
-
-### 小幅在线调参复核
-
-这两组不是严格 T31 共享配置，只用于判断纠错后是否能通过小调参恢复旧结论。
-
-| Embedding 源 | 数据集 | 调整 | Baseline Acc | ResidualReuse | Acc | Drop | 结论 |
-|---|---|---|---:|---:|---:|---:|---|
-| ST:W4A16 768d | Cora | score T=32, tau=0.575 | 0.6789 | 40.2% | 0.6575 | 2.14% | 复用达标，但掉点仍高于 2% |
-| ST:W4A16 768d | PubMed | score T=31, tau=0.60 | 0.7710 | 37.3% | 0.7510 | 2.00% | 掉点到边界，但复用仍低于 40% |
-
-### 追加 sweep 结果
-
-本轮继续修正了残差在线应用逻辑：残差修正后的向量不再强制做单位归一化，而是保留 ST oracle embedding 的原始尺度。这样 Cora 的残差修正明显改善，但 PubMed 仍没有在同一套在线配置下同时满足目标。
-
-| 配置 | 数据集 | Baseline Acc | ResidualReuse | Acc | Drop | 结论 |
-|---|---|---:|---:|---:|---:|---|
-| 8 heads, hard>=5, soft=3..4, T=45, separate tau=0.575 | Cora | 0.6838 | 41.1% | 0.6639 | 1.98% | 单跑达标，是当前 Cora 最好点 |
-| 8 heads, hard>=5, soft=4, T=23 | PubMed | 0.7751 | 39.6% | 0.7539 | 2.11% | 接近目标，但复用略低且掉点略高 |
-| 8 heads, hard>=5, soft=4, T=24 | PubMed | 0.7751 | 42.3% | 0.7507 | 2.43% | 复用达标，但掉点超出 |
-| 4 heads, hard>=4, soft=3, T=31 | PubMed | 0.7751 | 40.3% | 0.7550 | 2.01% | PubMed 几乎踩线，但不是 8 头主线 |
-| 4 heads, hard>=4, soft=3, T=31 | Cora | 0.6838 | 15.7% | 0.6731 | 1.06% | Cora 复用过低，不能作为共享配置 |
-| 8 heads, hard>=5, soft=4, T=45 | Cora | 0.6838 | 27.8% | 0.6668 | 1.69% | PubMed 较稳的 4-head 中间态逻辑迁移到 Cora 后复用不足 |
-
-本轮也测试了两类更强的 accept gate：
-
-1. `--residual_class_aware_accept`：离线阶段用 train/val 标签构造“同类候选更可接受”的监督。
-2. `--residual_classifier_accept_gate`：离线阶段用冻结 GNN 检查候选复用是否保持预测和 logits KL，在线阶段仍然只用 learned accept score。
-
-分类保持 gate 的 PubMed 单跑结果如下：
-
-| 配置 | 数据集 | Baseline Acc | ResidualReuse | Acc | Drop | 说明 |
-|---|---|---:|---:|---:|---:|---|
-| 8 heads, hard>=5, soft=4, T=24, classifier gate, tau=0.50 | PubMed | 0.7751 | 37.8% | 0.7550 | 2.01% | 掉点接近 2%，但复用低于 40% |
-| 8 heads, hard>=5, soft=4, T=25, classifier gate, tau=0.50 | PubMed | 0.7751 | 40.9% | 0.7515 | 2.36% | 复用达标，但掉点仍高 |
-| 8 heads, hard>=5, soft=4, T=25, local train/val classifier gate, tau=0.40 | PubMed | 0.7751 | 41.4% | 0.7512 | 2.39% | 加入局部邻居监督后仍未改善 |
-| 8 heads, hard>=5, soft=4, T=25, two-stage classifier gate, probe_alpha=0.25, tau=0.50 | PubMed | 0.7751 | 42.3% | 0.7494 | 2.57% | 用残差修正后候选生成 target，未改善 |
-| 8 heads, hard>=5, soft=4, T=25, two-stage classifier gate, probe_alpha=0.125, tau=0.50 | PubMed | 0.7751 | 41.9% | 0.7512 | 2.39% | 与直接 classifier gate 基本持平，仍未达标 |
-
-这说明当前问题不是简单加一个 accept gate 就能解决。PubMed 的 4-head 边界非常窄：门控稍微严格，复用跌到 40% 以下；门控稍微宽松，掉点就超过 2%。
-
-阶段性结论：
+离线采样逻辑也统一为当前版本：
 
 ```text
-Cora 需要 3-head soft 区才能达到 40%+ 复用；
-PubMed 的 3-head soft 区污染较重，必须收紧到 4-head 附近才接近 2% 掉点。
-
-因此，在真实 ST:W4A16 768d 上，
-暂时没有找到一套完全相同的 8-head 在线配置，
-同时让 Cora/PubMed 都达到 40%+ 复用和 2% 内掉点。
+先取同 bucket 样本
+不够再放宽到邻近 bucket
+保留 support floor
+不允许 <=2 head 的样本混入 residual 离线训练
 ```
 
-### 旧 Llama 行
+## 当前有效结果
 
-以下 Llama 行来自 2026-05-30 的旧日志，未在本次纠错中重跑。它们没有使用 `data_x`，而是通过 `real_quant_fp` 加载 Llama2-7B W4A16 embedding pool。
+以下均为 `3-run` 均值。
 
-| Embedding 源 | 数据集 | Baseline Acc | ResidualReuse | Acc | Drop | gate 设置 | 状态 |
-|---|---|---:|---:|---:|---:|---|---|
-| Llama2-7B W4A16 | Cora | 0.7308 | 40.8% | 0.7132 | 1.76% | classifier-aware separate, tau=0.40 | 旧有效日志，建议重跑复核 |
-| Llama2-7B W4A16 | PubMed | 0.7000 | 40.8% | 0.6819 | 1.81% | shared, tau=0.91 | 旧有效日志，建议重跑复核 |
+| Embedding 源 | 数据集 | Baseline Acc | ResidualReuse | Acc | Drop | TrainPairs | Alpha | gate 设置 | 结论 |
+|---|---|---:|---:|---:|---:|---:|---:|---|---|
+| `ST:W4A16 768d` | Cora | 0.6789 | 39.4% | 0.6555 | 2.34% | 217.0 | 0.390 | `separate`, tau=0.575 | 未达标 |
+| `ST:W4A16 768d` | PubMed | 0.7710 | 40.3% | 0.7491 | 2.18% | 62.3 | 0.042 | `shared`, tau=0.65 | 复用达标，掉点未达标 |
+| `Llama2-7B:W4A16` | Cora | 0.7310 | 41.1% | 0.7136 | 1.74% | 330.7 | 0.089 | `separate`, tau=0.40 | 达标 |
+| `Llama2-7B:W4A16` | PubMed | 0.7000 | 40.7% | 0.6816 | 1.84% | 317.3 | 0.037 | `shared`, tau=0.91 | 达标 |
 
-## 为什么旧 ST 结果会偏乐观
+## 补充对比
 
-旧 ST 行实际复用的是 `data.x` 中的 384 维缓存特征，而不是 768 维 ST oracle embedding。`data.x` 的维度更小，分布也不同，残差修正和哈希检索难度都会变化。因此旧结果不能外推到真实 ST 全量 embedding。
+### ST:W4A16 768d / Cora
 
-纠错后可以看到：
+| 配置 | Reuse | Acc | Drop |
+|---|---:|---:|---:|
+| DirectReuse | 12.2% | 0.6688 | 1.02% |
+| SoftDirectReuse | 39.4% | 0.6491 | 2.98% |
+| ResidualReuse | 39.4% | 0.6555 | 2.34% |
+
+### ST:W4A16 768d / PubMed
+
+| 配置 | Reuse | Acc | Drop |
+|---|---:|---:|---:|
+| DirectReuse | 26.3% | 0.7587 | 1.22% |
+| SoftDirectReuse | 71.6% | 0.7181 | 5.29% |
+| ResidualReuse | 40.3% | 0.7491 | 2.18% |
+
+### Llama2-7B:W4A16 / Cora
+
+| 配置 | Reuse | Acc | Drop |
+|---|---:|---:|---:|
+| DirectReuse | 16.2% | 0.7263 | 0.47% |
+| SoftDirectReuse | 52.5% | 0.6999 | 3.11% |
+| ResidualReuse | 41.1% | 0.7136 | 1.74% |
+
+### Llama2-7B:W4A16 / PubMed
+
+| 配置 | Reuse | Acc | Drop |
+|---|---:|---:|---:|
+| DirectReuse | 36.2% | 0.6829 | 1.71% |
+| SoftDirectReuse | 79.9% | 0.6442 | 5.58% |
+| ResidualReuse | 40.7% | 0.6816 | 1.84% |
+
+## 当前结论
+
+基于真正的 `ST full 768d` 目标 embedding，可以直接得到下面的结论：
+
+1. `Llama2-7B W4A16` 这条线在 `Cora / PubMed` 上都达标：
+   - 复用率 `40%+`
+   - 掉点 `< 2%`
+2. `ST full 768d` 这条线在同一套在线骨架下没有同时达标：
+   - `Cora`：复用率没到 `40%`，掉点也超过 `2%`
+   - `PubMed`：复用率刚过 `40%`，但掉点还是高于 `2%`
+3. 也就是说，**“同一套 T31 在线配置同时适配 ST full 768d 与 Llama W4A16，并在 Cora/PubMed 全部达到 40%+ 复用、2% 内掉点” 这个结论当前不成立。**
+
+一句话总结：
 
 ```text
-Cora:
-    T31 下复用率从旧表 48.4% 下降到 39.4%
-    掉点从旧表 1.21% 上升到 2.27%
-
-PubMed:
-    T31 下复用率从旧表 40.4% 下降到 35.7%
-    掉点仍在 2% 内，但复用率不达标
+一旦 ST 真正切回 full 768d embedding，
+共享 T31 骨架对 Llama 仍成立，
+但对 ST 不成立。
 ```
 
-这说明问题不是单纯的文档命名错误，而是实验目标 embedding 选错后导致的主结论错误。
+## 为什么会这样
 
-## 后续处理
+现在的现象很清楚：
 
-目前应把 ST 这条线从“已达标”改成“真实 ST oracle 下尚未恢复原目标”。
+- `data_x 384d` 那条 ST 线更容易复用，因为目标空间更平、更粗糙
+- `ST full 768d` 目标更尖锐，中间态候选更容易越过分类边界
+- 所以同样的 `3..4 head -> residual` 策略，在 `ST full 768d` 上更难压住掉点
 
-优先级建议如下：
+从结果上看：
 
-1. 论文或主结果表不能继续引用旧 ST(data.x) 结果。
-2. 如果坚持一套 8-head 在线配置，需要重新设计 PubMed 的中间态 accept 规则，而不是只调现有 gate 阈值。
-3. 如果允许按数据集选择 support split，Cora 可以走 `soft=3..4`，PubMed 更适合 `soft=4`，但这不再是“完全相同在线配置”。
-4. Llama2-7B W4A16 旧结果需要用当前代码重新复核，避免 ST 纠错后文档中混用不同日期和不同代码状态的结果。
+- `Cora/ST full` 更像是召回不够，复用率上不去
+- `PubMed/ST full` 更像是 accept gate 不够准，复用率勉强够时掉点就超线
 
-## 本轮日志
+## 当前复现实验入口
 
-纠错重跑日志：
-
-```text
-/tmp/st_full_w4a16_T31_rerun_20260531/cora.log
-/tmp/st_full_w4a16_T31_rerun_20260531/pubmed_tau065.log
-/tmp/st_full_w4a16_T31_rerun_20260531/cora_T32.log
-/tmp/st_full_w4a16_T31_rerun_20260531/pubmed_tau060.log
-/tmp/st_w4a16_nonorm_sweep_20260531/cora_T45_sep_fulltrain_nonorm.log
-/tmp/st_w4a16_pubmed_h5s4_lowT_20260531/pubmed_h5s4_T23.log
-/tmp/st_w4a16_pubmed_h5s4_lowT_20260531/pubmed_h5s4_T24.log
-/tmp/st_w4a16_pubmed_4head_sweep_20260531/pubmed_4h_T31.log
-/tmp/st_w4a16_4head_candidate_20260531/cora_4h_T31.log
-/tmp/st_w4a16_classgate_hightau_20260531/pubmed_T45_tau097.log
-/tmp/st_w4a16_cora_h5s4_pubmedlogic_20260531/cora_h5s4_T45.log
-/tmp/st_w4a16_classifier_gate_20260531/pubmed_h5s4_T24_kl020_tau050.log
-/tmp/st_w4a16_classifier_gate_refine_20260531/pubmed_T25_tau050.log
-/tmp/st_w4a16_classifier_local_20260531/pubmed_T25_tau040.log
-/tmp/st_w4a16_classifier_after_residual_20260531/pubmed_T25_alpha025_tau050.log
-/tmp/st_w4a16_classifier_after_residual_20260531/pubmed_T25_alpha0125_tau050.log
-```
-
-旧 Llama 日志：
-
-```text
-/tmp/llama_cora_T31_tau_relax_3run_20260530/tau040.log
-/tmp/llama_T31_final_3run_20260530/pubmed.log
-```
-
-## 当前 main 分支复现入口
-
-已提供统一脚本：
+当前推荐入口：
 
 ```bash
-bash GraphhopSimhash/scripts/run_t31_shared_frontend_reuse.sh
+cd /home/qiumingzhi/Simhash-S/OneForAll
+python GraphhopSimhash-main/scripts/run_graphhopsimhash_main.py ...
 ```
 
-只跑其中一组：
+批量脚本：
 
 ```bash
-CASES="llama_cora" RUNS=3 \
-bash GraphhopSimhash/scripts/run_t31_shared_frontend_reuse.sh
+bash GraphhopSimhash-main/scripts/run_t31_shared_frontend_reuse.sh
 ```
 
-四组 case 对应关系：
+如果要改 ST oracle 路径，可以覆盖：
 
-| Case | Embedding 源 | 数据集 | gate 设置 |
-|---|---|---|---|
-| `st_cora` | `data.x` | Cora | `separate`, tau=0.575 |
-| `st_pubmed` | `data.x` | PubMed | `shared`, tau=0.65 |
-| `llama_cora` | `llama2_7b:W4A16` | Cora | classifier-aware `separate`, tau=0.40 |
-| `llama_pubmed` | `llama2_7b:W4A16` | PubMed | `shared`, tau=0.91 |
+```bash
+ST_CORA_PATH=cache_data/cora_ST_oracle_W4A16.pt
+ST_PUBMED_PATH=cache_data/pubmed_ST_oracle_W4A16.pt
+```
 
-输出目录：
+## 当前日志
 
 ```text
-output/t31_shared_frontend_reuse/logs/
+/tmp/st_oracle_cora_t31_current_3run.log
+/tmp/st_oracle_pubmed_t31_current_3run.log
+/tmp/llama_cora_t31_current_3run.log
+/tmp/llama_pubmed_t31_current_3run.log
 ```
 
-## 接入 Graph-Bit 全栈实验
-
-后续 Graph-Bit full-stack 默认使用同一套在线前端：
+对应 trace cache：
 
 ```text
-8 heads x 16 bit
-radius = 2
-T = 31
-hard direct: support >= 5
-residual candidate: support = 3..4
-compute / Graph-Bit miss: support < 3 或 residual accept reject
-```
-
-入口脚本：
-
-```bash
-RUNS=10 DATASET=cora \
-bash GraphhopSimhash/scripts/run_graphbit_predictor_free_flow.sh
-```
-
-其中 Cora 默认启用 classifier-aware accept gate；PubMed 默认使用 shared accept gate 高阈值：
-
-```bash
-RUNS=3 DATASET=pubmed \
-bash GraphhopSimhash/scripts/run_graphbit_predictor_free_flow.sh
+/home/qiumingzhi/Simhash-S/OneForAll/cache_data/reuse_traces/st_oracle_cora_t31_current_cora_seed{42,43,44}.pt
+/home/qiumingzhi/Simhash-S/OneForAll/cache_data/reuse_traces/st_oracle_pubmed_t31_current_pubmed_seed{42,43,44}.pt
+/home/qiumingzhi/Simhash-S/OneForAll/cache_data/reuse_traces/llama_cora_t31_current_cora_seed{42,43,44}.pt
+/home/qiumingzhi/Simhash-S/OneForAll/cache_data/reuse_traces/llama_pubmed_t31_current_pubmed_seed{42,43,44}.pt
 ```

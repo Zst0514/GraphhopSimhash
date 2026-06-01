@@ -481,6 +481,20 @@ def build_parser():
         help="Optional explicit target embedding path for residual reuse. Overrides --real_quant_fp_path when set.",
     )
     parser.add_argument(
+        "--reuse_trace_cache_path",
+        type=str,
+        default=None,
+        help=(
+            "Optional path for caching the online hash-reuse trace used by residual_reuse. "
+            "Use {dataset}, {seed}, and {run} placeholders for multi-run sweeps."
+        ),
+    )
+    parser.add_argument(
+        "--reuse_trace_cache_overwrite",
+        action="store_true",
+        help="Recompute and overwrite --reuse_trace_cache_path instead of loading an existing compatible trace.",
+    )
+    parser.add_argument(
         "--residual_alpha",
         type=float,
         default=-1.0,

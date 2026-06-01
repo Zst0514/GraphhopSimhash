@@ -452,6 +452,253 @@ def build_controller(
     )
 
 
+_REUSE_TRACE_CACHE_VERSION = 1
+_REUSE_TRACE_METADATA_ARG_KEYS = (
+    "radius",
+    "sketch_bits",
+    "hash_view",
+    "hash_mix_weights",
+    "union_hash_views",
+    "cosine_tau",
+    "cache_size",
+    "memo_k",
+    "vote_top_m",
+    "vote_relax_margin",
+    "learned_hash_projection",
+    "learned_hash_dim",
+    "learned_hash_epochs",
+    "learned_hash_lr",
+    "learned_hash_weight_decay",
+    "learned_hash_batch_size",
+    "learned_hash_supervision",
+    "learned_hash_supervision_limit",
+    "learned_hash_topk",
+    "learned_hash_pos_per_anchor",
+    "learned_hash_neg_per_anchor",
+    "learned_hash_pos_tau",
+    "learned_hash_neg_tau",
+    "learned_hash_neg_margin",
+    "learned_hash_balance_lambda",
+    "hash_heads_per_route",
+    "hash_head_seed",
+    "controller_seed",
+    "hash_head_bits",
+    "main_hash_head_bits",
+    "union_hash_head_bits",
+    "enable_topology_retrieval_route",
+    "topology_hash_head_bits",
+    "route_score_weights",
+    "route_accept_tau_offsets",
+    "route_min_accept_votes",
+    "route_min_support_hits",
+    "union_route_weight",
+    "union_accept_tau_bonus",
+    "union_min_accept_votes",
+    "union_min_support_hits",
+    "table_route_weight_decay",
+    "min_base_route_hits",
+    "max_candidates_per_route",
+    "max_total_candidates",
+    "max_structure_checks",
+    "coarse_union_bits_max",
+    "structure_neighbor_tau",
+    "structure_degree_ratio_max",
+    "structure_homophily_gap_max",
+    "structure_check_mode",
+    "enable_homophily_bucket_guard",
+    "topology_sketch_bits",
+    "topology_sketch_radius",
+    "topology_degree_bucket_gap",
+    "topology_homophily_bins",
+    "topology_homophily_bucket_gap",
+    "topology_sketch_seed",
+    "disable_structure_check",
+    "exact_guard_low_bits",
+    "exact_guard_min_bucket_size",
+    "exact_guard_large_bucket_size",
+    "exact_guard_min_margin",
+    "exact_guard_cosine_bonus",
+    "hamming_only_acceptor",
+    "disable_score_gate",
+    "score_reuse_threshold",
+    "score_hub_threshold",
+    "score_rare_threshold",
+    "score_protect_hub_exact",
+    "allow_hub_fuzzy",
+    "allow_rare_fuzzy",
+    "disable_score_support_discount",
+    "score_rare_gate_mode",
+    "score_rare_min_dist",
+    "score_rare_min_route_hits",
+    "score_rare_min_base_hits",
+    "score_pair_confidence_discount",
+    "score_pair_confidence_max_dist",
+    "score_pair_confidence_min_route_hits",
+    "score_pair_confidence_min_base_hits",
+    "score_pair_confidence_min_cos_margin",
+    "score_rarity_bits",
+    "score_rarity_seed",
+    "score_propagation_weight",
+    "score_graph_context_weight",
+    "score_low_unique_weight",
+    "score_use_continuous_risk",
+    "residual_embedding_source",
+    "residual_embedding_path",
+    "real_quant_model_name",
+    "real_quant_fp_tag",
+    "real_quant_fp_path",
+)
+
+
+def _trace_cache_jsonable(value):
+    if isinstance(value, np.generic):
+        return value.item()
+    if isinstance(value, torch.Tensor):
+        return value.detach().cpu().tolist()
+    if isinstance(value, (list, tuple)):
+        return [_trace_cache_jsonable(item) for item in value]
+    if isinstance(value, dict):
+        return {str(key): _trace_cache_jsonable(val) for key, val in sorted(value.items())}
+    return value
+
+
+def resolve_reuse_trace_cache_path(cache_path, ds_key, seed, run_idx, multi_run=False):
+    if not cache_path:
+        return None
+    template = str(cache_path)
+    try:
+        path = template.format(dataset=ds_key, seed=int(seed), run=int(run_idx))
+    except (KeyError, IndexError, ValueError):
+        path = template
+    if path.endswith(os.sep) or os.path.isdir(path):
+        return os.path.join(path, f"{ds_key}_seed{int(seed)}_reuse_trace.pt")
+    if multi_run and path == template:
+        root, ext = os.path.splitext(path)
+        if not ext:
+            ext = ".pt"
+        return f"{root}_{ds_key}_seed{int(seed)}{ext}"
+    return path
+
+
+def build_reuse_trace_cache_metadata(ds_key, seed, args, route_bundle, target_features, verify_features):
+    arg_values = {
+        key: _trace_cache_jsonable(getattr(args, key))
+        for key in _REUSE_TRACE_METADATA_ARG_KEYS
+        if hasattr(args, key)
+    }
+    return {
+        "cache_version": _REUSE_TRACE_CACHE_VERSION,
+        "dataset": str(ds_key),
+        "seed": int(seed),
+        "num_nodes": int(target_features.size(0)),
+        "target_shape": [int(dim) for dim in target_features.shape],
+        "verify_shape": [int(dim) for dim in verify_features.shape],
+        "route_names": list(route_bundle["hash_route_names"]),
+        "route_bits": [int(bit) for bit in route_bundle["hash_route_bits"]],
+        "route_base_indices": [int(idx) for idx in route_bundle["route_base_indices"]],
+        "route_base_names": list(route_bundle["route_base_names"]),
+        "route_score_weights": [float(weight) for weight in route_bundle["route_score_weights"]],
+        "route_accept_tau_offsets": [float(offset) for offset in route_bundle["route_accept_tau_offsets"]],
+        "route_min_accept_votes": [int(vote) for vote in route_bundle["route_min_accept_votes"]],
+        "route_min_support_hits": [int(hit) for hit in route_bundle["route_min_support_hits"]],
+        "args": arg_values,
+    }
+
+
+def _reuse_trace_metadata_mismatch(cached_metadata, current_metadata):
+    if not isinstance(cached_metadata, dict):
+        return "missing metadata"
+    for key, current_value in current_metadata.items():
+        if cached_metadata.get(key) != current_value:
+            return key
+    return None
+
+
+def _reuse_trace_to_cpu(trace):
+    trace_cpu = {}
+    for key, value in trace.items():
+        if torch.is_tensor(value):
+            trace_cpu[key] = value.detach().cpu()
+        elif isinstance(value, tuple):
+            trace_cpu[key] = list(value)
+        elif isinstance(value, list):
+            trace_cpu[key] = list(value)
+        else:
+            trace_cpu[key] = value
+    return trace_cpu
+
+
+def _reuse_trace_to_device(trace, device):
+    trace_device = {}
+    for key, value in trace.items():
+        if torch.is_tensor(value):
+            trace_device[key] = value.to(device=device)
+        elif isinstance(value, tuple):
+            trace_device[key] = list(value)
+        elif isinstance(value, list):
+            trace_device[key] = list(value)
+        else:
+            trace_device[key] = value
+    return trace_device
+
+
+def load_reuse_trace_cache(cache_path, metadata, device, log_important):
+    if cache_path is None or not os.path.exists(cache_path):
+        return None
+    try:
+        payload = torch.load(cache_path, map_location="cpu")
+    except Exception as exc:
+        log_important(f"[ReuseTraceCache] load skipped: {cache_path} ({exc})")
+        return None
+    if not isinstance(payload, dict) or payload.get("cache_version") != _REUSE_TRACE_CACHE_VERSION:
+        log_important(f"[ReuseTraceCache] load skipped: incompatible cache version at {cache_path}")
+        return None
+    mismatch = _reuse_trace_metadata_mismatch(payload.get("metadata"), metadata)
+    if mismatch is not None:
+        log_important(f"[ReuseTraceCache] load skipped: metadata mismatch on {mismatch}")
+        return None
+    trace = payload.get("trace")
+    stats = payload.get("stats")
+    required_keys = {"hit_mask", "source_ids", "hit_kinds", "best_dists", "best_cosines"}
+    if not isinstance(trace, dict) or not required_keys.issubset(trace.keys()) or not isinstance(stats, dict):
+        log_important(f"[ReuseTraceCache] load skipped: malformed trace at {cache_path}")
+        return None
+    trace = _reuse_trace_to_device(trace, device)
+    stats = dict(stats)
+    log_important(
+        f"[ReuseTraceCache] loaded {cache_path} "
+        f"| reuse={int(stats.get('reuse', 0))}/{int(stats.get('reuse_denominator', metadata['num_nodes']))}"
+    )
+    return trace, stats
+
+
+def save_reuse_trace_cache(cache_path, metadata, trace, stats, log_important):
+    if cache_path is None:
+        return
+    parent = os.path.dirname(cache_path)
+    if parent:
+        os.makedirs(parent, exist_ok=True)
+    payload = {
+        "cache_version": _REUSE_TRACE_CACHE_VERSION,
+        "metadata": metadata,
+        "trace": _reuse_trace_to_cpu(trace),
+        "stats": _trace_cache_jsonable(dict(stats)),
+    }
+    tmp_path = f"{cache_path}.tmp"
+    try:
+        torch.save(payload, tmp_path)
+        os.replace(tmp_path, cache_path)
+    except Exception as exc:
+        if os.path.exists(tmp_path):
+            os.remove(tmp_path)
+        log_important(f"[ReuseTraceCache] save failed: {cache_path} ({exc})")
+        return
+    log_important(
+        f"[ReuseTraceCache] saved {cache_path} "
+        f"| reuse={int(stats.get('reuse', 0))}/{int(stats.get('reuse_denominator', metadata['num_nodes']))}"
+    )
+
+
 def evaluate_with_controller(model, data, controller, route_bundle, verify_features, oracle_embs, args):
     reconstructed_embs, _hits = controller.query_full_batch(
         route_bundle["hash_route_features"],
@@ -1227,12 +1474,57 @@ def run_residual_reuse_experiment(args):
                     device,
                 )
 
-                direct_features, _hits = controller.query_full_batch(
-                    route_bundle["hash_route_features"],
-                    verify_features,
-                    target_features,
+                trace_cache_path = resolve_reuse_trace_cache_path(
+                    getattr(args, "reuse_trace_cache_path", None),
+                    ds_key,
+                    seed,
+                    run_idx,
+                    multi_run=(len(target_datasets) > 1 or int(args.runs) > 1),
                 )
-                trace = controller.last_query_trace
+                trace_cache_metadata = build_reuse_trace_cache_metadata(
+                    ds_key,
+                    seed,
+                    run_args,
+                    route_bundle,
+                    target_features,
+                    verify_features,
+                )
+                trace = None
+                stats = None
+                direct_features = None
+                if trace_cache_path is not None and bool(getattr(run_args, "enable_quant_policy", False)):
+                    log_important(
+                        "[ReuseTraceCache] disabled for this run because quant policy can alter computed miss embeddings"
+                    )
+                elif trace_cache_path is not None and not bool(getattr(args, "reuse_trace_cache_overwrite", False)):
+                    cached_trace = load_reuse_trace_cache(
+                        trace_cache_path,
+                        trace_cache_metadata,
+                        device,
+                        log_important,
+                    )
+                    if cached_trace is not None:
+                        trace, stats = cached_trace
+                        direct_features, _hits = apply_reuse_trace_to_embeddings(trace, target_features)
+                        controller.last_query_trace = trace
+                        controller.stats = stats
+
+                if trace is None:
+                    direct_features, _hits = controller.query_full_batch(
+                        route_bundle["hash_route_features"],
+                        verify_features,
+                        target_features,
+                    )
+                    trace = controller.last_query_trace
+                    stats = controller.stats
+                    if trace_cache_path is not None and not bool(getattr(run_args, "enable_quant_policy", False)):
+                        save_reuse_trace_cache(
+                            trace_cache_path,
+                            trace_cache_metadata,
+                            trace,
+                            stats,
+                            log_important,
+                        )
                 if args.residual_anchor_mode == "random":
                     trace, direct_features, anchor_info = replace_reuse_anchors_with_random(
                         trace,
@@ -1243,7 +1535,7 @@ def run_residual_reuse_experiment(args):
                     )
                 else:
                     anchor_info = {"randomized": 0}
-                stats = controller.stats
+                stats = controller.stats if stats is None else stats
                 hit_mask = trace["hit_mask"]
                 correction_mask, correction_info = build_residual_correction_mask(
                     trace,
@@ -1567,6 +1859,31 @@ def run_residual_reuse_experiment(args):
                     f"| AvgErr={float(residual_err.mean().item()):.5f} "
                     f"| HitErr={residual_hit_err:.5f}"
                 )
+                extra_pair_stats = train_info.get("extra_pair_stats") or {}
+                if extra_pair_stats:
+                    log_important(
+                        "  ExtraPairStats: "
+                        f"q={int(extra_pair_stats.get('query_nodes', 0))} "
+                        f"| cand={int(extra_pair_stats.get('candidate_refs', 0))} "
+                        f"| scored={int(extra_pair_stats.get('scored', 0))} "
+                        f"| same={int(extra_pair_stats.get('reject_same_source', 0))} "
+                        f"| dist={int(extra_pair_stats.get('reject_min_dist', 0))} "
+                        f"| support={int(extra_pair_stats.get('reject_support', 0))} "
+                        f"| error={int(extra_pair_stats.get('reject_error', 0))} "
+                        f"| accepted={int(extra_pair_stats.get('accepted', 0))}"
+                    )
+                negative_pair_stats = train_info.get("negative_pair_stats") or {}
+                if negative_pair_stats:
+                    log_important(
+                        "  NegativePairStats: "
+                        f"q={int(negative_pair_stats.get('query_nodes', 0))} "
+                        f"| cand={int(negative_pair_stats.get('candidate_refs', 0))} "
+                        f"| scored={int(negative_pair_stats.get('scored', 0))} "
+                        f"| same={int(negative_pair_stats.get('reject_same_source', 0))} "
+                        f"| support={int(negative_pair_stats.get('reject_support', 0))} "
+                        f"| error={int(negative_pair_stats.get('reject_error', 0))} "
+                        f"| accepted={int(negative_pair_stats.get('accepted', 0))}"
+                    )
                 if train_info.get("classifier_accept_gate"):
                     log_important(
                         "  ClassifierAccept: "
