@@ -42,6 +42,10 @@ direct / residual / compute 三段式复用
 
 它适合 exact match，不适合直接回答“差 1 位、差 2 位是否也算命中”。
 
+之前采用的普通 CAM 检索流程如下：
+
+![普通 CAM 检索流程](../figures/CAM_forward.png)
+
 ---
 
 ## 3. 为什么要上 HD-CAM
