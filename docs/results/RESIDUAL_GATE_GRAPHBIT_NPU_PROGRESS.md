@@ -276,10 +276,23 @@ remaining_bound(depth)
 
 `w_strength` 越大，同样的低位截断越保守；当前代码支持通过 `--precision_depth_bound_w_strength` 扫描该项，后续可替换成真实 W tile 统计。
 
+当前也支持把 W tile 强度并入节点风险，形成加权风险：
+
+```text
+node_risk(v) = clamp(risk(v) / risk_max, 0, 1)
+w_risk       = clamp((w_strength - 1) / (w_reference - 1), 0, 1)
+
+effective_risk(v) =
+    (node_weight * node_risk(v) + w_weight * w_risk)
+    / (node_weight + w_weight)
+```
+
+后续 tolerance 使用 `effective_risk(v)` 计算。这样 W 强度既会放大 remaining bound，也可以通过 W risk 让当前 tile 的执行策略整体更保守。
+
 对每个 miss node：
 
 ```text
-risk_norm(v) = clamp(risk(v) / risk_max, 0, 1)
+risk_norm(v) = effective_risk(v)
 
 tolerance(v) =
     min_tol + (max_tol - min_tol) * (1 - risk_norm(v))^gamma

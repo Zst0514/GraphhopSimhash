@@ -1970,6 +1970,28 @@ def precision_depth_bound_w_strength(args):
     return max(1e-12, float(getattr(args, "precision_depth_bound_w_strength", 1.0)))
 
 
+def precision_depth_bound_w_risk(args, w_strength=None):
+    """Normalize W tile strength into [0, 1] for nodewise tolerance mixing."""
+    strength = precision_depth_bound_w_strength(args) if w_strength is None else max(1e-12, float(w_strength))
+    reference = max(1.0 + 1e-12, float(getattr(args, "precision_depth_bound_w_risk_reference", 1.5)))
+    return float(np.clip((strength - 1.0) / (reference - 1.0), 0.0, 1.0))
+
+
+def precision_depth_effective_risk(node_risks, args, w_strength=None):
+    """Blend graph risk and W-strength risk for nodewise tolerance.
+
+    `node_risks` is already normalized to [0, 1].  The default
+    w_risk_weight=0 keeps previous behavior unchanged.
+    """
+    node_weight = max(0.0, float(getattr(args, "precision_depth_bound_node_risk_weight", 1.0)))
+    w_weight = max(0.0, float(getattr(args, "precision_depth_bound_w_risk_weight", 0.0)))
+    denom = node_weight + w_weight
+    if denom <= 0.0:
+        return node_risks
+    w_risk = precision_depth_bound_w_risk(args, w_strength=w_strength)
+    return torch.clamp((node_weight * node_risks + w_weight * float(w_risk)) / denom, 0.0, 1.0)
+
+
 def precision_depth_remaining_bit_bound(depth, ref_bit, args, w_strength=None):
     """Predictor-free bound for omitted low activation bit-planes.
 
@@ -2063,7 +2085,8 @@ def select_nodewise_bound_actions(priority, eligible_idx, args, num_nodes, bits,
     risk_max = float(getattr(args, "precision_depth_bound_nodewise_risk_max", 15.0))
     w_strength = precision_depth_bound_w_strength(args)
 
-    risks = torch.clamp(priority[eligible_idx].to(dtype=torch.float32) / max(risk_max, 1e-12), 0.0, 1.0)
+    node_risks = torch.clamp(priority[eligible_idx].to(dtype=torch.float32) / max(risk_max, 1e-12), 0.0, 1.0)
+    risks = precision_depth_effective_risk(node_risks, args, w_strength=w_strength)
     tolerances = min_tol + (max_tol - min_tol) * torch.pow(1.0 - risks, gamma)
 
     selected = []
@@ -2966,6 +2989,9 @@ def run_residual_precision_depth_experiment(args):
                         f"tile_k={int(getattr(args, 'precision_depth_bound_tile_k', 128))} | "
                         f"scale={float(getattr(args, 'precision_depth_bound_scale', 1.0)):.3f} | "
                         f"w_strength={precision_depth_bound_w_strength(args):.3f} | "
+                        f"risk_w=[node={float(getattr(args, 'precision_depth_bound_node_risk_weight', 1.0)):.2f},"
+                        f"w={float(getattr(args, 'precision_depth_bound_w_risk_weight', 0.0)):.2f},"
+                        f"wref={float(getattr(args, 'precision_depth_bound_w_risk_reference', 1.5)):.2f}] | "
                         f"min_depth={int(getattr(args, 'precision_depth_bound_nodewise_min_depth', 4))} | "
                         f"tol=[{float(getattr(args, 'precision_depth_bound_nodewise_min_tolerance', 0.0)):.4f}, "
                         f"{float(getattr(args, 'precision_depth_bound_nodewise_max_tolerance', 0.04)):.4f}] | "
@@ -2987,6 +3013,9 @@ def run_residual_precision_depth_experiment(args):
                         f"tile_k={int(getattr(args, 'precision_depth_bound_tile_k', 128))} | "
                         f"scale={float(getattr(args, 'precision_depth_bound_scale', 1.0)):.3f} | "
                         f"w_strength={precision_depth_bound_w_strength(args):.3f} | "
+                        f"risk_w=[node={float(getattr(args, 'precision_depth_bound_node_risk_weight', 1.0)):.2f},"
+                        f"w={float(getattr(args, 'precision_depth_bound_w_risk_weight', 0.0)):.2f},"
+                        f"wref={float(getattr(args, 'precision_depth_bound_w_risk_reference', 1.5)):.2f}] | "
                         f"{bucket_text}"
                     )
 

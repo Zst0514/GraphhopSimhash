@@ -110,6 +110,39 @@ remaining_low_bit_bound(depth)
 
 其中 `w_strength` 表示当前 W tile 相对全局平均权重强度的倍数。`w_strength > 1` 时，同样跳过低位 activation 的风险更高；`w_strength < 1` 时，低位可跳过空间更大。第一版用常数扫描验证机制，后续再接真实 `mean(abs(W_tile)) / global_mean(abs(W))`。
 
+除了直接放大 `remaining_low_bit_bound`，当前实现还支持把 W tile 强度并入节点风险，形成一个轻量的加权折中：
+
+```text
+node_risk(v) = clamp(graph_risk(v) / risk_max, 0, 1)
+
+w_risk = clamp((w_strength - 1) / (w_reference - 1), 0, 1)
+
+effective_risk(v) =
+    (node_weight * node_risk(v) + w_weight * w_risk)
+    / (node_weight + w_weight)
+
+tolerance(v) =
+    min_tol + (max_tol - min_tol) * (1 - effective_risk(v))^gamma
+```
+
+这里有两个互补作用：
+
+```text
+1. w_strength 进入 remaining bound:
+   W tile 越强，剩余低位的理论影响越大。
+
+2. w_risk 进入 tolerance:
+   W tile 越强，节点容忍度越保守。
+```
+
+因此最终 stop depth 不是固定比例，也不是只看 degree。它由三项共同决定：
+
+```text
+图传播风险: 哪些节点更需要保护。
+W tile 强度: 当前 GEMM tile 对低位误差是否敏感。
+runtime bound: 当前 depth 后剩余低位是否已经足够小。
+```
+
 真实 W tile 统计脚本：
 
 ```bash
@@ -184,6 +217,35 @@ module_p95  6.01      2.40%  0.82%      21.07%
 
 这说明 `W_strength` 不是简单让策略更保守，而是在同一套 node tolerance 下改变 stop-depth 分布：No-W 更激进、平均深度更低；Global/Module W-bound 更稳，当前 Cora 上 `module_p90` 是较好的折中点。
 
+进一步把 `W_strength` 映射成 `w_risk` 后，可以验证 node risk 和 W risk 的折中强度。Cora 3-run 结果如下：
+
+```text
+policy          node/w  AvgDepth  P6/P5          Drop   ExtraDrop  CostSave
+no_w_node       1.0/0.0 5.38      22.0/37.4%    2.55%  1.10%      27.67%
+module_p75_node 1.0/0.0 5.80      46.4/12.5%    2.55%  0.97%      23.41%
+module_p75_w20  0.8/0.2 6.01      59.4/0.0%     2.30%  0.85%      21.33%
+module_p75_w50  0.5/0.5 6.00      59.7/0.0%     2.40%  0.85%      21.26%
+module_p90_node 1.0/0.0 6.01      59.1/0.0%     2.27%  0.82%      21.00%
+module_p90_w20  0.8/0.2 6.01      59.1/0.0%     2.27%  0.80%      21.00%
+module_p90_w50  0.5/0.5 6.01      59.0/0.0%     2.40%  0.82%      21.07%
+```
+
+结论：
+
+```text
+1. No-W 最激进，AvgDepth 最低，但会把较多 miss nodes 推到 P5，drop 更高。
+2. 加入 W-bound 后，P5 基本被拉回 P6/P7，drop 更稳。
+3. 20% W risk 已经足够体现 W tile 强度约束；50% W risk 更保守，但没有继续带来精度收益。
+4. 当前 Cora 上 module_p90_node / module_p90_w20 是更稳的折中点。
+```
+
+对应输出：
+
+```text
+output/graphbit_weighted_bound_validation_cora_runs3/summary.tsv
+output/graphbit_weighted_bound_validation_cora_runs3/pareto.tsv
+```
+
 ## 2. CLI 参数入口
 
 参数定义在：
@@ -219,6 +281,13 @@ GraphhopSimhash/cli.py
 
 --precision_depth_bound_w_strength
     W tile 强度乘子。当前作为常数输入；后续可替换为 per-tile metadata。
+
+--precision_depth_bound_node_risk_weight
+--precision_depth_bound_w_risk_weight
+    effective_risk 中 node risk 和 W risk 的权重。
+
+--precision_depth_bound_w_risk_reference
+    把 w_strength 映射到 [0,1] 时使用的参考强度。
 
 --precision_depth_trace_export_dir
 --precision_depth_trace_export_configs

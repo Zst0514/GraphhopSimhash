@@ -918,6 +918,27 @@ def build_parser():
         ),
     )
     parser.add_argument(
+        "--precision_depth_bound_node_risk_weight",
+        type=float,
+        default=1.0,
+        help="Weight of graph node risk when forming nodewise effective risk.",
+    )
+    parser.add_argument(
+        "--precision_depth_bound_w_risk_weight",
+        type=float,
+        default=0.0,
+        help=(
+            "Weight of W-tile strength risk when forming nodewise effective risk. "
+            "Default 0 preserves the node-only tolerance used by earlier runs."
+        ),
+    )
+    parser.add_argument(
+        "--precision_depth_bound_w_risk_reference",
+        type=float,
+        default=1.5,
+        help="W-strength value treated as normalized W risk 1.0 in nodewise effective risk.",
+    )
+    parser.add_argument(
         "--precision_depth_bound_nodewise_min_depth",
         type=int,
         default=4,
@@ -1448,6 +1469,12 @@ def validate_args(parser, args):
         parser.error("--precision_depth_bound_tile_k must be positive")
     if args.precision_depth_bound_w_strength <= 0:
         parser.error("--precision_depth_bound_w_strength must be positive")
+    if args.precision_depth_bound_node_risk_weight < 0:
+        parser.error("--precision_depth_bound_node_risk_weight must be non-negative")
+    if args.precision_depth_bound_w_risk_weight < 0:
+        parser.error("--precision_depth_bound_w_risk_weight must be non-negative")
+    if args.precision_depth_bound_w_risk_reference <= 1.0:
+        parser.error("--precision_depth_bound_w_risk_reference must be > 1.0")
     if args.precision_depth_bound_nodewise_min_depth <= 0:
         parser.error("--precision_depth_bound_nodewise_min_depth must be positive")
     if args.precision_depth_bound_nodewise_min_depth > args.precision_depth_reference_bits:

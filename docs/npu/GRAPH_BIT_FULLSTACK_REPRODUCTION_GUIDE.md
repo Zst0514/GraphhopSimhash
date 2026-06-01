@@ -116,7 +116,7 @@ conservative:  global p90 W strength
 strict:        global p95 W strength
 ```
 
-然后把这些值填入 policy 的最后一列 `w_strength`，例如：
+然后把这些值填入 policy 的 `w_strength` 字段，例如：
 
 ```bash
 POLICIES=$'normal_w100:4:0.0:0.04:1.0:15:1.0:1.00\nnormal_w125:4:0.0:0.04:1.0:15:1.0:1.25' \
@@ -166,10 +166,41 @@ output/graphbit_w_bound_ablation/summary.tsv
 output/graphbit_w_bound_ablation/pareto.tsv
 ```
 
-`policies.txt` 的格式为：
+`policies.txt` 和手写 `POLICIES` 的格式为：
 
 ```text
-id:min_depth:min_tol:max_tol:gamma:risk_max:bound_scale:w_strength
+id:min_depth:min_tol:max_tol:gamma:risk_max:bound_scale[:w_strength[:node_weight:w_weight:w_reference]]
+```
+
+最短格式只设置 activation bound：
+
+```text
+normal:4:0.0:0.04:1.0:15:1.0
+```
+
+加入 W tile strength：
+
+```text
+module_p90:4:0.0:0.04:1.0:15:1.0:1.295612
+```
+
+加入 node risk / W risk 加权：
+
+```text
+module_p90_w20:4:0.0:0.04:1.0:15:1.0:1.295612:0.8:0.2:1.473038
+```
+
+含义：
+
+```text
+w_strength:
+    放大 remaining_low_bit_bound，表示当前 W tile 更敏感。
+
+node_weight / w_weight:
+    计算 effective_risk 时 node graph risk 和 W risk 的权重。
+
+w_reference:
+    把 w_strength 映射成 [0,1] W risk 的参考强度。
 ```
 
 当前 Cora 3-run 结果显示：
@@ -201,6 +232,23 @@ module_p95  6.01      2.40%  0.82%      21.07%
 在 Cora 上，`module_p90` 是当前最稳的点：相比 FullP8-miss 仍保留约 21% 的 encoder cost saving，同时把 drop 控制到 2.27%。如果更重视 cost，可以选 `global_p75/module_p75`；如果更重视稳健性，可以选 `module_p90/global_p90/global_p95`。
 
 这里的 `module_p*` 仍是 module-profile 加权得到的 scalar bound，用于 accuracy validation；真正 per-GEMM / per-tile 的 W metadata 应在 trace replay 中继续下沉。
+
+Node/W weighted bound 的 Cora 3-run 结果：
+
+```text
+policy          node/w  AvgDepth  Drop   ExtraDrop  CostSaveVsFull
+no_w_node       1.0/0.0 5.38      2.55%  1.10%      27.67%
+module_p75_w20  0.8/0.2 6.01      2.30%  0.85%      21.33%
+module_p90_node 1.0/0.0 6.01      2.27%  0.82%      21.00%
+module_p90_w20  0.8/0.2 6.01      2.27%  0.80%      21.00%
+```
+
+读取完整结果：
+
+```bash
+column -t -s $'\t' \
+  output/graphbit_weighted_bound_validation_cora_runs3/summary.tsv
+```
 
 一键 nodewise sweep：
 
