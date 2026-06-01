@@ -124,6 +124,84 @@ RUNS=1 DATASETS="cora pubmed" \
 bash GraphhopSimhash/scripts/run_t31_graphbit_nodewise_bound_sweep.sh
 ```
 
+### W-bound ablation
+
+为了验证 W tile 强度项是否真的有意义，当前提供三组自动化 ablation：
+
+```text
+No-W-bound:
+    remaining_bound = A_low_bound
+    对应 w_strength = 1.0。
+
+Global-W-bound:
+    remaining_bound = A_low_bound * global_W_strength
+    使用 LLaMA 全局 W tile profile 的 p75 / p90 / p95。
+
+Module-W-bound:
+    remaining_bound = A_low_bound * module_weighted_W_strength
+    先按 q/k/v/o/gate/up/down 的 MAC 占比做 module-level 加权。
+```
+
+运行 Cora 3-run：
+
+```bash
+DATASETS="cora" RUNS=3 \
+OUT_ROOT=/home/zhangshangtong/Transformer/OFA/output/graphbit_w_bound_ablation_cora_runs3 \
+bash GraphhopSimhash/scripts/run_graphbit_w_bound_ablation.sh
+```
+
+后续 Cora/PubMed 联合复核可以用：
+
+```bash
+DATASETS="cora pubmed" RUNS=3 \
+bash GraphhopSimhash/scripts/run_graphbit_w_bound_ablation.sh
+```
+
+输出：
+
+```text
+output/graphbit_w_bound_ablation/policies.txt
+output/graphbit_w_bound_ablation/w_global_summary.tsv
+output/graphbit_w_bound_ablation/summary.tsv
+output/graphbit_w_bound_ablation/pareto.tsv
+```
+
+`policies.txt` 的格式为：
+
+```text
+id:min_depth:min_tol:max_tol:gamma:risk_max:bound_scale:w_strength
+```
+
+当前 Cora 3-run 结果显示：
+
+```text
+No-W-bound:
+    AvgDepth 更低，cost saving 更高，
+    但会把更多 miss nodes 推到 P5，drop 更大。
+
+Global / Module W-bound:
+    W_strength > 1 会提高 remaining bound，
+    部分节点从 P5 回到 P6/P7，
+    cost saving 略低，但 drop 更稳。
+```
+
+Cora 3-run result:
+
+```text
+policy      AvgDepth  Drop   ExtraDrop  CostSaveVsFull
+now_no_w    5.38      2.56%  0.98%      27.76%
+global_p75  5.80      2.42%  0.97%      23.33%
+global_p90  6.02      2.29%  0.84%      21.00%
+global_p95  6.02      2.29%  0.84%      21.00%
+module_p75  5.80      2.40%  0.93%      23.33%
+module_p90  6.01      2.27%  0.82%      21.00%
+module_p95  6.01      2.40%  0.82%      21.07%
+```
+
+在 Cora 上，`module_p90` 是当前最稳的点：相比 FullP8-miss 仍保留约 21% 的 encoder cost saving，同时把 drop 控制到 2.27%。如果更重视 cost，可以选 `global_p75/module_p75`；如果更重视稳健性，可以选 `module_p90/global_p90/global_p95`。
+
+这里的 `module_p*` 仍是 module-profile 加权得到的 scalar bound，用于 accuracy validation；真正 per-GEMM / per-tile 的 W metadata 应在 trace replay 中继续下沉。
+
 一键 nodewise sweep：
 
 ```bash

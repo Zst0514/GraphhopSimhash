@@ -130,6 +130,60 @@ strength_max  = max_j(sum_k |W[j,k]|)  / (mean_abs(W_layer) * tile_k)
 
 推荐先用 `strength_p95` 的全局 p50/p75/p90/p95 作为 `w_strength` sweep 值。
 
+当前 W-bound ablation 分成三类：
+
+```text
+No-W-bound:
+    w_strength = 1.0
+    只看 activation low-bit bound。
+
+Global-W-bound:
+    w_strength = global p75 / p90 / p95
+    用全模型 W tile profile 给一个统一保守因子。
+
+Module-W-bound:
+    w_strength = MAC-weighted module p75 / p90 / p95
+    q/k/v/o/gate/up/down 按线性层 MAC 占比合成一个 module-aware 因子。
+```
+
+生成并运行这三组 policy：
+
+```bash
+DATASETS="cora" RUNS=1 \
+bash GraphhopSimhash/scripts/run_graphbit_w_bound_ablation.sh
+```
+
+关键中间文件：
+
+```text
+scripts/build_graphbit_w_bound_policies.py
+output/graphbit_w_bound_ablation/policies.txt
+output/graphbit_w_bound_ablation/summary.tsv
+output/graphbit_w_bound_ablation/pareto.tsv
+```
+
+这组 ablation 用来回答一个具体问题：
+
+```text
+在相同 node tolerance 下，
+加入 W tile 强度是否能让 stop-depth 更保守地避开高风险低位跳过？
+```
+
+如果 W-bound 在相近 AvgDepth 下 drop 更低，或者在相近 drop 下 AvgDepth 更低，说明 W tile 强度项是有效的。当前 Cora 3-run 结果显示，W-bound 会把一部分 P5 决策推回 P6/P7，drop 更稳：
+
+```text
+policy      AvgDepth  Drop   ExtraDrop  CostSaveVsFull
+now_no_w    5.38      2.56%  0.98%      27.76%
+global_p75  5.80      2.42%  0.97%      23.33%
+global_p90  6.02      2.29%  0.84%      21.00%
+global_p95  6.02      2.29%  0.84%      21.00%
+module_p75  5.80      2.40%  0.93%      23.33%
+module_p90  6.01      2.27%  0.82%      21.00%
+module_p95  6.01      2.40%  0.82%      21.07%
+```
+
+这说明 `W_strength` 不是简单让策略更保守，而是在同一套 node tolerance 下改变 stop-depth 分布：No-W 更激进、平均深度更低；Global/Module W-bound 更稳，当前 Cora 上 `module_p90` 是较好的折中点。
+
 ## 2. CLI 参数入口
 
 参数定义在：
