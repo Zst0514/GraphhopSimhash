@@ -342,12 +342,98 @@ def _adapter_forward(adapter, x):
         raw_delta = adapter(x)
         correction_gate = torch.ones(raw_delta.size(0), 1, dtype=raw_delta.dtype, device=raw_delta.device)
         accept_gate = torch.ones(raw_delta.size(0), 1, dtype=raw_delta.dtype, device=raw_delta.device)
+    accept_gate = _apply_accept_calibration(adapter, accept_gate)
     if not bool(getattr(adapter, "supports_gate", False)):
         correction_gate = None
         gated_residual = raw_delta
     else:
         gated_residual = raw_delta * correction_gate
     return gated_residual, raw_delta, correction_gate, accept_gate
+
+
+def _apply_accept_calibration(adapter, accept_gate):
+    if accept_gate is None:
+        return None
+    scale = getattr(adapter, "accept_calibration_scale", None)
+    bias = getattr(adapter, "accept_calibration_bias", None)
+    if scale is None or bias is None:
+        return accept_gate
+    logits = torch.logit(accept_gate.clamp(min=1e-4, max=1.0 - 1e-4))
+    return torch.sigmoid(logits * float(scale) + float(bias))
+
+
+def _fit_accept_calibration(positive_accept_gate, positive_targets=None, negative_accept_gate=None):
+    probs = []
+    labels = []
+
+    if positive_accept_gate is not None and int(positive_accept_gate.numel()) > 0:
+        pos_prob = positive_accept_gate.detach().view(-1, 1).to(dtype=torch.float32)
+        if positive_targets is None:
+            pos_target = torch.ones_like(pos_prob)
+        else:
+            pos_target = positive_targets.detach().view(-1, 1).to(device=pos_prob.device, dtype=pos_prob.dtype)
+        probs.append(pos_prob)
+        labels.append(pos_target)
+
+    if negative_accept_gate is not None and int(negative_accept_gate.numel()) > 0:
+        neg_prob = negative_accept_gate.detach().view(-1, 1).to(dtype=torch.float32)
+        neg_target = torch.zeros_like(neg_prob)
+        probs.append(neg_prob)
+        labels.append(neg_target)
+
+    if not probs:
+        return None
+
+    prob_tensor = torch.cat(probs, dim=0).clamp(min=1e-4, max=1.0 - 1e-4)
+    label_tensor = torch.cat(labels, dim=0)
+    positives = int((label_tensor >= 0.5).sum().item())
+    negatives = int((label_tensor < 0.5).sum().item())
+    if positives == 0 or negatives == 0:
+        return None
+
+    logit_tensor = torch.logit(prob_tensor)
+    scale = torch.nn.Parameter(torch.ones(1, device=logit_tensor.device, dtype=logit_tensor.dtype))
+    bias = torch.nn.Parameter(torch.zeros(1, device=logit_tensor.device, dtype=logit_tensor.dtype))
+    optimizer = torch.optim.LBFGS([scale, bias], lr=0.5, max_iter=64, line_search_fn="strong_wolfe")
+
+    def _closure():
+        optimizer.zero_grad()
+        calibrated_logits = logit_tensor * scale + bias
+        loss = F.binary_cross_entropy_with_logits(calibrated_logits, label_tensor)
+        loss.backward()
+        return loss
+
+    try:
+        optimizer.step(_closure)
+    except RuntimeError:
+        return None
+
+    with torch.no_grad():
+        calibrated = torch.sigmoid(logit_tensor * scale + bias)
+        loss = F.binary_cross_entropy(calibrated, label_tensor)
+    return {
+        "scale": float(scale.detach().item()),
+        "bias": float(bias.detach().item()),
+        "samples": int(label_tensor.numel()),
+        "positives": positives,
+        "negatives": negatives,
+        "loss": float(loss.detach().item()),
+    }
+
+
+def _extract_accept_calibration(adapter):
+    scale = getattr(adapter, "accept_calibration_scale", None)
+    bias = getattr(adapter, "accept_calibration_bias", None)
+    if scale is None or bias is None:
+        return None
+    return {
+        "scale": float(scale),
+        "bias": float(bias),
+        "samples": int(getattr(adapter, "accept_calibration_samples", 0)),
+        "positives": int(getattr(adapter, "accept_calibration_positives", 0)),
+        "negatives": int(getattr(adapter, "accept_calibration_negatives", 0)),
+        "loss": float(getattr(adapter, "accept_calibration_loss", 0.0)),
+    }
 
 
 def _compute_residual_loss(
@@ -403,7 +489,8 @@ def _compute_residual_loss(
             accept_target = torch.ones_like(accept_gate)
         else:
             accept_target = accept_targets.to(device=accept_gate.device, dtype=accept_gate.dtype).view_as(accept_gate)
-        loss = loss + float(accept_loss_weight) * F.smooth_l1_loss(accept_gate, accept_target)
+        accept_prob = accept_gate.clamp(min=1e-4, max=1.0 - 1e-4)
+        loss = loss + float(accept_loss_weight) * F.binary_cross_entropy(accept_prob, accept_target)
     return loss
 
 
@@ -449,6 +536,7 @@ def _fit_residual_adapter(
     last_loss = 0.0
     correction_gate_mean = 1.0
     accept_gate_mean = 1.0
+    negative_accept_gate_eval = None
     for _epoch in range(int(epochs)):
         adapter.train()
         optimizer.zero_grad()
@@ -482,15 +570,31 @@ def _fit_residual_adapter(
                     neg_loss = neg_loss + float(gate_sparsity_weight) * neg_correction_gate.mean()
             if neg_accept_gate is not None and float(accept_loss_weight) > 0.0:
                 zeros = torch.zeros_like(neg_accept_gate)
-                neg_loss = neg_loss + float(accept_loss_weight) * F.smooth_l1_loss(neg_accept_gate, zeros)
+                neg_prob = neg_accept_gate.clamp(min=1e-4, max=1.0 - 1e-4)
+                neg_loss = neg_loss + float(accept_loss_weight) * F.binary_cross_entropy(neg_prob, zeros)
             if float(gate_sparsity_weight) > 0.0:
                 neg_loss = neg_loss + float(gate_sparsity_weight) * neg_raw_delta.pow(2).mean()
             loss = loss + float(negative_gate_weight) * neg_loss
+            negative_accept_gate_eval = neg_accept_gate.detach()
         loss.backward()
         optimizer.step()
         last_loss = float(loss.detach().item())
         correction_gate_mean = 1.0 if correction_gate is None else float(correction_gate.detach().mean().item())
         accept_gate_mean = 1.0 if accept_gate is None else float(accept_gate.detach().mean().item())
+    accept_calibration = _fit_accept_calibration(
+        accept_gate,
+        positive_targets=accept_targets,
+        negative_accept_gate=negative_accept_gate_eval,
+    )
+    if accept_calibration is not None:
+        adapter.accept_calibration_scale = float(accept_calibration["scale"])
+        adapter.accept_calibration_bias = float(accept_calibration["bias"])
+        adapter.accept_calibration_samples = int(accept_calibration["samples"])
+        adapter.accept_calibration_positives = int(accept_calibration["positives"])
+        adapter.accept_calibration_negatives = int(accept_calibration["negatives"])
+        adapter.accept_calibration_loss = float(accept_calibration["loss"])
+        with torch.no_grad():
+            accept_gate_mean = float(_apply_accept_calibration(adapter, accept_gate).mean().item())
     return adapter, last_loss, correction_gate_mean, accept_gate_mean
 
 
@@ -1257,6 +1361,8 @@ def train_residual_adapter(
             "support_aware": False,
             "adapter_type": str(adapter_type),
             "accept_mode": str(accept_mode),
+            "accept_calibration": None,
+            "support_accept_calibration": {},
             "bucket_mode": str(bucket_mode),
             "class_aware_accept": bool(class_aware_accept),
             "class_accept_labelled": 0,
@@ -1420,6 +1526,7 @@ def train_residual_adapter(
     support_losses = {}
     support_gate_means = {}
     support_accept_gate_means = {}
+    support_accept_calibration = {}
     min_bucket_pairs = max(32, int(rank))
 
     for support_value in sorted(set(int(v) for v in bucket_values.detach().cpu().tolist())):
@@ -1461,6 +1568,9 @@ def train_residual_adapter(
         support_losses[int(support_value)] = bucket_loss
         support_gate_means[int(support_value)] = bucket_gate_mean
         support_accept_gate_means[int(support_value)] = bucket_accept_gate_mean
+        calibration_info = _extract_accept_calibration(bucket_adapter)
+        if calibration_info is not None:
+            support_accept_calibration[int(support_value)] = calibration_info
 
     if adapters_by_support:
         adapter = SupportAwareResidualAdapter(
@@ -1490,6 +1600,8 @@ def train_residual_adapter(
         "support_aware": bool(adapters_by_support),
         "adapter_type": str(adapter_type),
         "accept_mode": str(accept_mode),
+        "accept_calibration": _extract_accept_calibration(global_adapter),
+        "support_accept_calibration": support_accept_calibration,
         "bucket_mode": str(bucket_mode),
         "class_aware_accept": bool(class_aware_accept),
         "class_accept_labelled": int(class_accept_labelled),

@@ -8,13 +8,13 @@
 
 `W4A16` 和 `W4A8` 是两轮独立重跑，所以它们各自配对的 `FP16 baseline` 允许有轻微差异；掉点始终以各自那一轮三跑 summary 里的 baseline 为准。
 
-2026-06-01 起，`ST + W4A16` 的默认 recipe 做了一个定向修正：仅对 `cora` 保持 AWQ 的 `MSE clip` 开启，用来修复 `DistilBERT/ST` 在该数据集上的异常掉点；`pubmed` / `arxiv` 仍保持原先的非 `MSE clip` 默认，除非显式传 `--awq_force_mse_clip`。
+2026-06-01 起，`ST + cora + W4A16/W4A8` 的默认 recipe 做了一个定向修正：保留 AWQ 的 `MSE clip` 开启。原因是这两条配置共享同一份 `W4` AWQ 搜索结果，而 `DistilBERT/ST` 在 `cora` 上对该搜索策略非常敏感；`pubmed` / `arxiv` 仍保持原先的非 `MSE clip` 默认，除非显式传 `--awq_force_mse_clip`。
 
 ## ST 结果
 
 | Dataset | FP16 Acc (W4A16 run) | W4A16 Acc | W4A16 Drop | FP16 Acc (W4A8 run) | W4A8 Acc | W4A8 Drop |
 |---|---:|---:|---:|---:|---:|---:|
-| Cora | 0.6773 | 0.6754 | 0.19% | 0.6773 | 0.6662 | 1.11% |
+| Cora | 0.6773 | 0.6754 | 0.19% | 0.6773 | 0.6759 | 0.15% |
 | PubMed | 0.7452 | 0.7440 | 0.11% | 0.7452 | 0.7445 | 0.07% |
 | Arxiv | 0.6688 | 0.6671 | 0.17% | 0.6688 | 0.6678 | 0.10% |
 
@@ -40,13 +40,13 @@
 
 本轮文档中的 `W4A16` 和 `W4A8` 汇总都采用 `--runs 3` 重新评测后的日志，不再使用旧的单跑结果。
 
-本次为修复 `ST + cora + W4A16` 的异常掉点，重新生成并复核了 `ST` 的 3 组 `W4A16` pool：
+本次为修复 `ST + cora + W4A16/W4A8` 的异常掉点，重新生成并复核了 `ST` 的 3 组 `W4A16` pool 与 3 组 `W4A8` pool：
 
 - `cora`: 在最终默认逻辑下重生，保留 AWQ `MSE clip`
 - `pubmed`: 恢复为默认非 `MSE clip`
 - `arxiv`: 恢复为默认非 `MSE clip`
 
-`LLaMA` 的 `W4A16` 结果和全部 `W4A8` 结果未改 recipe，只沿用已有 pool 重新评测。
+`LLaMA` 的 `W4A16/W4A8` 结果未改 recipe，只沿用已有 pool 重新评测。
 
 ## 对应评测日志
 
@@ -80,3 +80,4 @@
 - `output/quant_pools/arxiv_llama2_7b_fp16_w4a16.log`
 - `output/quant_pools/cora_st_w4a16_targeted_default.log`
 - `output/quant_pools/st_w4a16_restore_nomse_pubmed_arxiv.log`
+- `output/quant_pools/st_w4a8_refresh_after_w4a16_sync.log`

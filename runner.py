@@ -699,6 +699,38 @@ def save_reuse_trace_cache(cache_path, metadata, trace, stats, log_important):
     )
 
 
+def rebuild_controller_cache_from_reuse_trace(controller, route_bundle, verify_features, target_features, trace, log_important):
+    if controller is None or trace is None:
+        return
+    if not hasattr(controller, "_reset_route_caches") or not hasattr(controller, "_cache_computed_entry"):
+        return
+    hit_mask = trace.get("hit_mask")
+    if hit_mask is None or not torch.is_tensor(hit_mask):
+        return
+
+    controller._reset_route_caches()
+    hash_feature_routes = controller._normalize_hash_feature_routes(route_bundle["hash_route_features"])
+    all_hashes = [
+        controller._compute_route_fingerprint(route_features, route_idx)
+        for route_idx, route_features in enumerate(hash_feature_routes)
+    ]
+    computed_nodes = (~hit_mask.to(device=verify_features.device, dtype=torch.bool)).nonzero(as_tuple=False).view(-1)
+    for node_idx in computed_nodes.detach().cpu().tolist():
+        query_hashes = [route_hashes[int(node_idx)] for route_hashes in all_hashes]
+        entry = {
+            "node_id": int(node_idx),
+            "cheap_feat": verify_features[int(node_idx)].detach().clone(),
+            "cached_emb": target_features[int(node_idx)].detach().clone(),
+            "timestamp": controller._time_counter,
+        }
+        controller._time_counter += 1
+        controller._cache_computed_entry(query_hashes, entry)
+    log_important(
+        f"[ReuseTraceCache] rebuilt controller memo tables from trace "
+        f"| computed={int(computed_nodes.numel())}"
+    )
+
+
 def evaluate_with_controller(model, data, controller, route_bundle, verify_features, oracle_embs, args):
     reconstructed_embs, _hits = controller.query_full_batch(
         route_bundle["hash_route_features"],
@@ -1506,6 +1538,14 @@ def run_residual_reuse_experiment(args):
                     if cached_trace is not None:
                         trace, stats = cached_trace
                         direct_features, _hits = apply_reuse_trace_to_embeddings(trace, target_features)
+                        rebuild_controller_cache_from_reuse_trace(
+                            controller,
+                            route_bundle,
+                            verify_features,
+                            target_features,
+                            trace,
+                            log_important,
+                        )
                         controller.last_query_trace = trace
                         controller.stats = stats
 

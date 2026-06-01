@@ -87,6 +87,12 @@ run_case() {
         --datasets "${dataset}"
         --residual_embedding_path "${ST_CORA_PATH}"
         --residual_fit_profile st
+        --residual_class_aware_accept
+        --residual_classifier_accept_gate
+        --residual_classifier_accept_mode both
+        --residual_classifier_accept_max_kl 0.2
+        --residual_classifier_accept_after_residual
+        --residual_classifier_accept_probe_alpha 0.125
         --residual_positive_error_max -1
         --residual_offline_negative_anchors_per_node 0
         --residual_negative_gate_weight 0.0
@@ -100,11 +106,17 @@ run_case() {
         --datasets "${dataset}"
         --residual_embedding_path "${ST_PUBMED_PATH}"
         --residual_fit_profile st
+        --residual_class_aware_accept
+        --residual_classifier_accept_gate
+        --residual_classifier_accept_mode both
+        --residual_classifier_accept_max_kl 0.2
+        --residual_classifier_accept_after_residual
+        --residual_classifier_accept_probe_alpha 0.125
         --residual_positive_error_max 0.40
         --residual_offline_negative_anchors_per_node 4
         --residual_negative_error_min 0.45
         --residual_negative_gate_weight 1.0
-        --residual_accept_loss_weight 0.0
+        --residual_accept_loss_weight 1.0
         --residual_gate_sparsity_weight 0.02
       )
       ;;
@@ -141,8 +153,13 @@ run_case() {
         --residual_offline_negative_anchors_per_node 4
         --residual_negative_error_min 0.45
         --residual_negative_gate_weight 1.0
-        --residual_accept_loss_weight 0.0
+        --residual_accept_loss_weight 1.0
         --residual_gate_sparsity_weight 0.02
+        --residual_classifier_accept_gate
+        --residual_classifier_accept_mode both
+        --residual_classifier_accept_max_kl 0.2
+        --residual_classifier_accept_after_residual
+        --residual_classifier_accept_probe_alpha 0.125
       )
       ;;
     *)
