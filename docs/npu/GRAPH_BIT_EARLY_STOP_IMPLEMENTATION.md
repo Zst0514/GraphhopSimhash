@@ -15,6 +15,211 @@ docs/npu/GRAPH_BIT_NPU_DESIGN.md
 docs/npu/GRAPH_BIT_FULLSTACK_REPRODUCTION_GUIDE.md
 ```
 
+## 0. Current V2 Direction: Tile-Aware Risk Scoring
+
+前面的 hard validation 说明，单纯使用
+
+```text
+omitted_low_bits / 255
+```
+
+作为 stop bound 过于乐观。真正影响当前 GEMM tile 输出的是：
+
+```text
+A_low @ W_tile
+```
+
+因此 Graph-Bit 的下一版 stop policy 不再把低位幅度单独当作判断依据，而是把三项合在一起：
+
+```text
+node risk:
+    degree / propagation risk，表示该节点错误传播到 GNN 后端的风险。
+
+W tile risk:
+    当前 W tile 的数值强度，表示低位 activation 乘上这块权重后是否容易被放大。
+
+low-bit budget:
+    停在某个 depth 后，剩余 activation low bits 的最大幅度。
+```
+
+核心评分：
+
+```text
+node_norm(v) = degree_q(v) / 15
+
+w_norm(tile) =
+    clamp(W_tile_strength / reference_strength, 0, w_cap)
+
+low_norm(depth) =
+    (2^(8 - depth) - 1) / 255
+
+risk_score(v, tile, depth) =
+    node_norm(v)^alpha
+    * w_norm(tile)^beta
+    * low_norm(depth)
+```
+
+停止规则：
+
+```text
+for depth in 8, 7, 6, 5, 4:
+    score = risk_score(v, tile, depth)
+
+    if score <= tau:
+        stop at depth
+        break
+```
+
+这版机制的含义是：
+
+```text
+同一个低风险节点：
+    在弱 W tile 上可以更早停止。
+    在强 W tile / outlier tile 上需要继续执行更多 bit-plane。
+
+同一个 W tile：
+    服务高 degree / 高传播风险节点时更保守。
+    服务低风险节点时更激进。
+```
+
+第一版参数保持轻量：
+
+```text
+alpha = 1.0
+beta  = 1.0
+w_cap = 2.0
+
+tau sweep:
+    0.005 / 0.01 / 0.02 / 0.04 / 0.08
+```
+
+输出指标：
+
+```text
+AvgDepth
+P8/P7/P6/P5/P4 distribution
+classification drop
+actual_delta_ratio distribution
+ONNXim activity / replay cost
+```
+
+这样得到的 stop depth 不是预设比例，也不是直接指定 P8/P6/P5，而是由：
+
+```text
+node risk + W tile strength + remaining low-bit budget
+```
+
+共同决定。
+
+### 0.1 W Tile Strength
+
+对 LLaMA Linear 层，GEMM 形式为：
+
+```text
+X[M, K] @ W[K, N]
+```
+
+实现里通常按 tile 执行：
+
+```text
+X_tile[M_t, K_t] @ W_tile[K_t, N_t]
+```
+
+当前 profiling 默认：
+
+```text
+K_t = 128
+N_t = 128
+```
+
+也就是一个 W tile 约包含：
+
+```text
+128 * 128 = 16384 weights
+```
+
+如果权重是 W4，裸权重大约是：
+
+```text
+16384 * 4 bit = 65536 bit = 8 KB
+```
+
+相比之下，LLaMA-7B 的全模型权重是 GB 级，不可能整体常驻一个小阵列的 RF/SRAM；硬件实际复用的是一块块 W tile。
+
+W tile strength 可以用下面几种统计量：
+
+```text
+mean_abs:
+    mean(abs(W_tile))
+
+max_abs:
+    max(abs(W_tile))
+
+row_l1_p95:
+    对 W_tile 每个输出 channel 计算 sum(abs(w_row))，
+    再取 p95，表示这块 tile 的保守强度。
+```
+
+推荐第一版使用：
+
+```text
+W_tile_strength = row_l1_p95 / (layer_mean_abs * K_t)
+```
+
+原因是：
+
+```text
+1. 它比 mean_abs 更能保护 outlier output channel。
+2. 它比 max_abs 没那么极端，不会让所有 tile 都退化成 P8。
+3. 它不需要 learned predictor，只是模型权重的静态统计。
+```
+
+### 0.2 Why 128x128 Is Not a Fixed Assumption
+
+`128x128` 只是当前 ONNXim / profiling 的默认 tile，用来和 systolic-array block 以及 LLaMA hidden size 对齐：
+
+```text
+K = 4096 可以被 128 整除。
+N = 4096 / 11008 也可以按 128 分块处理。
+W4 tile 大小约 8 KB，适合放入片上 SRAM/RF 做局部复用。
+```
+
+但 Graph-Bit 机制不依赖固定 `128x128`。tile size 会影响三件事：
+
+```text
+1. W strength 分布
+   tile 越大，越容易包含 outlier channel，bound 更保守。
+
+2. control granularity
+   tile 越小，stop decision 越细；但 metadata、调度和边界处理开销更高。
+
+3. W-stationary reuse
+   tile 越大，单次 W load 更多；如果 bucket 内 token rows 足够多，摊薄收益更明显。
+```
+
+因此后续需要做 tile-size sensitivity：
+
+```text
+K_t/N_t:
+    64x64
+    64x128
+    128x128
+    256x128
+    256x256
+```
+
+每组都输出：
+
+```text
+W strength distribution
+AvgDepth
+P8/P7/P6/P5/P4 distribution
+drop
+activity / replay cost
+```
+
+如果不同 tile size 下 Pareto 趋势一致，说明机制是 general 的；如果结论只在 `128x128` 成立，就不能把它写成架构主结论，只能作为某个硬件配置下的 profiling 结果。
+
 ## 1. 核心定义
 
 Graph-Bit 里的 early stop 不是 learned predictor，也不是 oracle error。它的基本逻辑是：
