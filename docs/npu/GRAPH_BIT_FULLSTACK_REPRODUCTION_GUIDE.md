@@ -68,6 +68,62 @@ remaining_low_bit_bound(depth)
 
 `W_strength` 越大，说明当前 W tile 对低位 activation 误差更敏感，同样的 tolerance 下会更倾向于执行到更深 bit-depth。当前代码用 `--precision_depth_bound_w_strength` 做常数扫描；后续可以替换成真实 W tile metadata。
 
+### W tile strength profile
+
+当前建议先使用：
+
+```text
+tile_k = 128
+tile_n = 128
+```
+
+原因：
+
+```text
+tile_k=128:
+    对齐当前 AWQ group size 和 reduction tile。
+    bound 主要沿 K 维度累计低位误差，因此 K tile 是关键参数。
+
+tile_n=128:
+    对齐 128x128 级别 systolic / ONNXim microbenchmark 的输出 tile。
+    它主要影响 W tile 统计和 scheduler 粒度，不直接改变 A_low_bound。
+```
+
+真实 W tile 强度可以从 LLaMA 权重中统计：
+
+```bash
+/home/zhangshangtong/.conda/envs/OFA/bin/python \
+  GraphhopSimhash/scripts/profile_llama_w_tile_strength.py \
+  --tile_k 128 \
+  --tile_n 128 \
+  --output_dir output/graphbit_w_tile_strength/llama2_7b_k128_n128
+```
+
+输出：
+
+```text
+output/graphbit_w_tile_strength/llama2_7b_k128_n128/global_summary.tsv
+output/graphbit_w_tile_strength/llama2_7b_k128_n128/module_summary.tsv
+output/graphbit_w_tile_strength/llama2_7b_k128_n128/manifest.json
+```
+
+`manifest.json` 中会给出建议的 scalar sweep：
+
+```text
+optimistic:    global p50 W strength
+balanced:      global p75 W strength
+conservative:  global p90 W strength
+strict:        global p95 W strength
+```
+
+然后把这些值填入 policy 的最后一列 `w_strength`，例如：
+
+```bash
+POLICIES=$'normal_w100:4:0.0:0.04:1.0:15:1.0:1.00\nnormal_w125:4:0.0:0.04:1.0:15:1.0:1.25' \
+RUNS=1 DATASETS="cora pubmed" \
+bash GraphhopSimhash/scripts/run_t31_graphbit_nodewise_bound_sweep.sh
+```
+
 一键 nodewise sweep：
 
 ```bash

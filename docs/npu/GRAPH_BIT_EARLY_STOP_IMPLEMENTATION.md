@@ -110,6 +110,26 @@ remaining_low_bit_bound(depth)
 
 其中 `w_strength` 表示当前 W tile 相对全局平均权重强度的倍数。`w_strength > 1` 时，同样跳过低位 activation 的风险更高；`w_strength < 1` 时，低位可跳过空间更大。第一版用常数扫描验证机制，后续再接真实 `mean(abs(W_tile)) / global_mean(abs(W))`。
 
+真实 W tile 统计脚本：
+
+```bash
+/home/zhangshangtong/.conda/envs/OFA/bin/python \
+  GraphhopSimhash/scripts/profile_llama_w_tile_strength.py \
+  --tile_k 128 \
+  --tile_n 128 \
+  --output_dir output/graphbit_w_tile_strength/llama2_7b_k128_n128
+```
+
+脚本按 LLaMA Linear 权重 `[N, K]` 切 tile，并统计：
+
+```text
+strength_mean = mean_j(sum_k |W[j,k]|) / (mean_abs(W_layer) * tile_k)
+strength_p95  = p95_j(sum_k |W[j,k]|)  / (mean_abs(W_layer) * tile_k)
+strength_max  = max_j(sum_k |W[j,k]|)  / (mean_abs(W_layer) * tile_k)
+```
+
+推荐先用 `strength_p95` 的全局 p50/p75/p90/p95 作为 `w_strength` sweep 值。
+
 ## 2. CLI 参数入口
 
 参数定义在：
