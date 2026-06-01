@@ -56,6 +56,18 @@ requested depth -> nearest generated pool: P8/P7/P6/P5/P4
 
 也就是说，`Degree/TSER/Context` 不直接指定固定比例的 P8/P6/P5/P4；它们只提供逐节点风险，最终 stop depth 由 bound 判断得到。
 
+当前 bound 的第一版实现把 W tile 数值强度写成显式参数：
+
+```text
+A_low_bound(depth) = (2^(8 - depth) - 1) / 255
+W_strength         = mean_abs(W_tile) / global_mean_abs(W)  # 当前先用常数近似
+
+remaining_low_bit_bound(depth)
+    = bound_scale * A_low_bound(depth) * sqrt(tile_k / 128) * W_strength
+```
+
+`W_strength` 越大，说明当前 W tile 对低位 activation 误差更敏感，同样的 tolerance 下会更倾向于执行到更深 bit-depth。当前代码用 `--precision_depth_bound_w_strength` 做常数扫描；后续可以替换成真实 W tile metadata。
+
 一键 nodewise sweep：
 
 ```bash
@@ -91,7 +103,7 @@ strong:
 自定义 policy：
 
 ```bash
-POLICIES=$'my_policy:4:0.0:0.025:1.0:15:1.0' \
+POLICIES=$'my_policy:4:0.0:0.025:1.0:15:1.0:1.25' \
 RUNS=1 DATASETS="cora" \
 bash GraphhopSimhash/scripts/run_t31_graphbit_nodewise_bound_sweep.sh
 ```
@@ -99,8 +111,10 @@ bash GraphhopSimhash/scripts/run_t31_graphbit_nodewise_bound_sweep.sh
 字段格式：
 
 ```text
-id:min_depth:min_tol:max_tol:gamma:risk_max:bound_scale
+id:min_depth:min_tol:max_tol:gamma:risk_max:bound_scale[:w_strength]
 ```
+
+最后一个 `w_strength` 可省略，默认是 `1.0`。
 
 选择默认 policy 时不要只看单数据集。优先看：
 
@@ -626,7 +640,7 @@ gamma 越大:
 示例：
 
 ```bash
-POLICIES=$'mild:4:0.0:0.02:1.0:15:1.0\nnormal:4:0.0:0.04:1.0:15:1.0' \
+POLICIES=$'mild:4:0.0:0.02:1.0:15:1.0:1.0\nnormal:4:0.0:0.04:1.0:15:1.0:1.25' \
 RUNS=1 DATASETS="cora" \
 bash GraphhopSimhash/scripts/run_t31_graphbit_nodewise_bound_sweep.sh
 ```

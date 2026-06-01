@@ -96,6 +96,20 @@ op sensitivity:
 
 因此图风险不直接指定最终 P8/P6/P5/P4，而是给出节点级 tolerance；当前 tile 的 stop depth 由剩余 activation 低位上界和 W tile 强度共同决定。
 
+当前代码里的 W tile 强度先用一个显式标量实现：
+
+```text
+A_low_bound(depth) = (2^(8 - depth) - 1) / 255
+
+remaining_low_bit_bound(depth)
+    = bound_scale
+    * A_low_bound(depth)
+    * sqrt(tile_k / 128)
+    * w_strength
+```
+
+其中 `w_strength` 表示当前 W tile 相对全局平均权重强度的倍数。`w_strength > 1` 时，同样跳过低位 activation 的风险更高；`w_strength < 1` 时，低位可跳过空间更大。第一版用常数扫描验证机制，后续再接真实 `mean(abs(W_tile)) / global_mean(abs(W))`。
+
 ## 2. CLI 参数入口
 
 参数定义在：
@@ -128,6 +142,9 @@ GraphhopSimhash/cli.py
 
 --precision_depth_bound_tile_k
     bound 估计使用的 K tile 大小，默认 128。
+
+--precision_depth_bound_w_strength
+    W tile 强度乘子。当前作为常数输入；后续可替换为 per-tile metadata。
 
 --precision_depth_trace_export_dir
 --precision_depth_trace_export_configs

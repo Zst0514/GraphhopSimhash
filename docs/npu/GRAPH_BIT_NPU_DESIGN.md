@@ -247,6 +247,20 @@ op sensitivity:
 
 也就是说，degree / propagation risk 只决定节点级容忍度；当前 GEMM tile 是否能跳过低位，由 activation 剩余低位上界和 W tile 强度共同决定。Q/K、V/O、FFN up/down 等算子敏感度先不进入主线，只作为后续消融项。
 
+当前实现把 W tile 强度先落成可调标量：
+
+```text
+A_low_bound(depth) = (2^(8 - depth) - 1) / 255
+
+remaining_bound(depth)
+    = bound_scale
+    * A_low_bound(depth)
+    * sqrt(tile_k / 128)
+    * w_strength
+```
+
+`w_strength` 表示当前 W tile 的相对数值强度。强 W tile 会放大低位 activation 的剩余误差上界，因此更不容易 early stop。第一版实验先扫常数 `w_strength`，后续硬件 trace 可以把它替换成真实的 W tile 统计。
+
 关键点：
 
 ```text

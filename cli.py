@@ -908,6 +908,16 @@ def build_parser():
         help="Reduction tile size used by the bound estimator.",
     )
     parser.add_argument(
+        "--precision_depth_bound_w_strength",
+        type=float,
+        default=1.0,
+        help=(
+            "W tile strength multiplier used by the predictor-free bound. "
+            "Stage-1 uses a constant value; future hardware traces can replace "
+            "this with per-tile metadata."
+        ),
+    )
+    parser.add_argument(
         "--precision_depth_bound_nodewise_min_depth",
         type=int,
         default=4,
@@ -1436,6 +1446,8 @@ def validate_args(parser, args):
         parser.error("--precision_depth_bound_scale must be positive")
     if args.precision_depth_bound_tile_k <= 0:
         parser.error("--precision_depth_bound_tile_k must be positive")
+    if args.precision_depth_bound_w_strength <= 0:
+        parser.error("--precision_depth_bound_w_strength must be positive")
     if args.precision_depth_bound_nodewise_min_depth <= 0:
         parser.error("--precision_depth_bound_nodewise_min_depth must be positive")
     if args.precision_depth_bound_nodewise_min_depth > args.precision_depth_reference_bits:

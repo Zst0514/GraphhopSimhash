@@ -8,7 +8,7 @@ set -euo pipefail
 # the runtime bound selects the first acceptable activation depth.
 #
 # Policy format:
-#   id:min_depth:min_tol:max_tol:gamma:risk_max:scale
+#   id:min_depth:min_tol:max_tol:gamma:risk_max:scale[:w_strength]
 #
 # Example:
 #   mild:4:0.0:0.02:1.0:15:1.0
@@ -25,13 +25,13 @@ RUNS="${RUNS:-1}"
 OUT_ROOT="${OUT_ROOT:-${OFA_DIR}/output/t31_graphbit_nodewise_bound_sweep}"
 BOUND_PRIORITIES="${BOUND_PRIORITIES:-degree}"
 
-DEFAULT_POLICIES=$'mild:4:0.0:0.02:1.0:15:1.0\nnormal:4:0.0:0.04:1.0:15:1.0\nstrong:4:0.0:0.08:1.0:15:1.0\nsteep:4:0.0:0.04:2.0:15:1.0'
+DEFAULT_POLICIES=$'mild:4:0.0:0.02:1.0:15:1.0:1.0\nnormal:4:0.0:0.04:1.0:15:1.0:1.0\nstrong:4:0.0:0.08:1.0:15:1.0:1.0\nsteep:4:0.0:0.04:2.0:15:1.0:1.0'
 POLICIES="${POLICIES:-${DEFAULT_POLICIES}}"
 
 mkdir -p "${OUT_ROOT}"
 
 MANIFEST="${OUT_ROOT}/manifest.tsv"
-printf "policy\tnodewise_min_depth\tnodewise_min_tol\tnodewise_max_tol\tnodewise_gamma\tnodewise_risk_max\tscale\n" > "${MANIFEST}"
+printf "policy\tnodewise_min_depth\tnodewise_min_tol\tnodewise_max_tol\tnodewise_gamma\tnodewise_risk_max\tscale\tw_strength\n" > "${MANIFEST}"
 
 run_one() {
   local dataset="$1"
@@ -42,6 +42,7 @@ run_one() {
   local gamma="$6"
   local risk_max="$7"
   local scale="$8"
+  local w_strength="$9"
 
   local out_dir="${OUT_ROOT}/${dataset}_h8_53_T31/${policy}"
   echo "[T31NodewiseBoundSweep] dataset=${dataset} policy=${policy} runs=${RUNS}"
@@ -65,6 +66,7 @@ run_one() {
   BOUND_ASSIGNMENT=nodewise \
   BOUND_PRIORITIES="${BOUND_PRIORITIES}" \
   BOUND_SCALE="${scale}" \
+  BOUND_W_STRENGTH="${w_strength}" \
   BOUND_TILE_K="${BOUND_TILE_K:-128}" \
   BOUND_NODEWISE_MIN_DEPTH="${min_depth}" \
   BOUND_NODEWISE_MIN_TOL="${min_tol}" \
@@ -77,15 +79,16 @@ run_one() {
 while IFS= read -r spec; do
   [[ -z "${spec}" ]] && continue
   [[ "${spec}" =~ ^# ]] && continue
-  IFS=":" read -r policy min_depth min_tol max_tol gamma risk_max scale <<< "${spec}"
+  IFS=":" read -r policy min_depth min_tol max_tol gamma risk_max scale w_strength <<< "${spec}"
+  w_strength="${w_strength:-1.0}"
   if [[ -z "${policy:-}" || -z "${scale:-}" ]]; then
     echo "[T31NodewiseBoundSweep] invalid policy spec: ${spec}" >&2
     exit 2
   fi
-  printf "%s\t%s\t%s\t%s\t%s\t%s\t%s\n" \
-    "${policy}" "${min_depth}" "${min_tol}" "${max_tol}" "${gamma}" "${risk_max}" "${scale}" >> "${MANIFEST}"
+  printf "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n" \
+    "${policy}" "${min_depth}" "${min_tol}" "${max_tol}" "${gamma}" "${risk_max}" "${scale}" "${w_strength}" >> "${MANIFEST}"
   for dataset in "${DATASETS[@]}"; do
-    run_one "${dataset}" "${policy}" "${min_depth}" "${min_tol}" "${max_tol}" "${gamma}" "${risk_max}" "${scale}"
+    run_one "${dataset}" "${policy}" "${min_depth}" "${min_tol}" "${max_tol}" "${gamma}" "${risk_max}" "${scale}" "${w_strength}"
   done
 done <<< "${POLICIES}"
 

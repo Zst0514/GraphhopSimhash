@@ -1960,12 +1960,24 @@ def build_precision_depth_policy_configs(args, bits):
     return configs
 
 
-def precision_depth_remaining_bit_bound(depth, ref_bit, args):
+def precision_depth_bound_w_strength(args):
+    """Return the W-tile strength multiplier used by the bound estimator.
+
+    The current simulator uses a constant multiplier as the first implementation
+    stage. A later hardware trace can replace this scalar with per-tile metadata
+    such as mean(abs(W_tile)) / global_mean_abs(W).
+    """
+    return max(1e-12, float(getattr(args, "precision_depth_bound_w_strength", 1.0)))
+
+
+def precision_depth_remaining_bit_bound(depth, ref_bit, args, w_strength=None):
     """Predictor-free bound for omitted low activation bit-planes.
 
     This is a simulation-side proxy for the hardware bound estimator: if execution
     stops at `depth`, the omitted low bits are bounded by their maximum normalized
     contribution. The tile factor keeps the bound conservative for larger K tiles.
+    The W-strength multiplier models the current W tile's numeric strength:
+    stronger tiles make the same omitted activation bits less safe to skip.
     """
     depth = int(depth)
     ref_bit = int(ref_bit)
@@ -1975,15 +1987,21 @@ def precision_depth_remaining_bit_bound(depth, ref_bit, args):
     denom = max(1, (2 ** ref_bit) - 1)
     tile_k = max(1, int(getattr(args, "precision_depth_bound_tile_k", 128)))
     tile_scale = float(np.sqrt(tile_k / 128.0))
-    return float(getattr(args, "precision_depth_bound_scale", 1.0)) * (float(omitted) / float(denom)) * tile_scale
+    strength = precision_depth_bound_w_strength(args) if w_strength is None else max(1e-12, float(w_strength))
+    return (
+        float(getattr(args, "precision_depth_bound_scale", 1.0))
+        * (float(omitted) / float(denom))
+        * tile_scale
+        * strength
+    )
 
 
-def select_runtime_bound_depth(min_depth, tolerance, ref_bit, args):
+def select_runtime_bound_depth(min_depth, tolerance, ref_bit, args, w_strength=None):
     """Return the first depth accepted by runtime bound, respecting min_depth."""
     min_depth = max(1, min(int(min_depth), int(ref_bit)))
     tolerance = max(0.0, float(tolerance))
     for depth in range(min_depth, int(ref_bit) + 1):
-        if precision_depth_remaining_bit_bound(depth, ref_bit, args) <= tolerance:
+        if precision_depth_remaining_bit_bound(depth, ref_bit, args, w_strength=w_strength) <= tolerance:
             return int(depth)
     return int(ref_bit)
 
@@ -2017,15 +2035,17 @@ def bound_policy_bucket_bits(bits, ref_bit, args):
         ),
     ]
     out = {}
+    w_strength = precision_depth_bound_w_strength(args)
     for name, min_depth, tolerance in buckets:
-        runtime_depth = select_runtime_bound_depth(min_depth, tolerance, ref_bit, args)
+        runtime_depth = select_runtime_bound_depth(min_depth, tolerance, ref_bit, args, w_strength=w_strength)
         pool_bit = nearest_available_precision_depth(runtime_depth, bits, ref_bit)
         out[name] = {
             "min_depth": int(min_depth),
             "tolerance": float(tolerance),
             "runtime_depth": int(runtime_depth),
             "pool_bit": int(pool_bit),
-            "bound": precision_depth_remaining_bit_bound(runtime_depth, ref_bit, args),
+            "bound": precision_depth_remaining_bit_bound(runtime_depth, ref_bit, args, w_strength=w_strength),
+            "w_strength": float(w_strength),
         }
     return out
 
@@ -2041,13 +2061,14 @@ def select_nodewise_bound_actions(priority, eligible_idx, args, num_nodes, bits,
     max_tol = float(getattr(args, "precision_depth_bound_nodewise_max_tolerance", 0.04))
     gamma = float(getattr(args, "precision_depth_bound_nodewise_gamma", 1.0))
     risk_max = float(getattr(args, "precision_depth_bound_nodewise_risk_max", 15.0))
+    w_strength = precision_depth_bound_w_strength(args)
 
     risks = torch.clamp(priority[eligible_idx].to(dtype=torch.float32) / max(risk_max, 1e-12), 0.0, 1.0)
     tolerances = min_tol + (max_tol - min_tol) * torch.pow(1.0 - risks, gamma)
 
     selected = []
     for tol in tolerances.detach().cpu().tolist():
-        runtime_depth = select_runtime_bound_depth(min_depth, float(tol), ref_bit, args)
+        runtime_depth = select_runtime_bound_depth(min_depth, float(tol), ref_bit, args, w_strength=w_strength)
         selected.append(nearest_available_precision_depth(runtime_depth, bits, ref_bit))
     actions[eligible_idx] = torch.tensor(selected, dtype=torch.int64, device=device)
     return actions
@@ -2363,6 +2384,7 @@ def export_residual_precision_depth_node_trace(
             "low_tolerance": float(getattr(args, "precision_depth_bound_low_tolerance", 0.04)),
             "scale": float(getattr(args, "precision_depth_bound_scale", 1.0)),
             "tile_k": int(getattr(args, "precision_depth_bound_tile_k", 128)),
+            "w_strength": precision_depth_bound_w_strength(args),
         },
     }
     score_tensors = {
@@ -2396,6 +2418,7 @@ def export_residual_precision_depth_node_trace(
                 "action_bit": bit,
                 "depth_bucket": bucket_by_bit.get(bit, f"p{bit}"),
                 "stop_depth": bit if role == "miss" else 0,
+                "bound_w_strength": precision_depth_bound_w_strength(args) if role == "miss" else 0.0,
             }
             for key, tensor in score_tensors.items():
                 row[key] = float(tensor[node_id].item())
@@ -2942,6 +2965,7 @@ def run_residual_precision_depth_experiment(args):
                         f"priorities={list(getattr(args, 'precision_depth_bound_priorities', []))} | "
                         f"tile_k={int(getattr(args, 'precision_depth_bound_tile_k', 128))} | "
                         f"scale={float(getattr(args, 'precision_depth_bound_scale', 1.0)):.3f} | "
+                        f"w_strength={precision_depth_bound_w_strength(args):.3f} | "
                         f"min_depth={int(getattr(args, 'precision_depth_bound_nodewise_min_depth', 4))} | "
                         f"tol=[{float(getattr(args, 'precision_depth_bound_nodewise_min_tolerance', 0.0)):.4f}, "
                         f"{float(getattr(args, 'precision_depth_bound_nodewise_max_tolerance', 0.04)):.4f}] | "
@@ -2953,7 +2977,7 @@ def run_residual_precision_depth_experiment(args):
                     bucket_text = " | ".join(
                         f"{name}:min={info['min_depth']},tau={info['tolerance']:.4f},"
                         f"runtime=P{info['runtime_depth']},pool=P{info['pool_bit']},"
-                        f"bound={info['bound']:.5f}"
+                        f"bound={info['bound']:.5f},w={info['w_strength']:.3f}"
                         for name, info in bucket_bits.items()
                     )
                     log_important(
@@ -2962,6 +2986,7 @@ def run_residual_precision_depth_experiment(args):
                         f"priorities={list(getattr(args, 'precision_depth_bound_priorities', []))} | "
                         f"tile_k={int(getattr(args, 'precision_depth_bound_tile_k', 128))} | "
                         f"scale={float(getattr(args, 'precision_depth_bound_scale', 1.0)):.3f} | "
+                        f"w_strength={precision_depth_bound_w_strength(args):.3f} | "
                         f"{bucket_text}"
                     )
 

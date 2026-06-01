@@ -262,6 +262,20 @@ op sensitivity:
 
 因此 degree / propagation risk 只提供节点级误差容忍度；实际 stop depth 由当前 activation 剩余低位上界和 W tile 数值强度决定。Q/K、V/O、FFN up/down、layer index 等 operator sensitivity 不进入当前主线，后续只作为消融增强项。
 
+当前实现先用显式标量表示 W tile 强度：
+
+```text
+A_low_bound(depth) = (2^(8 - depth) - 1) / 255
+
+remaining_bound(depth)
+    = bound_scale
+    * A_low_bound(depth)
+    * sqrt(tile_k / 128)
+    * w_strength
+```
+
+`w_strength` 越大，同样的低位截断越保守；当前代码支持通过 `--precision_depth_bound_w_strength` 扫描该项，后续可替换成真实 W tile 统计。
+
 对每个 miss node：
 
 ```text
