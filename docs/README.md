@@ -11,6 +11,7 @@
 
 ## NPU
 
+- [npu/README.md](npu/README.md): NPU 文档索引。
 - [GRAPH_BIT_NPU_DESIGN.md](npu/GRAPH_BIT_NPU_DESIGN.md): Graph-Bit NPU 主线设计，包含 datapath、scheduler、buffer、cost model。
 - [GRAPH_BIT_SYSTOLIC_FLASH_DATAFLOW.md](npu/GRAPH_BIT_SYSTOLIC_FLASH_DATAFLOW.md): 基于脉动阵列和类 FlashAttention IO-aware tiling 的 W-stationary 数据流。
 - [GRAPH_BIT_EARLY_STOP_IMPLEMENTATION.md](npu/GRAPH_BIT_EARLY_STOP_IMPLEMENTATION.md): bit-plane early stop 从 CLI、runner、ONNXim/GemmWS 到 trace replay 的代码级实现说明。
@@ -21,7 +22,9 @@
 
 ## Results
 
+- [results/README.md](results/README.md): 当前结果文档索引。
 - [GRAPH_BIT_MAIN_RESULTS.md](results/GRAPH_BIT_MAIN_RESULTS.md): 当前 Graph-Bit / residual reuse 主线结果。
+- [RESIDUAL_GATE_GRAPHBIT_NPU_PROGRESS.md](results/RESIDUAL_GATE_GRAPHBIT_NPU_PROGRESS.md): Residual-Gate 与 Graph-Bit NPU 技术进展说明。
 - [SHARED_ONLINE_RESIDUAL_REUSE_RESULT.md](results/SHARED_ONLINE_RESIDUAL_REUSE_RESULT.md): Cora/PubMed 共享在线 residual reuse 配置。
 - [ST_LLAMA_T31_SHARED_RETRIEVAL_RESULT.md](results/ST_LLAMA_T31_SHARED_RETRIEVAL_RESULT.md): ST/LLaMA 共享检索骨架的历史对照。
 
@@ -43,4 +46,4 @@
 ## Roadmap
 
 - [PROJECT_ROADMAP.md](PROJECT_ROADMAP.md): 当前项目主线、output 管理原则和下一步硬件仿真实现计划。
-- [PROJECT_TODO.md](PROJECT_TODO.md): 当前缺口、下一步实验优先级、可选增强和不建议继续投入的方向。
+- [PROJECT_TODO.md](PROJECT_TODO.md): 当前缺口、下一步实验优先级和低优先级历史方向。

@@ -1,218 +1,115 @@
-# GraphHop SimHash
+# GraphHopSimhash
 
-GraphhopSimhash is a graph-aware LLM encoder acceleration prototype for text-attributed graph workloads such as Cora, PubMed, and OGBN-Arxiv.
+GraphHopSimhash is a graph-aware LLM encoder execution prototype for text-attributed graph workloads such as Cora, PubMed, and OGBN-Arxiv.
 
-The current mainline is no longer just "SimHash reuse" or "degree-based quantization". The project now studies a full encoder execution hierarchy:
-
-```text
-P0: Exact hash reuse
-    Reuse a cached embedding directly.
-
-P1: Fuzzy hash reuse + residual correction
-    Use CAM/SimHash to find an anchor embedding, then apply a lightweight residual adapter.
-
-P2: Graph-Bit precision-depth encoder
-    For nodes that must execute the LLM encoder, graph risk controls activation bit-plane depth inside the NPU.
-
-P3: Full W4A8 encoder
-    High-risk fallback path.
-```
-
-The key idea is:
+The current mainline is:
 
 ```text
-Graph structure controls how much LLM encoder work is necessary.
+SimHash / LRU-CAM front-end
+    -> skip encoder for high-confidence reusable nodes
+
+Residual-Gate reuse
+    -> repair or reject fuzzy CAM matches
+
+Graph-Bit NPU
+    -> for remaining miss nodes, use graph risk to control encoder GEMM execution
 ```
 
-Reuse decides whether a node can skip the encoder. Graph-Bit decides how much bit-serial arithmetic the NPU should spend when the encoder cannot be skipped.
+The project is organized as a full-stack encoder execution hierarchy, not as a standalone hash trick or a standalone quantization experiment.
 
-## Main Contributions
-
-### 1. GraphHop SimHash / CAM Reuse
-
-The system builds graph-context-aware hash signatures and uses multi-head SimHash/CAM lookup to find reusable anchor nodes.
-
-Earlier ST/data.x residual-reuse support-split front-end:
+## Execution Paths
 
 ```text
-h8_54_T40
-8 heads x 16 bits
-radius R = 2
-score threshold T = 40
-support >= 5 -> direct reuse
-support == 4 -> residual correction
-support < 4  -> encoder / Graph-Bit
+P0 Direct reuse
+    high-confidence CAM hit
+    read cached embedding
+
+P1 Residual-Gate reuse
+    fuzzy CAM hit
+    MLP predicts residual delta and accept/reject score
+
+P2 Graph-Bit NPU
+    miss / rejected node
+    run LLM encoder with graph-risk-guided bit-serial execution
+
+P3 Full W4A8 encoder
+    conservative fallback / reference path
 ```
 
-This front-end was the best common point found before adding the learned residual accept gate:
-
-```text
-Cora:   reuse 25.7%, drop 0.45%
-PubMed: reuse 50.3%, drop 2.52%
-```
-
-The current pure residual-reuse recommendation adds an online shared support
-split plus a learned accept gate inside the residual path:
+Current shared online residual-gate front-end:
 
 ```text
 8 heads x 16 bits
-radius R = 2
+radius = 2
+score gate = on
+score weights = 3 / 1 / 1
 score threshold T = 30
-support >= 5   -> direct reuse
-support = 3..4 -> residual candidate
-support < 3    -> compute
-gate_accept_threshold = 0.575
-```
 
-With dataset-specific offline residual/gate training and the same online control
-flow, the 3-run result is:
-
-```text
-Cora:   reuse 46.5%, drop 0.93%
-PubMed: reuse 42.3%, drop 1.96%
-```
-
-See [SHARED_ONLINE_RESIDUAL_REUSE_RESULT.md](docs/results/SHARED_ONLINE_RESIDUAL_REUSE_RESULT.md).
-
-For LLaMA-7B full-stack experiments, the front-end must first pass the
-`FullP8-miss` sanity check: accepted hits use direct/residual reuse, while all
-misses still run P8.  The latest Cora/LLaMA residual-gate front-end is:
-
-```text
-h8_53_T30 + shared accept gate
-8 heads x 16 bits
-radius R = 2
-score threshold T = 30
 support >= 5   -> direct reuse
 support = 3..4 -> residual candidate
 support < 3    -> encoder / Graph-Bit
-gate_accept_threshold = 0.60
+gate_accept_threshold = 0.575
 ```
 
-This uses LLaMA W4A8 embeddings as the residual target rather than the ST/data.x
-target.  PubMed/LLaMA still needs a stricter split/gate validation before it can
-be treated as final.
+Current ST 3-run result:
 
-PubMed/LLaMA support-split checks show that a stricter no-gate split is the
-current safe fallback for Graph-Bit full-stack validation:
+| Dataset | Reuse | Drop |
+|---|---:|---:|
+| Cora/ST | 46.5% | 0.93% |
+| PubMed/ST | 42.3% | 1.96% |
+
+Detailed results and commands are in:
 
 ```text
-h8_76_T40
-8 heads x 16 bits
-radius R = 2
-score threshold T = 40
-support >= 7 -> direct reuse
-support == 6 -> residual correction
-support < 6  -> encoder / Graph-Bit
+docs/results/GRAPH_BIT_MAIN_RESULTS.md
+docs/results/SHARED_ONLINE_RESIDUAL_REUSE_RESULT.md
+docs/results/ST_LLAMA_T31_SHARED_RETRIEVAL_RESULT.md
 ```
 
-10-run result:
+## Graph-Bit NPU
+
+Graph-Bit handles nodes that cannot be safely reused. The core mechanism is:
 
 ```text
-FullP8-miss:
-    reuse = 8.2%, cost = 0.459, drop = 0.26%
+node tolerance:
+    degree / propagation risk
 
-Degree runtime-bound:
-    reuse = 8.2%, cost = 0.367, drop = 1.24%
+runtime bound:
+    A_low_bound(depth) * W_tile_abs_bound
+
+op sensitivity:
+    first version keeps this as 1
 ```
 
-The looser `h8_54_T40` front-end reaches much higher PubMed/LLaMA reuse
-(`54.1%`) but is not safe for this backend because `FullP8-miss` already drops
-`3.01%`.
+Graph risk does not directly assign a fixed P8/P6/P4 ratio. It sets node-level tolerance. The predictor-free numerical bound decides the actual stop depth for the current tile.
 
-### 2. TSER Score Gate
-
-TSER means Topology-aware Semantic Error Risk. It scores reuse risk using:
+The NPU dataflow uses a weight-stationary systolic style:
 
 ```text
-propagation risk
-graph context risk
-low-degree uniqueness risk
-candidate confidence / support
+load W tile on chip
+stream token rows from the same risk bucket
+run bit-serial GEMM
+stop low activation bits when the bound is satisfied
 ```
 
-In the current results, TSER is valuable for reuse filtering and analysis. For Graph-Bit precision-depth routing, degree / propagation risk is the most stable deployable proxy.
-
-### 3. Residual-Corrected Reuse
-
-Fuzzy reuse is not simply "copy the nearest embedding". The residual path uses:
+The two hardware effects are separated:
 
 ```text
-anchor embedding E_u
-cheap feature delta
-graph/context delta
-low-rank adapter
+Risk-bucket W-stationary scheduling:
+    improves W tile service window and memory reuse.
+
+Variable activation depth:
+    reduces bit-serial PE / psum activity for miss nodes.
 ```
 
-to estimate a corrected embedding:
-
-```text
-E_v_hat = normalize(E_u + alpha * residual(v, u))
-```
-
-This path is only used for medium-confidence fuzzy hits. Exact/high-support hits use direct reuse, and unsafe hits are rejected into the encoder path.
-
-### 4. AWQ-Based W4A8 / W4A6 / W4A5 / W4A4 Embedding Pools
-
-The current embedding generation path uses the official llm-awq style weight quantization path plus activation fake quantization for multiple activation depths:
-
-```text
-W4A8 -> P8 reference
-W4A6 -> P6 proxy
-W4A5 -> P5 proxy
-W4A4 -> P4 proxy
-```
-
-For LLaMA-7B, these pools are used to validate graph-conditioned precision-depth execution.
-
-### 5. Graph-Bit NPU
-
-Graph-Bit is the hardware-facing contribution. It does not just route nodes to cached W4A8/W4A4 pools. It maps graph risk into the NPU datapath:
-
-```text
-high-risk node:
-    execute more activation bit-planes
-
-low-risk node:
-    allow early termination of low activation bit-planes
-```
-
-The current ONNXim-backed prototype supports:
-
-```text
-static precision-depth proxy:
-    P8/P6/P5/P4 as fixed execution depths
-
-predictor-free early stop:
-    all nodes start from P8 high bits
-    degree risk chooses min_depth and tolerance
-    bit-level bound decides when lower bit-planes can stop
-```
-
-In the predictor-free version, P6/P4 are not fixed datatypes. They are safety floors / validation anchors.
-
-The current hardware model separates four effects:
-
-```text
-bit-plane compute:
-    PE work saved by early stopping low activation bits
-
-activation demand fetch:
-    bit-plane-major layout avoids fetching skipped low-bit planes
-
-risk-bucket batching:
-    high/mid/low risk nodes are scheduled separately so one P8 node does not drag a whole batch to P8
-
-fixed traffic:
-    weight reads and output writes remain unless a separate weight-stationary / fused-FFN design attacks them
-```
-
-The consolidated NPU design is documented in:
+Main NPU docs:
 
 ```text
 docs/npu/GRAPH_BIT_NPU_DESIGN.md
+docs/npu/GRAPH_BIT_SYSTOLIC_FLASH_DATAFLOW.md
 docs/npu/GRAPH_BIT_EARLY_STOP_IMPLEMENTATION.md
 docs/npu/GRAPH_BIT_FULLSTACK_REPRODUCTION_GUIDE.md
+docs/npu/LLAMA_ROOFLINE_PROFILE.md
 ```
 
 ## Repository Layout
@@ -223,98 +120,59 @@ GraphhopSimhash/
         command-line argument definitions
 
     runner.py
-        main experiment suites
+        experiment suites and full-stack simulation flow
 
     controller.py
         SimHash/CAM lookup, reuse decision, structure/score checks
 
     scoring.py
-        propagation, graph context, low-degree uniqueness, TSER components
+        degree / TSER / graph-context scoring utilities
 
     residual_reuse.py
-        low-rank residual adapter and residual reuse helpers
+        residual adapter and accept-gate helpers
 
     real_quant.py
-        real embedding pool loading and quantization routing utilities
+        real embedding pool loading
 
     precision_depth.py
-        Graph-Bit precision-depth pool utilities
+        Graph-Bit precision-depth helpers
 
     generate_real_quant_pools.py
-        FP/W4A16/W4A8/W4A6/W4A5/W4A4 embedding pool generator
+        W4A8/W4A6/W4A5/W4A4 embedding pool generator
 
     paths.py
-        repo/model path resolution
+        repo-relative model path resolution
 
     scripts/
         runnable experiment scripts and summary tools
 
     ONNXim/
-        integrated ONNXim simulator with Graph-Bit microbenchmark hooks
+        integrated ONNXim simulator and Graph-Bit microbench hooks
 
     docs/
-        organized project documentation
+        organized documentation
 ```
 
-Documentation folders:
-
-```text
-docs/core/
-    AWQ embedding generation, CAM design, score definitions, residual reuse
-
-docs/npu/
-    Graph-Bit NPU design, predictor-free bit-serial execution, reproduction guide
-
-docs/results/
-    main result summaries
-
-docs/survey/
-    LLM / Transformer accelerator survey
-
-docs/tools/
-    command notes
-```
-
-Start here:
+Documentation entry:
 
 ```text
 docs/README.md
-docs/PROJECT_ROADMAP.md
-docs/core/RESIDUAL_CORRECTED_REUSE.md
-docs/npu/GRAPH_BIT_NPU_DESIGN.md
-docs/npu/GRAPH_BIT_FULLSTACK_REPRODUCTION_GUIDE.md
-docs/results/GRAPH_BIT_MAIN_RESULTS.md
 ```
 
 ## Running Location
 
-Run commands from the OFA repository root:
+Run experiments from the OFA repository root:
 
 ```bash
 cd /home/zhangshangtong/Transformer/OFA
-```
-
-Then use:
-
-```bash
 python -m GraphhopSimhash ...
 ```
 
-If running from another directory, make sure the OFA root is in `PYTHONPATH`.
+If running elsewhere, add the OFA root to `PYTHONPATH`.
 
 ## Model Paths
 
-Model paths are now repo-relative by default and can be overridden by environment variables.
-
-Default paths:
-
-```text
-llama2_7b -> models/llama-7b/modelscope/Llama-2-7b-ms
-ST        -> models/multi-qa-distilbert-cos-v1
-BERT      -> models/bert-base-uncased
-```
-
-Optional overrides:
+Model paths are repo-relative by default and can be overridden by environment variables:
 
 ```bash
 export GRAPHHOP_MODEL_ROOT=/path/to/models
@@ -323,24 +181,17 @@ export GRAPHHOP_ST_PATH=/path/to/multi-qa-distilbert-cos-v1
 export GRAPHHOP_BERT_PATH=/path/to/bert-base-uncased
 ```
 
-This keeps the code portable across machines without hard-coding one user's absolute paths.
+Default logical paths:
 
-## Generate Embedding Pools
-
-### ST / Cora + PubMed
-
-```bash
-python -m GraphhopSimhash.generate_real_quant_pools \
-  --datasets cora pubmed \
-  --llm_name ST \
-  --configs W4A16 W4A8 W4A4 \
-  --batch_size 64 \
-  --awq_calib_samples 16 \
-  --awq_seqlen 128 \
-  --overwrite
+```text
+llama2_7b -> models/llama-7b/modelscope/Llama-2-7b-ms
+ST        -> models/multi-qa-distilbert-cos-v1
+BERT      -> models/bert-base-uncased
 ```
 
-### LLaMA-7B / Cora
+## Common Commands
+
+Generate LLaMA-7B Graph-Bit embedding pools:
 
 ```bash
 python -m GraphhopSimhash.generate_real_quant_pools \
@@ -348,473 +199,69 @@ python -m GraphhopSimhash.generate_real_quant_pools \
   --llm_name llama2_7b \
   --configs W4A8 W4A6 W4A5 W4A4 \
   --batch_size 4 \
-  --awq_calib_samples 128 \
-  --awq_seqlen 512 \
+  --w4a_backend awq \
+  --w4a_calib_samples 128 \
   --overwrite
 ```
 
-Output format:
-
-```text
-cache_data/{dataset}_{model}_oracle_{tag}.pt
-```
-
-Examples:
-
-```text
-cache_data/cora_llama2_7b_oracle_W4A8.pt
-cache_data/cora_llama2_7b_oracle_W4A6.pt
-cache_data/cora_llama2_7b_oracle_W4A5.pt
-cache_data/cora_llama2_7b_oracle_W4A4.pt
-```
-
-`cache_data/`, `models/`, and generated `output/` logs are not intended to be committed.
-
-## Core Experiment Suites
-
-### 1. Residual Reuse Front-End
-
-This reproduces the current common front-end parameter point:
+Run the current Cora Graph-Bit trace replay flow:
 
 ```bash
+cd /home/zhangshangtong/Transformer/OFA
+RUNS=3 DATASET=cora bash GraphhopSimhash/scripts/run_graphbit_trace_replay.sh
+```
+
+Run the shared online residual reuse experiment:
+
+```bash
+cd /home/zhangshangtong/Transformer/OFA
 python -m GraphhopSimhash \
   --datasets cora \
   --runs 3 \
   --experiment_suite residual_reuse \
-  --radius 2 \
   --learned_hash_epochs 10 \
   --learned_hash_dim 128 \
+  --hash_heads_per_route 8 \
   --hamming_only_acceptor \
   --enable_score_gate \
-  --score_reuse_threshold 40 \
-  --main_hash_head_bits 16 16 16 16 16 16 16 16 \
-  --residual_fit_profile llama \
-  --residual_hard_min_support_hits 5 \
-  --residual_soft_min_support_hits 4 \
-  --residual_rank 64 \
-  --residual_epochs 120 \
-  --residual_max_train_pairs 4096 \
-  --residual_min_dist 1.0 \
-  --residual_alpha_grid 0 0.125 0.25 0.5
-```
-
-More details:
-
-```text
-docs/core/RESIDUAL_CORRECTED_REUSE.md
-```
-
-### 2. Pure Graph-Bit Precision-Depth Routing
-
-This isolates the question:
-
-```text
-If every node must execute the encoder, can graph risk decide P8/P6/P5/P4 better than random?
-```
-
-Command:
-
-```bash
-python -m GraphhopSimhash \
-  --datasets cora pubmed \
-  --runs 10 \
-  --experiment_suite precision_depth_ablation \
-  --real_quant_model_name llama2_7b \
-  --precision_depth_reference_tag W4A8 \
-  --precision_depth_tags W4A6 W4A5 W4A4 \
-  --precision_depth_bits 6 5 4 \
-  --precision_depth_reference_bits 8 \
-  --precision_depth_high_ratio 0.20 \
-  --precision_depth_mid_ratio 0.30 \
-  --precision_depth_low_ratio 0.30 \
+  --allow_rare_fuzzy \
+  --score_reuse_threshold 30 \
   --score_propagation_weight 3 \
   --score_graph_context_weight 1 \
-  --score_low_unique_weight 1
+  --score_low_unique_weight 1 \
+  --radius 2 \
+  --main_hash_head_bits 16 16 16 16 16 16 16 16 \
+  --residual_hard_min_support_hits 5 \
+  --residual_soft_min_support_hits 3 \
+  --residual_gate_accept_threshold 0.575
 ```
 
-Main observation:
+Full command variants are kept in:
 
 ```text
-Degree / propagation risk is the most stable deployable precision-depth proxy.
+docs/npu/GRAPH_BIT_FULLSTACK_REPRODUCTION_GUIDE.md
+docs/results/SHARED_ONLINE_RESIDUAL_REUSE_RESULT.md
+docs/tools/量化+哈希命令.md
 ```
 
-### 3. Residual Reuse + Graph-Bit Full Stack
+## Data And Output
 
-This is the main full-stack software experiment:
+The following are local artifacts and are kept out of git:
 
 ```text
-exact hit      -> direct reuse
-fuzzy hit      -> residual correction
-reject / miss  -> Graph-Bit P8/P6/P5/P4
+cache_data/
+models/
+output/
 ```
 
-Recommended Cora smoke run with the current LLaMA-aware learned gate:
+Current result documents point to the exact output directories used for reported numbers.
+
+## Push Helper
+
+From the repo root:
 
 ```bash
-DATASET=cora RUNS=1 RUN_ALGO=1 RUN_ONNXIM=0 BUDGET=p8heavy \
-  bash scripts/run_graphbit_predictor_free_flow.sh
+./push.sh "commit message"
 ```
 
-Historical Cora `h8_54_T40` 10-run result before the learned accept gate was
-wired into `residual_precision_depth`:
-
-```text
-FullP8 miss baseline:
-    cost = 0.301, drop = 1.53%
-
-Degree Graph-Bit:
-    cost = 0.231, drop = 2.39%
-```
-
-Interpretation:
-
-```text
-At the same reuse set, Degree Graph-Bit reduces normalized encoder cost
-relative to the FullP8 miss path, with extra accuracy drop.
-```
-
-The "cost" here is a normalized software cost proxy, not measured wall-clock time.
-
-### 4. ONNXim Predictor-Free Early-Stop Validation
-
-This validates the hardware-facing bit-serial mechanism:
-
-```text
-All miss nodes start from max_depth=8.
-Graph risk selects min_depth and tolerance.
-The NPU stops low bit-planes when a predictor-free bound is satisfied.
-```
-
-Build ONNXim and run the Cora early-stop sweep:
-
-```bash
-bash GraphhopSimhash/scripts/build_onnxim.sh
-FORCE_ONNXIM=1 bash GraphhopSimhash/scripts/run_cora_graphbit_earlystop_sweep.sh
-```
-
-Result file:
-
-```text
-output/graphbit_predictor_free/cora_h8_54_T40/earlystop_sweep/earlystop_sweep.txt
-```
-
-Current result:
-
-```text
-Method                     Reuse  AvgD  Saved  Stop   Cycles Traffic Energy Drop
-FullP8-miss                 40.0%  8.00   0.00   0.0%   0.601   0.602  0.602  1.53%
-Static Degree P8/P6/P4      40.0%  5.80   2.20   0.0%   0.575   0.581  0.578  2.39%
-EarlyStop balanced          40.0%  6.10   1.90 100.0%   0.576   0.583  0.580  2.39%
-EarlyStop aggressive        40.0%  5.80   2.20 100.0%   0.575   0.581  0.578  2.39%
-```
-
-Important:
-
-```text
-EarlyStop rows are hardware validation rows.
-They no longer mean "fixed P6/P4".
-They mean "start at P8, stop dynamically by bit-bound".
-```
-
-The runner now also supports a stricter software validation path where the
-runtime bound is mapped to the nearest generated embedding pool:
-
-```text
-high risk -> min_depth=8, tolerance=0.00 -> runtime P8
-mid risk  -> min_depth=6, tolerance=0.02 -> runtime P6
-low risk  -> min_depth=4, tolerance=0.04 -> runtime P5
-```
-
-Example Cora/LLaMA quick command:
-
-```bash
-RUNS=1 RUN_ALGO=1 RUN_ONNXIM=0 \
-DATASET=cora THRESHOLD=40 HARD_SUPPORT=5 SOFT_SUPPORT=4 \
-FRONTEND_ID=h8_54_T40 BUDGET=boundclean \
-HIGH_RATIO=0.20 MID_RATIO=0.50 LOW_RATIO=0.0 \
-OUT_DIR=output/graphbit_bound_runtime/cora_h8_54_T40_boundclean_quick \
-BOUND_ENABLE=1 BOUND_PRIORITIES='degree tser' \
-BOUND_MID_TOL=0.02 BOUND_LOW_TOL=0.04 \
-bash GraphhopSimhash/scripts/run_graphbit_predictor_free_flow.sh
-```
-
-Quick result:
-
-```text
-Method              Reuse   P8     P6     P5     P4     Cost   Drop
-FullP8-miss          27.8%  72.2%   0.0%   0.0%   0.0%   0.361  0.77%
-Degree static        27.8%  14.4%  36.1%   0.0%  21.6%   0.277  2.71%
-Degree runtime-bound 27.8%  14.4%  36.1%  21.6%   0.0%   0.288  2.13%
-```
-
-This shows the intended behavior: Degree does not directly select P5. It only
-sets the low-risk bucket's `min_depth=4` and `tolerance=0.04`; the runtime
-remaining-bit bound decides that P4 is too aggressive and continues to P5.
-
-### 5. Bit-Plane Demand-Fetch Modeling
-
-The early-stop flow now has a demand-fetch model that distinguishes:
-
-```text
-compute-mask only:
-    low bit MACs are masked, but A8 activations are still fetched
-
-demand-fetch:
-    skipped low bit-planes are not fetched
-
-random-mixed batching:
-    mixed-risk batches execute to the max depth in the batch
-
-risk-bucket batching:
-    high/mid/low risk nodes are batched separately
-```
-
-Run the default Cora/LLaMA learned-gate model:
-
-```bash
-bash GraphhopSimhash/scripts/run_graphbit_demand_fetch_model.sh
-```
-
-Historical balanced comparison:
-
-```bash
-WORKLOAD=/home/zhangshangtong/Transformer/OFA/output/graphbit_predictor_free/cora_h8_54_T40/predictor_free_workload.json \
-OUT_DIR=/home/zhangshangtong/Transformer/OFA/output/graphbit_predictor_free/cora_h8_54_T40/demand_fetch_model \
-bash GraphhopSimhash/scripts/run_graphbit_demand_fetch_model.sh
-```
-
-Key conclusion:
-
-```text
-compute-mask only saves bit-plane arithmetic but not cycles/traffic;
-demand-fetch + risk-bucket scheduling is required to turn early stop into NPU-visible savings.
-```
-
-One-command closure suite:
-
-```bash
-bash GraphhopSimhash/scripts/run_graphbit_closure_suite.sh
-```
-
-This produces:
-
-```text
-output/graphbit_closure/cora/closure_table.txt
-```
-
-It compares `FullP8-miss`, `compute-mask only`, `random-mixed`, and `demand-fetch + risk-bucket` on the same Cora workload.
-
-Dynamic P5 proxy for predictor-free early stop:
-
-```bash
-RUNS=3 bash GraphhopSimhash/scripts/run_cora_graphbit_dynamic_depth_accuracy.sh
-```
-
-This treats P5 as a conservative proxy for nodes that dynamically stop between P6 and P4:
-
-```text
-output/graphbit_predictor_free/cora_h8_54_T40_dynp5/
-```
-
-PubMed lightweight hardware replay:
-
-```bash
-bash GraphhopSimhash/scripts/run_pubmed_graphbit_demand_fetch_model.sh
-```
-
-This reuses an existing workload and reruns only the demand-fetch model:
-
-```text
-output/graphbit_predictor_free/pubmed_h8_76_T40/demand_fetch_model/
-```
-
-### 6. Component-Level NPU Dataflow Model
-
-This model answers what early stop actually skips:
-
-```text
-ordinary byte-major A8:
-    cannot reduce activation traffic
-
-plane-group-major activation buffer:
-    can skip low activation plane-group fetches
-
-risk-bucket scheduling:
-    prevents one P8 node from dragging a low-risk batch to P8
-
-weight-stationary reuse:
-    optional sensitivity only; the mainline keeps weight HBM scale at 1.0
-    unless a concrete scheduler/capacity model justifies extra amortization
-```
-
-Run:
-
-```bash
-bash GraphhopSimhash/scripts/run_graphbit_npu_dataflow_model.sh
-```
-
-Default output:
-
-```text
-output/graphbit_predictor_free/cora_h8_54_T40_dynp5/npu_dataflow_model/
-```
-
-## ONNXim Integration
-
-ONNXim is integrated under:
-
-```text
-GraphhopSimhash/ONNXim/
-```
-
-Graph-Bit modifications currently touch:
-
-```text
-ONNXim/src/SystolicWS.cc
-ONNXim/src/SystolicWS.h
-ONNXim/src/operations/GemmWS.cc
-scripts/onnxim_graphbit_microbench.py
-```
-
-The microbenchmark covers LLaMA-7B-style GEMM shapes:
-
-```text
-projection: 4096 x 4096
-FFN up/gate: 4096 x 11008
-FFN down: 11008 x 4096
-```
-
-Standalone microbenchmark:
-
-```bash
-python GraphhopSimhash/scripts/onnxim_graphbit_microbench.py \
-  --seq-len 64 \
-  --workspace output/onnxim_graphbit/microbench_s64_internal_p6 \
-  --graphbit-depth 6 \
-  --action all \
-  --log-level info
-```
-
-Datapath mechanism suite:
-
-```bash
-SEQ_LEN=8 bash GraphhopSimhash/scripts/run_onnxim_graphbit_datapath_suite.sh
-```
-
-It separates byte-major mask-only, plane-group demand fetch, risk-bucket issue
-gating, psum gating, and optional weight-stationary sensitivity.  The compact result is:
-
-```text
-output/onnxim_graphbit/datapath_suite_s8/datapath_summary.txt
-```
-
-Guide:
-
-```text
-ONNXim/ONNXIM_PROJECT_GUIDE.md
-```
-
-## Main Result Files
-
-Useful output locations:
-
-```text
-output/residual_reuse/common_param_sweep_20260528/
-    residual reuse common parameter sweep
-
-output/residual_graphbit_main/cora_h8_54_T40/
-    Cora residual + Graph-Bit main table
-
-output/graphbit_predictor_free/cora_h8_54_T40/
-    Cora ONNXim-backed predictor-free early-stop flow
-
-output/graphbit_predictor_free/cora_h8_54_T40_dynp5/
-    Cora dynamic-depth P5 proxy flow
-
-output/graphbit_predictor_free/cora_h8_54_T40_dynp5/npu_dataflow_model/
-    Component-level Graph-Bit NPU dataflow model
-
-output/graphbit_closure/cora/
-    Cora demand-fetch closure table
-
-output/graphbit_predictor_free/pubmed_h8_76_T40/demand_fetch_model/
-    PubMed lightweight demand-fetch replay
-
-output/llama7b_precision_depth_budget_sweep/
-    LLaMA-7B precision-depth budget sweep
-
-output/onnxim_graphbit/
-    ONNXim Graph-Bit microbenchmarks
-```
-
-These output files are generated artifacts and are not part of the git-tracked source.
-
-## Policy Boundaries
-
-Deployable mainline policies:
-
-```text
-SimHash/CAM support
-TSER score gate
-Degree / propagation risk
-Graph context risk
-LowUnique risk
-Predictor-free bit-serial early stop
-```
-
-Debug / upper-bound only:
-
-```text
-PredictorDepthBudget:
-    requires calibration nodes to fit a damage predictor
-
-OracleDamageBudget:
-    requires true FP-vs-low-depth embedding errors
-
-ErrorTopK / TSERErrorTopK:
-    requires knowing real quantization error for every node
-```
-
-Do not present oracle/error-aware policies as deployable architecture mechanisms.
-
-## Current Paper Direction
-
-The cleanest current story is:
-
-```text
-Graph-aware hierarchical LLM encoder execution for text-attributed graphs.
-```
-
-System layers:
-
-```text
-1. CAM/SimHash finds reusable anchors.
-2. TSER filters unsafe reuse.
-3. Residual adapter corrects medium-confidence fuzzy reuse.
-4. Degree-guided Graph-Bit controls encoder bit-plane effort for misses.
-5. ONNXim validates the NPU datapath effect.
-```
-
-Hardware claim boundary:
-
-```text
-Safe to claim:
-    Graph risk controls NPU bit-serial precision depth.
-    ONNXim microbenchmarks estimate cycles / traffic / energy proxy.
-
-Do not claim without further simulator evidence:
-    exact wall-clock speedup
-    exact silicon energy reduction
-```
-
-## Recommended Next Experiments
-
-1. Improve PubMed/LLaMA reuse front-end between the current extremes: `h8_54_T40`
-   is too loose, while `h8_76_T40` is safe but conservative.
-2. Sweep `min_depth/tolerance` for Cora first, then PubMed.
-3. Add a weight-stationary / FFN-fusion model to attack the fixed weight/output traffic that demand-fetch cannot reduce.
-4. Prepare the final paper figures:
-   - reuse vs drop curve
-   - Graph-Bit cost/drop curve
-   - ONNXim cycles/traffic/energy table
-   - full-stack path breakdown
+This stages tracked/untracked changes, commits if needed, and pushes the current branch to `origin`.
