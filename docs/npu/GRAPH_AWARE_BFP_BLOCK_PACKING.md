@@ -270,6 +270,78 @@ Graph score 的作用不是让 BFPA4 从不可用变可用，
 而是在低成本 BFPA4 baseline 上保护更敏感节点。
 ```
 
+### 3.5 Full Activation-Level Encoder Pool
+
+上面的 embedding-level proxy 只在最终 embedding 矩阵上重排/量化，不能代表 LLaMA encoder 内部每一层 Linear activation 的真实误差传播。因此进一步在 `generate_real_quant_pools.py` 中加入 cross-row tile BFP wrapper，直接生成真实 encoder pool：
+
+```text
+W4BFPA4_B128_T16X8:
+    每个 BFP block = 16 token rows x 8 hidden dims。
+
+W4BFPA4_B128_T32X4:
+    每个 BFP block = 32 token rows x 4 hidden dims。
+
+W4BFPA4_B128_T16X8_GCTX / T32X4_GCTX:
+    编码前按 graph-context SimHash order 重排 node batch，
+    编码后恢复原始 node order。
+```
+
+输出 pool：
+
+```text
+cache_data/cora_llama2_7b_oracle_W4BFPA4_B128.pt
+cache_data/cora_llama2_7b_oracle_W4BFPA4_B128_T16X8.pt
+cache_data/cora_llama2_7b_oracle_W4BFPA4_B128_T32X4.pt
+cache_data/cora_llama2_7b_oracle_W4BFPA4_B128_T16X8_GCTX.pt
+cache_data/cora_llama2_7b_oracle_W4BFPA4_B128_T32X4_GCTX.pt
+```
+
+Cora / LLaMA-7B / 3 runs，以 W4A8 pool 为 reference。
+
+```text
+Rowwise full encoder pool
+
+Config                    Acc      Drop    AvgErr
+All W4A8                  0.7289   0.00%   0.00000
+T1X128 BFPA4              0.7178   1.11%   0.00985
+```
+
+```text
+Original order full encoder pool
+
+Config                    Acc      Drop    AvgErr
+All W4A8                  0.7289   0.00%   0.00000
+T16X8 BFPA4               0.6876   4.13%   0.02046
+T32X4 BFPA4               0.6868   4.21%   0.02265
+80% T32X4 + 20% T16X8
+  Random                  0.6878   4.11%   0.02219
+  Degree                  0.6892   3.97%   0.02202
+  TSER                    0.6889   4.00%   0.02211
+```
+
+```text
+Graph-context order full encoder pool
+
+Config                    Acc      Drop    AvgErr
+All W4A8                  0.7289   0.00%   0.00000
+T16X8_GCTX BFPA4          0.6883   4.06%   0.02000
+T32X4_GCTX BFPA4          0.6849   4.40%   0.02241
+80% T32X4_GCTX + 20% T16X8_GCTX
+  Random                  0.6867   4.22%   0.02186
+  Degree                  0.6844   4.45%   0.02193
+  TSER                    0.6850   4.38%   0.02177
+```
+
+结论：
+
+```text
+1. T1X128 rowwise BFPA4 是真实 full activation-level pool，drop 为 1.11%，明显比 cross-row tile 更稳。
+2. Full activation-level cross-row BFPA4 明显比 embedding-level proxy 更难。
+3. Original 和 graph-context order 都在 4% drop 左右，说明主要问题不是 graph-context order 本身，而是全层 cross-row BFPA4 对中间 activation 过于激进。
+4. T16X8 略好于 T32X4，但差距不够改变结论。
+5. 当前 full-pool 结果不支持直接把所有 Linear activation 都切到 cross-row BFPA4。
+```
+
 ## 4. 当前结论
 
 当前证据可以支持以下几点：
@@ -278,8 +350,8 @@ Graph score 的作用不是让 BFPA4 从不可用变可用，
 1. BFP shared exponent 问题真实存在。
 2. 当前 rowwise BFP pool 下，节点排序不会起作用。
 3. cross-row tile BFP 给 graph-aware grouping 留出了作用空间。
-4. Cora 上 cross-row tile 的 embedding-level 和 real-activation proxy 都没有表现出明显精度风险。
-5. graph-aware ordering 的收益还没有完全坐实，需要更真实的 scheduler / batch 组织验证。
+4. embedding-level proxy 和 sampled activation hook 显示 cross-row tile 有潜力。
+5. 真实 full encoder pool 显示 rowwise T1X128 BFPA4 较稳，而全层 BFPA4 cross-row tile 仍然过激。
 ```
 
 因此当前最稳的表述是：
@@ -288,72 +360,45 @@ Graph score 的作用不是让 BFPA4 从不可用变可用，
 BFP format 本身不是新点。
 新点应放在 graph-aware BFP block packing:
     利用 SimHash / graph context / risk 信息组织 exponent-sharing group。
+但 full encoder 侧不能直接用 proxy 结论，需要进一步做更保守的 BFPA6 或算子选择。
 ```
 
 ## 5. 下一步验证路径
 
-### Step 1: 更真实的 Activation-Level Scheduler
+### Step 1: 更保守的 Activation Format
 
-当前 hook 已比较：
+full encoder pool 已经证明 BFPA4 cross-row 过激。下一步优先验证：
 
 ```text
-sequence_major
-token_position_major
+cross-row BFPA6:
+    T16X8 / T32X4 / graph-context order
+
+operator-selective cross-row BFPA4:
+    只作用于 FFN 或只作用于部分 projection
 ```
 
-下一步需要把 scheduler 做得更接近硬件：
+目标是区分：
 
 ```text
-按 SimHash / graph-context bucket 形成 node batch
-同一 batch 内按 token position 重排 token rows
-再形成 tile_16x8 / tile_32x4 BFP block
+是 cross-row tile 这个方向不稳，
+还是 BFPA4 全层使用过激。
 ```
 
-目标：
+### Step 2: PubMed 验证
+
+Cora 上找到安全设置后，扩展 PubMed：
 
 ```text
-验证 graph-aware order 是否能稳定优于 random / original。
-```
-
-### Step 2: Cora Full Activation-Level Pool
-
-在 hook 结果稳定后，生成 Cora 的真实 encoder pool：
-
-```text
-rowwise BFPA4
-cross-row tile16x8 BFPA4
-cross-row tile32x4 BFPA4
-cross-row tile16x8 BFPA3
-cross-row tile32x4 BFPA3
-```
-
-然后跑 3~5 runs GNN accuracy：
-
-```text
-Acc / Drop / AvgErr
-```
-
-目标：
-
-```text
-把 proxy 结论升级为真实 encoder pool 结论。
-```
-
-### Step 3: PubMed 验证
-
-Cora 成立后，扩展 PubMed：
-
-```text
-BFPA4 rowwise vs cross-row
+BFPA6 rowwise vs cross-row
 graph-context / SimHash grouping
 3 runs accuracy
 ```
 
 PubMed 文本更长、节点更多，更适合验证 scheduler grouping 是否稳定。
 
-### Step 4: Hardware Cost Model
+### Step 3: Hardware Cost Model
 
-如果 cross-row graph-aware packing 在精度上成立，需要补硬件收益：
+如果 cross-row graph-aware packing 在精度上成立，再补硬件收益：
 
 ```text
 exponent metadata 数量
@@ -419,4 +464,86 @@ Real activation hook：
   --module_suffixes q_proj o_proj up_proj down_proj \
   --layouts rowwise_1x128 tile_16x8 tile_32x4 \
   --output_dir output/graphbfp_activation_order/cora_a4_b4
+```
+
+Full activation-level pool：
+
+```bash
+/home/zhangshangtong/.conda/envs/OFA/bin/python \
+  -m GraphhopSimhash.generate_real_quant_pools \
+  --datasets cora \
+  --llm_name llama2_7b \
+  --configs W4BFPA4_B128 \
+  --batch_size 4 \
+  --max_length 512 \
+  --awq_calib_samples 128 \
+  --awq_seqlen 512 \
+  --awq_q_group_size 128 \
+  --overwrite
+```
+
+```bash
+/home/zhangshangtong/.conda/envs/OFA/bin/python \
+  -m GraphhopSimhash.generate_real_quant_pools \
+  --datasets cora \
+  --llm_name llama2_7b \
+  --configs W4BFPA4_B128_T16X8 W4BFPA4_B128_T32X4 \
+  --batch_size 4 \
+  --max_length 512 \
+  --awq_calib_samples 128 \
+  --awq_seqlen 512 \
+  --awq_q_group_size 128 \
+  --overwrite
+```
+
+Graph-context full activation-level pool：
+
+```bash
+/home/zhangshangtong/.conda/envs/OFA/bin/python \
+  -m GraphhopSimhash.generate_real_quant_pools \
+  --datasets cora \
+  --llm_name llama2_7b \
+  --configs W4BFPA4_B128_T16X8_GCTX W4BFPA4_B128_T32X4_GCTX \
+  --batch_size 4 \
+  --max_length 512 \
+  --awq_calib_samples 128 \
+  --awq_seqlen 512 \
+  --awq_q_group_size 128 \
+  --overwrite
+```
+
+Full-pool accuracy evaluation：
+
+```bash
+/home/zhangshangtong/.conda/envs/OFA/bin/python \
+  -m GraphhopSimhash \
+  --datasets cora \
+  --runs 3 \
+  --experiment_suite real_quant_ablation \
+  --real_quant_policy_suite w4a8_budget \
+  --real_quant_model_name llama2_7b \
+  --real_quant_fp_tag W4A8 \
+  --real_quant_int8_tag W4BFPA4_B128_T16X8 \
+  --real_quant_int4_tag W4BFPA4_B128_T32X4 \
+  --real_quant_fp_ratio 0.0 \
+  --real_quant_int8_ratio 0.20 \
+  --real_quant_error_norm 1.0
+```
+
+Rowwise T1X128 accuracy evaluation：
+
+```bash
+/home/zhangshangtong/.conda/envs/OFA/bin/python \
+  -m GraphhopSimhash \
+  --datasets cora \
+  --runs 3 \
+  --experiment_suite real_quant_ablation \
+  --real_quant_policy_suite w4a8_budget \
+  --real_quant_model_name llama2_7b \
+  --real_quant_fp_tag W4A8 \
+  --real_quant_int8_tag W4BFPA4_B128 \
+  --real_quant_int4_tag W4BFPA4_B128 \
+  --real_quant_fp_ratio 0.0 \
+  --real_quant_int8_ratio 0.20 \
+  --real_quant_error_norm 1.0
 ```

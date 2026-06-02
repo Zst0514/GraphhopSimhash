@@ -14,6 +14,7 @@ import torch.nn.functional as F
 from tqdm import tqdm
 
 from .data import load_raw_texts
+from .features import _compute_neighbor_mean
 from .paths import ensure_repo_paths, resolve_model_path
 
 ensure_repo_paths()
@@ -117,6 +118,48 @@ CONFIG_SPECS = {
         "bfp_mantissa_bit": 4,
         "bfp_block_size": 128,
     },
+    "W4BFPA4_B128_T16X8": {
+        "tag": "W4BFPA4_B128_T16X8",
+        "kind": "awq_act_bfp",
+        "w_bit": 4,
+        "a_bit": 4,
+        "bfp_mantissa_bit": 4,
+        "bfp_block_size": 128,
+        "bfp_row_chunk": 16,
+        "bfp_col_chunk": 8,
+    },
+    "W4BFPA4_B128_T32X4": {
+        "tag": "W4BFPA4_B128_T32X4",
+        "kind": "awq_act_bfp",
+        "w_bit": 4,
+        "a_bit": 4,
+        "bfp_mantissa_bit": 4,
+        "bfp_block_size": 128,
+        "bfp_row_chunk": 32,
+        "bfp_col_chunk": 4,
+    },
+    "W4BFPA4_B128_T16X8_GCTX": {
+        "tag": "W4BFPA4_B128_T16X8_GCTX",
+        "kind": "awq_act_bfp",
+        "w_bit": 4,
+        "a_bit": 4,
+        "bfp_mantissa_bit": 4,
+        "bfp_block_size": 128,
+        "bfp_row_chunk": 16,
+        "bfp_col_chunk": 8,
+        "bfp_order_strategy": "graph_context",
+    },
+    "W4BFPA4_B128_T32X4_GCTX": {
+        "tag": "W4BFPA4_B128_T32X4_GCTX",
+        "kind": "awq_act_bfp",
+        "w_bit": 4,
+        "a_bit": 4,
+        "bfp_mantissa_bit": 4,
+        "bfp_block_size": 128,
+        "bfp_row_chunk": 32,
+        "bfp_col_chunk": 4,
+        "bfp_order_strategy": "graph_context",
+    },
     "W4BFPA3_B128": {
         "tag": "W4BFPA3_B128",
         "kind": "awq_act_bfp",
@@ -171,6 +214,8 @@ def load_text_selection_edge_index(dataset):
         candidates.append(os.path.join("data", "single_graph", "Cora", "cora.pt"))
     elif ds_key == "pubmed":
         candidates.append(os.path.join("data", "single_graph", "Pubmed", "pubmed.pt"))
+    elif ds_key == "arxiv":
+        candidates.append(os.path.join("data", "ogbn_arxiv", "processed", "geometric_data_processed.pt"))
     for path in candidates:
         if os.path.exists(path):
             data = torch.load(path, map_location="cpu")
@@ -178,6 +223,57 @@ def load_text_selection_edge_index(dataset):
             if edge_index is not None:
                 return edge_index.cpu()
     return None
+
+
+def load_tensor_feature(path):
+    obj = torch.load(path, map_location="cpu")
+    if isinstance(obj, dict):
+        for key in ("x", "embeddings", "features"):
+            if key in obj and torch.is_tensor(obj[key]):
+                obj = obj[key]
+                break
+    if not torch.is_tensor(obj):
+        raise TypeError(f"{path} did not contain a tensor feature")
+    return obj.detach().to(torch.float32).cpu()
+
+
+def pack_simhash_bits(bits):
+    bits = bits.to(torch.int64)
+    weights = (1 << torch.arange(bits.size(1), dtype=torch.int64)).view(1, -1)
+    return (bits * weights).sum(dim=1)
+
+
+def simhash_feature_order(features, bits=16, seed=42):
+    gen = torch.Generator(device="cpu")
+    gen.manual_seed(int(seed))
+    feat = F.normalize(features.to(torch.float32), p=2, dim=1)
+    proj = torch.randn(feat.size(1), int(bits), generator=gen, dtype=torch.float32)
+    codes = pack_simhash_bits((feat @ proj) >= 0)
+    return torch.argsort(codes, stable=True)
+
+
+def build_bfp_encoding_order(dataset, strategy, num_texts, seed=42):
+    strategy = str(strategy or "original").lower()
+    if strategy in ("", "none", "original"):
+        return None
+
+    ds_key = str(dataset).lower()
+    cheap_path = os.path.join("cache_data", f"{ds_key}_distilbert_l1.pt")
+    if not os.path.exists(cheap_path):
+        raise FileNotFoundError(f"BFP order strategy '{strategy}' requires {cheap_path}")
+    cheap = load_tensor_feature(cheap_path)[: int(num_texts)]
+
+    if strategy == "simhash":
+        return simhash_feature_order(cheap, bits=16, seed=seed)
+
+    if strategy == "graph_context":
+        edge_index = load_text_selection_edge_index(dataset)
+        if edge_index is None:
+            raise FileNotFoundError(f"BFP graph_context order could not find edge_index for {dataset}")
+        context = F.normalize(0.5 * cheap + 0.5 * _compute_neighbor_mean(cheap, edge_index), p=2, dim=1)
+        return simhash_feature_order(context, bits=16, seed=seed + 29)
+
+    raise ValueError(f"Unknown BFP order strategy: {strategy}")
 
 
 def build_idf(texts):
@@ -437,6 +533,70 @@ def bfp_fake_quantize(x, mantissa_bit=8, block_size=128, dim=-1):
     return torch.nan_to_num(out, nan=0.0, posinf=0.0, neginf=0.0)
 
 
+def bfp_fake_quantize_tile(x, mantissa_bit=8, row_chunk=16, col_chunk=8):
+    """BFP fake quantization with one exponent per row_chunk x col_chunk tile.
+
+    The input activation is viewed as [token_rows, hidden_dim].  Unlike
+    rowwise BFP, this layout lets one exponent cover multiple token/node rows,
+    which is the hardware-facing layout needed by graph-aware row grouping.
+    """
+    mantissa_bit = int(mantissa_bit)
+    if mantissa_bit >= 16:
+        return x
+    if mantissa_bit <= 1:
+        raise ValueError(f"mantissa_bit must be >= 2, got {mantissa_bit}")
+    row_chunk = int(row_chunk)
+    col_chunk = int(col_chunk)
+    if row_chunk <= 0 or col_chunk <= 0:
+        raise ValueError(f"row_chunk/col_chunk must be positive, got {row_chunk}x{col_chunk}")
+    if x.dim() == 0:
+        return x
+
+    x = torch.nan_to_num(x, nan=0.0, posinf=0.0, neginf=0.0)
+    orig_shape = x.shape
+    hidden = int(orig_shape[-1])
+    rows = int(x.numel() // max(1, hidden))
+    x_2d = x.contiguous().reshape(rows, hidden)
+
+    row_pad = (row_chunk - (rows % row_chunk)) % row_chunk
+    col_pad = (col_chunk - (hidden % col_chunk)) % col_chunk
+    x_pad = x_2d
+    if col_pad:
+        x_pad = F.pad(x_pad, (0, col_pad))
+    if row_pad:
+        pad_rows = torch.zeros(row_pad, x_pad.size(1), dtype=x_pad.dtype, device=x_pad.device)
+        x_pad = torch.cat([x_pad, pad_rows], dim=0)
+
+    n_pad, d_pad = x_pad.shape
+    grouped = (
+        x_pad.reshape(n_pad // row_chunk, row_chunk, d_pad // col_chunk, col_chunk)
+        .permute(0, 2, 1, 3)
+        .contiguous()
+        .reshape(n_pad // row_chunk, d_pad // col_chunk, row_chunk * col_chunk)
+    )
+
+    q_min = -(2 ** (mantissa_bit - 1))
+    q_max = (2 ** (mantissa_bit - 1)) - 1
+    abs_max = grouped.detach().abs().amax(dim=-1, keepdim=True)
+    safe_abs = abs_max.to(torch.float32).clamp_min(1e-30)
+    exponent = torch.ceil(torch.log2(safe_abs / float(q_max))).clamp(min=-30.0, max=30.0)
+    scale = torch.pow(torch.full_like(exponent, 2.0), exponent).to(dtype=grouped.dtype)
+    quantized = torch.round(grouped / scale).clamp(q_min, q_max)
+    out = (
+        (quantized * scale)
+        .reshape(n_pad // row_chunk, d_pad // col_chunk, row_chunk, col_chunk)
+        .permute(0, 2, 1, 3)
+        .contiguous()
+        .reshape(n_pad, d_pad)
+    )
+    if row_pad:
+        out = out[:-row_pad]
+    if col_pad:
+        out = out[:, :-col_pad]
+    out = out.reshape(orig_shape)
+    return torch.nan_to_num(out, nan=0.0, posinf=0.0, neginf=0.0)
+
+
 def affine_a8_trunc_fake_quantize(x, trunc_bit, mode="per_tensor", dim=-1):
     """Quantize with A8 affine scale, then clear low integer-code bits.
 
@@ -595,6 +755,8 @@ class ActivationQuantLinear(nn.Module):
         trunc_bit=None,
         bfp_mantissa_bit=None,
         bfp_block_size=128,
+        bfp_row_chunk=None,
+        bfp_col_chunk=None,
     ):
         super().__init__()
         self.linear = original_linear
@@ -602,6 +764,8 @@ class ActivationQuantLinear(nn.Module):
         self.trunc_bit = None if trunc_bit is None else int(trunc_bit)
         self.bfp_mantissa_bit = None if bfp_mantissa_bit is None else int(bfp_mantissa_bit)
         self.bfp_block_size = int(bfp_block_size)
+        self.bfp_row_chunk = None if bfp_row_chunk is None else int(bfp_row_chunk)
+        self.bfp_col_chunk = None if bfp_col_chunk is None else int(bfp_col_chunk)
         self.in_features = int(original_linear.in_features)
         self.out_features = int(original_linear.out_features)
         self.module_name = module_name or ""
@@ -641,12 +805,22 @@ class ActivationQuantLinear(nn.Module):
             channel_clip_abs=self.channel_clip_abs,
         )
         if self.bfp_mantissa_bit is not None:
-            qx = bfp_fake_quantize(
-                clipped,
-                mantissa_bit=self.bfp_mantissa_bit,
-                block_size=self.bfp_block_size,
-                dim=-1,
-            )
+            if self.bfp_row_chunk is not None or self.bfp_col_chunk is not None:
+                row_chunk = self.bfp_row_chunk if self.bfp_row_chunk is not None else 1
+                col_chunk = self.bfp_col_chunk if self.bfp_col_chunk is not None else self.bfp_block_size
+                qx = bfp_fake_quantize_tile(
+                    clipped,
+                    mantissa_bit=self.bfp_mantissa_bit,
+                    row_chunk=row_chunk,
+                    col_chunk=col_chunk,
+                )
+            else:
+                qx = bfp_fake_quantize(
+                    clipped,
+                    mantissa_bit=self.bfp_mantissa_bit,
+                    block_size=self.bfp_block_size,
+                    dim=-1,
+                )
         elif self.trunc_bit is not None:
             qx = affine_a8_trunc_fake_quantize(clipped, self.trunc_bit, mode="per_channel", dim=-1)
         else:
@@ -663,6 +837,8 @@ def replace_linear_with_activation_quant(
     trunc_bit=None,
     bfp_mantissa_bit=None,
     bfp_block_size=128,
+    bfp_row_chunk=None,
+    bfp_col_chunk=None,
 ):
     clip_config_by_name = clip_config_by_name or {}
     for name, child in list(module.named_children()):
@@ -679,6 +855,8 @@ def replace_linear_with_activation_quant(
                     trunc_bit=trunc_bit,
                     bfp_mantissa_bit=bfp_mantissa_bit,
                     bfp_block_size=bfp_block_size,
+                    bfp_row_chunk=bfp_row_chunk,
+                    bfp_col_chunk=bfp_col_chunk,
                 ),
             )
         else:
@@ -691,6 +869,8 @@ def replace_linear_with_activation_quant(
                 trunc_bit=trunc_bit,
                 bfp_mantissa_bit=bfp_mantissa_bit,
                 bfp_block_size=bfp_block_size,
+                bfp_row_chunk=bfp_row_chunk,
+                bfp_col_chunk=bfp_col_chunk,
             )
 
 
@@ -1381,6 +1561,9 @@ def generate_pool(dataset, llm_name, config_name, args):
                     "[AWQ] Installing BFP activation wrappers "
                     f"| mantissa={int(config_spec['bfp_mantissa_bit'])} "
                     f"| block={int(config_spec['bfp_block_size'])} "
+                    f"| tile={config_spec.get('bfp_row_chunk', 1)}x"
+                    f"{config_spec.get('bfp_col_chunk', int(config_spec.get('bfp_block_size', 128)))} "
+                    f"| order={config_spec.get('bfp_order_strategy', 'original')} "
                     f"| outlier_clip_layers={len(act_clip_config)}"
                 )
             else:
@@ -1395,9 +1578,26 @@ def generate_pool(dataset, llm_name, config_name, args):
                 trunc_bit=trunc_bit,
                 bfp_mantissa_bit=config_spec.get("bfp_mantissa_bit"),
                 bfp_block_size=int(config_spec.get("bfp_block_size", 128)),
+                bfp_row_chunk=config_spec.get("bfp_row_chunk"),
+                bfp_col_chunk=config_spec.get("bfp_col_chunk"),
             )
 
     encode_texts_input = compact_texts_for_encoder(texts, dataset, tokenizer, args)
+    encode_order = None
+    if config_spec["kind"] == "awq_act_bfp":
+        encode_order = build_bfp_encoding_order(
+            dataset,
+            config_spec.get("bfp_order_strategy", "original"),
+            len(encode_texts_input),
+            seed=int(getattr(args, "text_compaction_seed", 42)),
+        )
+        if encode_order is not None:
+            print(
+                "[GraphBFP] Applying node encoding order "
+                f"| strategy={config_spec.get('bfp_order_strategy')} "
+                f"| nodes={int(encode_order.numel())}"
+            )
+            encode_texts_input = [encode_texts_input[int(idx)] for idx in encode_order.tolist()]
     maybe_install_ffn_channel_gating(
         model,
         tokenizer,
@@ -1411,6 +1611,10 @@ def generate_pool(dataset, llm_name, config_name, args):
         tag,
     )
     embs = encode_texts(model, tokenizer, encode_texts_input, batch_size, args.max_length, device)
+    if encode_order is not None:
+        restored = torch.empty_like(embs)
+        restored[encode_order] = embs
+        embs = restored
     embs = maybe_align_output_embeddings(embs, dataset, llm_name, tag, config_spec, out_path, args)
 
     os.makedirs(os.path.dirname(out_path) or ".", exist_ok=True)
