@@ -61,6 +61,62 @@ CONFIG_SPECS = {
     "W4A8_TRUNC6": {"tag": "W4A8_TRUNC6", "kind": "awq_act_trunc", "w_bit": 4, "a_bit": 8, "trunc_bit": 6},
     "W4A8_TRUNC5": {"tag": "W4A8_TRUNC5", "kind": "awq_act_trunc", "w_bit": 4, "a_bit": 8, "trunc_bit": 5},
     "W4A8_TRUNC4": {"tag": "W4A8_TRUNC4", "kind": "awq_act_trunc", "w_bit": 4, "a_bit": 8, "trunc_bit": 4},
+    "W4BFPA8_B128": {
+        "tag": "W4BFPA8_B128",
+        "kind": "awq_act_bfp",
+        "w_bit": 4,
+        "a_bit": 8,
+        "bfp_mantissa_bit": 8,
+        "bfp_block_size": 128,
+    },
+    "W4BFPA8_B64": {
+        "tag": "W4BFPA8_B64",
+        "kind": "awq_act_bfp",
+        "w_bit": 4,
+        "a_bit": 8,
+        "bfp_mantissa_bit": 8,
+        "bfp_block_size": 64,
+    },
+    "W4BFPA8_B256": {
+        "tag": "W4BFPA8_B256",
+        "kind": "awq_act_bfp",
+        "w_bit": 4,
+        "a_bit": 8,
+        "bfp_mantissa_bit": 8,
+        "bfp_block_size": 256,
+    },
+    "W4BFPA7_B128": {
+        "tag": "W4BFPA7_B128",
+        "kind": "awq_act_bfp",
+        "w_bit": 4,
+        "a_bit": 7,
+        "bfp_mantissa_bit": 7,
+        "bfp_block_size": 128,
+    },
+    "W4BFPA6_B128": {
+        "tag": "W4BFPA6_B128",
+        "kind": "awq_act_bfp",
+        "w_bit": 4,
+        "a_bit": 6,
+        "bfp_mantissa_bit": 6,
+        "bfp_block_size": 128,
+    },
+    "W4BFPA5_B128": {
+        "tag": "W4BFPA5_B128",
+        "kind": "awq_act_bfp",
+        "w_bit": 4,
+        "a_bit": 5,
+        "bfp_mantissa_bit": 5,
+        "bfp_block_size": 128,
+    },
+    "W4BFPA4_B128": {
+        "tag": "W4BFPA4_B128",
+        "kind": "awq_act_bfp",
+        "w_bit": 4,
+        "a_bit": 4,
+        "bfp_mantissa_bit": 4,
+        "bfp_block_size": 128,
+    },
     "W4A16_FAKE": {"tag": "W4A16_FAKE", "kind": "fake_wa", "w_bit": 4, "a_bit": 16},
     "W4A8_FAKE": {"tag": "W4A8_FAKE", "kind": "fake_wa", "w_bit": 4, "a_bit": 8},
     "W4A7_FAKE": {"tag": "W4A7_FAKE", "kind": "fake_wa", "w_bit": 4, "a_bit": 7},
@@ -312,6 +368,59 @@ def affine_fake_quantize(x, bit_width, mode="per_tensor", dim=-1):
     return torch.nan_to_num((quantized - zero_point) * scale, nan=0.0, posinf=0.0, neginf=0.0)
 
 
+def bfp_fake_quantize(x, mantissa_bit=8, block_size=128, dim=-1):
+    """Block floating-point fake quantization for activation tensors.
+
+    Each block along ``dim`` shares a power-of-two scale. Values inside the
+    block are represented by signed integer mantissas. This keeps the format
+    close to hardware BFP: one exponent per activation block, cheap shifts for
+    scaling, and no per-channel affine zero-point.
+    """
+    mantissa_bit = int(mantissa_bit)
+    if mantissa_bit >= 16:
+        return x
+    if mantissa_bit <= 1:
+        raise ValueError(f"mantissa_bit must be >= 2, got {mantissa_bit}")
+    block_size = int(block_size)
+    if block_size <= 0:
+        raise ValueError(f"block_size must be positive, got {block_size}")
+    if x.dim() == 0:
+        return x
+
+    x = torch.nan_to_num(x, nan=0.0, posinf=0.0, neginf=0.0)
+    dim = int(dim) % x.dim()
+    if dim != x.dim() - 1:
+        x_work = x.transpose(dim, -1).contiguous()
+    else:
+        x_work = x.contiguous()
+
+    orig_shape = x_work.shape
+    last = int(orig_shape[-1])
+    pad = (block_size - (last % block_size)) % block_size
+    if pad:
+        x_work = F.pad(x_work, (0, pad))
+
+    grouped = x_work.reshape(*x_work.shape[:-1], -1, block_size)
+    q_min = -(2 ** (mantissa_bit - 1))
+    q_max = (2 ** (mantissa_bit - 1)) - 1
+    abs_max = grouped.detach().abs().amax(dim=-1, keepdim=True)
+
+    # Shared exponent: scale is power-of-two, chosen so the largest magnitude
+    # in the block fits the signed mantissa range.
+    safe_abs = abs_max.to(torch.float32).clamp_min(1e-30)
+    exponent = torch.ceil(torch.log2(safe_abs / float(q_max))).clamp(min=-30.0, max=30.0)
+    scale = torch.pow(torch.full_like(exponent, 2.0), exponent).to(dtype=grouped.dtype)
+
+    quantized = torch.round(grouped / scale).clamp(q_min, q_max)
+    out = (quantized * scale).reshape(*x_work.shape)
+    if pad:
+        out = out[..., :last]
+    out = out.reshape(orig_shape)
+    if dim != x.dim() - 1:
+        out = out.transpose(dim, -1).contiguous()
+    return torch.nan_to_num(out, nan=0.0, posinf=0.0, neginf=0.0)
+
+
 def affine_a8_trunc_fake_quantize(x, trunc_bit, mode="per_tensor", dim=-1):
     """Quantize with A8 affine scale, then clear low integer-code bits.
 
@@ -461,11 +570,22 @@ def replace_linear_with_fake_quant(module, w_bit, a_bit, awq_grid=21, skip_names
 
 
 class ActivationQuantLinear(nn.Module):
-    def __init__(self, original_linear, a_bit=8, module_name=None, clip_config=None, trunc_bit=None):
+    def __init__(
+        self,
+        original_linear,
+        a_bit=8,
+        module_name=None,
+        clip_config=None,
+        trunc_bit=None,
+        bfp_mantissa_bit=None,
+        bfp_block_size=128,
+    ):
         super().__init__()
         self.linear = original_linear
         self.a_bit = int(a_bit)
         self.trunc_bit = None if trunc_bit is None else int(trunc_bit)
+        self.bfp_mantissa_bit = None if bfp_mantissa_bit is None else int(bfp_mantissa_bit)
+        self.bfp_block_size = int(bfp_block_size)
         self.in_features = int(original_linear.in_features)
         self.out_features = int(original_linear.out_features)
         self.module_name = module_name or ""
@@ -489,6 +609,8 @@ class ActivationQuantLinear(nn.Module):
 
     def forward(self, x):
         if self.has_outlier_channels:
+            if self.bfp_mantissa_bit is not None:
+                raise NotImplementedError("BFP activation quantization does not support protected outlier channels yet.")
             qx = affine_fake_quantize_with_protected_channels(
                 x,
                 self.a_bit,
@@ -502,7 +624,14 @@ class ActivationQuantLinear(nn.Module):
             clip_abs=self.clip_abs,
             channel_clip_abs=self.channel_clip_abs,
         )
-        if self.trunc_bit is not None:
+        if self.bfp_mantissa_bit is not None:
+            qx = bfp_fake_quantize(
+                clipped,
+                mantissa_bit=self.bfp_mantissa_bit,
+                block_size=self.bfp_block_size,
+                dim=-1,
+            )
+        elif self.trunc_bit is not None:
             qx = affine_a8_trunc_fake_quantize(clipped, self.trunc_bit, mode="per_channel", dim=-1)
         else:
             qx = affine_fake_quantize(clipped, self.a_bit, mode="per_channel", dim=-1)
@@ -516,6 +645,8 @@ def replace_linear_with_activation_quant(
     clip_config_by_name=None,
     prefix="",
     trunc_bit=None,
+    bfp_mantissa_bit=None,
+    bfp_block_size=128,
 ):
     clip_config_by_name = clip_config_by_name or {}
     for name, child in list(module.named_children()):
@@ -530,6 +661,8 @@ def replace_linear_with_activation_quant(
                     module_name=full_name,
                     clip_config=clip_config_by_name.get(full_name),
                     trunc_bit=trunc_bit,
+                    bfp_mantissa_bit=bfp_mantissa_bit,
+                    bfp_block_size=bfp_block_size,
                 ),
             )
         else:
@@ -540,6 +673,8 @@ def replace_linear_with_activation_quant(
                 clip_config_by_name=clip_config_by_name,
                 prefix=full_name,
                 trunc_bit=trunc_bit,
+                bfp_mantissa_bit=bfp_mantissa_bit,
+                bfp_block_size=bfp_block_size,
             )
 
 
@@ -1162,7 +1297,7 @@ def generate_pool(dataset, llm_name, config_name, args):
         print("[Info] Reducing LLaMA batch_size to 4 to avoid OOM.")
         batch_size = 4
 
-    awq_kinds = ("awq", "awq_act", "awq_act_trunc")
+    awq_kinds = ("awq", "awq_act", "awq_act_trunc", "awq_act_bfp")
     load_config_name = "fp16" if config_spec["kind"] in ("fake_wa", *awq_kinds) else config_name
     model, tokenizer, _tag = load_model_and_tokenizer(
         llm_name,
@@ -1191,11 +1326,15 @@ def generate_pool(dataset, llm_name, config_name, args):
             _ = encode_texts(model, tokenizer, texts[:calib_count], batch_size, args.max_length, device)
     elif config_spec["kind"] in awq_kinds:
         trunc_bit = config_spec.get("trunc_bit")
-        target_suffix = (
-            f"W4A8_TRUNC{int(trunc_bit)}"
-            if config_spec["kind"] == "awq_act_trunc"
-            else f"W4A{int(config_spec['a_bit'])}"
-        )
+        if config_spec["kind"] == "awq_act_trunc":
+            target_suffix = f"W4A8_TRUNC{int(trunc_bit)}"
+        elif config_spec["kind"] == "awq_act_bfp":
+            target_suffix = (
+                f"W4BFPA{int(config_spec['bfp_mantissa_bit'])}"
+                f"_B{int(config_spec['bfp_block_size'])}"
+            )
+        else:
+            target_suffix = f"W4A{int(config_spec['a_bit'])}"
         print(
             "[AWQ] Installing official llm-awq W4 weight quantization path "
             f"| target={target_suffix}"
@@ -1209,7 +1348,7 @@ def generate_pool(dataset, llm_name, config_name, args):
             args=args,
             activation_bit=int(config_spec["a_bit"]),
         )
-        if config_spec["kind"] in ("awq_act", "awq_act_trunc"):
+        if config_spec["kind"] in ("awq_act", "awq_act_trunc", "awq_act_bfp"):
             act_clip_config = load_activation_outlier_clip_config(
                 dataset,
                 llm_name,
@@ -1221,6 +1360,13 @@ def generate_pool(dataset, llm_name, config_name, args):
                     "[AWQ] Installing activation truncation wrappers "
                     f"| A8->T{int(trunc_bit)} | outlier_clip_layers={len(act_clip_config)}"
                 )
+            elif config_spec["kind"] == "awq_act_bfp":
+                print(
+                    "[AWQ] Installing BFP activation wrappers "
+                    f"| mantissa={int(config_spec['bfp_mantissa_bit'])} "
+                    f"| block={int(config_spec['bfp_block_size'])} "
+                    f"| outlier_clip_layers={len(act_clip_config)}"
+                )
             else:
                 print(
                     f"[AWQ] Installing activation fake quant wrappers | A{int(config_spec['a_bit'])} "
@@ -1231,6 +1377,8 @@ def generate_pool(dataset, llm_name, config_name, args):
                 a_bit=int(config_spec["a_bit"]),
                 clip_config_by_name=act_clip_config,
                 trunc_bit=trunc_bit,
+                bfp_mantissa_bit=config_spec.get("bfp_mantissa_bit"),
+                bfp_block_size=int(config_spec.get("bfp_block_size", 128)),
             )
 
     encode_texts_input = compact_texts_for_encoder(texts, dataset, tokenizer, args)

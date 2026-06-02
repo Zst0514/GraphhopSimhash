@@ -16,6 +16,7 @@
 - [GRAPH_BIT_SYSTOLIC_FLASH_DATAFLOW.md](npu/GRAPH_BIT_SYSTOLIC_FLASH_DATAFLOW.md): 基于脉动阵列和类 FlashAttention IO-aware tiling 的 W-stationary 数据流。
 - [GRAPH_BIT_EARLY_STOP_IMPLEMENTATION.md](npu/GRAPH_BIT_EARLY_STOP_IMPLEMENTATION.md): bit-plane early stop 从 CLI、runner、ONNXim/GemmWS 到 trace replay 的代码级实现说明。
 - [GRAPH_BIT_FULLSTACK_REPRODUCTION_GUIDE.md](npu/GRAPH_BIT_FULLSTACK_REPRODUCTION_GUIDE.md): Graph-Bit full-stack 复现实验流程、调参入口、输出文件和结果解读。
+- [BFP_ACTIVATION_FORMAT.md](npu/BFP_ACTIVATION_FORMAT.md): BFP activation 格式、B64/B128/B256 block size、相对 W4A8 的计算/访存差异和 Cora/LLaMA-7B block sweep。
 - [LLAMA_ROOFLINE_PROFILE.md](npu/LLAMA_ROOFLINE_PROFILE.md): LLaMA-7B projection / FFN GEMM 的 roofline profile。
 
 机制拆分、组会版说明和早期 proxy 已移到 `docs/archive/npu/`。

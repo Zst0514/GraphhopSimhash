@@ -82,6 +82,7 @@ if [[ -z "${RESIDUAL_ACCEPT_LOSS_WEIGHT+x}" ]]; then
   fi
 fi
 RESIDUAL_GATE_SPARSITY_WEIGHT="${RESIDUAL_GATE_SPARSITY_WEIGHT:-0.02}"
+PRECISION_DEPTH_REFERENCE_TAG="${PRECISION_DEPTH_REFERENCE_TAG:-W4A8}"
 PRECISION_DEPTH_TAGS=(${PRECISION_DEPTH_TAGS:-W4A8_TRUNC7 W4A8_TRUNC6 W4A8_TRUNC5 W4A8_TRUNC4})
 PRECISION_DEPTH_BITS=(${PRECISION_DEPTH_BITS:-7 6 5 4})
 BOUND_ENABLE="${BOUND_ENABLE:-1}"
@@ -225,7 +226,7 @@ run_algo() {
     --runs "${RUNS}" \
     --experiment_suite residual_precision_depth \
     --real_quant_model_name llama2_7b \
-    --precision_depth_reference_tag W4A8 \
+    --precision_depth_reference_tag "${PRECISION_DEPTH_REFERENCE_TAG}" \
     --precision_depth_tags "${PRECISION_DEPTH_TAGS[@]}" \
     --precision_depth_bits "${PRECISION_DEPTH_BITS[@]}" \
     --precision_depth_reference_bits 8 \
