@@ -13,7 +13,7 @@ Degree 只决定节点进入 high / mid / low 哪个风险 bucket。
 
 ```text
 docs/archive/npu/GRAPH_BIT_PREDICTOR_FREE_WTILE.md
-docs/npu/GRAPH_BIT_EARLY_STOP_IMPLEMENTATION.md
+docs/archive/npu/GRAPH_BIT_EARLY_STOP_IMPLEMENTATION.md
 ```
 
 ## 1. Degree 在代码里具体是什么

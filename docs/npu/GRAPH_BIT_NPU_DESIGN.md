@@ -1,497 +1,288 @@
-# Graph-Bit NPU Design
+# Graph-Aware BFP NPU Design
 
-本文档是 Graph-Bit NPU 的主设计入口，只保留核心机制：
+本文档是当前后端 NPU 主线入口。主线已经收束为：
 
 ```text
-SimHash 前端复用
-LRU + HD-CAM embedding cache
-Graph-Bit NPU
-类 FlashAttention 的 W-stationary 数据流
+SimHash/LRU-CAM:
+    找可复用 anchor，减少 encoder 调用次数。
+
+TSER-guided residual reuse:
+    用图传播风险和语义风险控制 fuzzy reuse，并用轻量 MLP 修正中风险 fuzzy hit。
+
+TSER / graph-risk-guided BFP encoder:
+    对 reject / miss nodes，用 BFPA4 作为低成本底座，只把高风险节点提升到 BFPA6/BFPA8。
 ```
 
-实验命令和结果表见：
+因此 TSER 不是只服务前端 reuse。它是贯穿前后端的风险信号：
 
 ```text
-docs/npu/GRAPH_BIT_FULLSTACK_REPRODUCTION_GUIDE.md
-docs/results/
-```
+front-end:
+    判断 fuzzy anchor 是否安全。
 
----
-
-## 1. One-Sentence Idea
-
-Graph-Bit 的目标不是简单做 degree-guided quantization，而是把图任务信息接入 LLM encoder 的执行层级：
-
-```text
-SimHash/CAM decides whether to run the encoder.
-Graph risk decides how remaining miss nodes are scheduled and how much arithmetic effort they spend inside the NPU.
+backend:
+    判断 miss node 是否需要更高 activation precision。
 ```
 
 ---
 
-## 2. System Overview
+## 1. End-to-End Path
 
 ```mermaid
-flowchart TD
+flowchart LR
     A[Graph text node] --> B[Multi-head SimHash]
-    B --> C[LRU + HD-CAM embedding cache]
-    C --> D{Reuse route}
-
-    D -->|high-confidence hit| E[P0 Direct reuse]
-    D -->|fuzzy hit| F[P1 Residual reuse]
-    D -->|miss / reject| G[P2 Graph-Bit NPU]
-
-    A --> H[Graph risk]
-    H --> G
-
-    G --> I[Risk-bucket scheduler]
-    I --> J[W-stationary systolic array]
-    J --> K[Predictor-free activation-depth execution]
-    K --> L[Encoder embedding]
-
-    E --> M[Final embedding]
-    F --> M
-    L --> M
-    M --> N[GNN classifier]
+    B --> C[LRU + HD-CAM<br/>anchor + support]
+    C -->|support >= 5| D[P0 Direct reuse]
+    C -->|support = 3..4| E[P1 TSER-guided<br/>Residual reuse]
+    C -->|support < 3| F[P2 BFP encoder]
+    E -->|accept| G[Final embedding]
+    E -->|reject| F
+    D --> G
+    F --> G
+    G --> H[GNN classifier]
 ```
 
-三条路径：
-
-| Path | Meaning | Main Cost |
-|---|---|---:|
-| P0 Direct reuse | CAM 高置信命中，直接读缓存 embedding | near-zero |
-| P1 Residual reuse | CAM fuzzy hit，anchor embedding + residual adapter | tiny |
-| P2 Graph-Bit NPU | miss/reject 节点执行 encoder GEMM | NPU cost |
-
----
-
-## 3. SimHash Front-End
-
-每个节点生成多个短 hash head：
+当前主线参数：
 
 ```text
-8 heads x 16 bit
-```
+SimHash:
+    8 heads x 16 bits
+    radius = 2
 
-hash 由文本和图上下文共同产生：
+Score gate:
+    T = 31
+    TSER weights = 3 / 1 / 1
+        propagation risk
+        graph context risk
+        low-unique risk
 
-```text
-self text feature
-neighbor / topology-aware text feature
-optional structural feature
-```
-
-多头设计的作用：
-
-```text
-1. 每个 CAM bank 只需要比较短 word。
-2. 多个 head 的 support count 可作为置信度。
-3. support count 自然划分 direct / residual / compute。
+Support split:
+    support >= 5  -> direct reuse
+    support = 3..4 -> residual candidate
+    support < 3   -> BFP encoder
 ```
 
 ---
 
-## 4. LRU + HD-CAM Embedding Cache
+## 2. TSER-Guided Residual Reuse
 
-### 4.1 Cache Organization
+CAM 只回答“有没有相似 anchor”。TSER 回答“这个相似 anchor 复用错了后果大不大”。
 
 ```text
-Embedding Cache entry:
-    hash heads
-    node_id
-    cached embedding
-    metadata
-    LRU age
+reuse_risk = sensitivity_q * reuse_error_q
 
-HD-CAM banks:
-    bank0 -> head0
-    bank1 -> head1
-    ...
-    bank7 -> head7
+sensitivity_q =
+    3 * propagation_q
+  + 1 * graph_context_q
+  + 1 * low_unique_q
 ```
 
-### 4.2 Lookup Flow
+进入 residual 路径后，轻量 MLP 做两件事：
 
 ```text
-1. Query node computes 8 hash heads.
-2. 8 HD-CAM banks search in parallel.
-3. Each bank returns candidates with Hamming distance <= R.
-4. Candidates are merged by node_id.
-5. support count + score gate decide route.
+delta, accept_score = MLP(pair_feature(v, u))
+
+if accept_score >= tau:
+    E_hat(v) = E(u) + alpha * delta
+else:
+    reject -> BFP encoder
 ```
 
-### 4.3 LRU Role
+这里 `E(u)` 是缓存里的 anchor embedding。`delta` 学的是当前目标 embedding 空间里的修正量，所以 ST、LLaMA、BFPA4、BFPA6 都需要各自训练 residual adapter/gate。
 
-CAM 解决“找谁像我”，LRU 解决“cache 满了保留谁”。
+当前 Cora/LLaMA BFPA target 结果：
 
-```text
-hit:
-    update LRU age
+| Target | Direct Reuse | Direct Drop | SoftDirect Reuse | SoftDirect Drop | Residual Reuse | Residual Drop |
+|---|---:|---:|---:|---:|---:|---:|
+| BFPA6 | 15.7% | 0.71% | 51.6% | 2.56% | 39.1% | 1.24% |
+| BFPA4 | 15.7% | 0.42% | 50.3% | 2.80% | 38.5% | 1.74% |
 
-new computed embedding:
-    insert into cache
-
-cache full:
-    evict least recently used entry
-```
-
-最小硬件版本只需要：
+含义：
 
 ```text
-HD-CAM lookup + LRU embedding cache
-```
+SoftDirectReuse:
+    把 support=3..4 的 fuzzy hit 全收，reuse 高但 drop 增大。
 
-后续可以扩展为 graph-aware replacement，但不是主线必要条件。
-
----
-
-## 5. Reuse Decision
-
-CAM 输出候选和 support，不直接输出 embedding 是否可用。
-
-```text
-support high:
-    direct reuse
-
-support medium:
-    residual-corrected reuse
-
-support low:
-    send to Graph-Bit NPU
-```
-
-语义：
-
-```text
-direct reuse:
-    cached embedding is trusted.
-
-residual reuse:
-    cached anchor is close but needs correction.
-
-compute:
-    candidate is not reliable enough; run encoder.
+ResidualReuse:
+    只接受 gate 认为可靠的 fuzzy hit，reuse 降低但 drop 回到 2% 内。
 ```
 
 ---
 
-## 6. Graph-Bit NPU Input
+## 3. BFP Encoder Path For Miss Nodes
 
-Graph-Bit NPU 只处理前端没有安全复用的 miss nodes。
-
-```text
-Input queue:
-    node_id
-    tokenized text
-    graph risk score
-    route metadata
-```
-
-Graph risk 当前主线优先使用 deployable 的 degree / propagation risk：
+Residual gate 拒绝的节点和 CAM miss 节点仍然要运行 LLaMA encoder。当前后端主线采用 BFP activation format：
 
 ```text
-high propagation risk:
-    more conservative execution
+W:
+    仍然沿用 W4 / AWQ weight path。
 
-low propagation risk:
-    more aggressive early stop / batching
+A:
+    使用 BFP activation。
+    一个 block 共享 exponent，每个 value 存 mantissa。
 ```
 
-TSER / low-unique score 保留为消融和修正项。
+默认低成本路径：
+
+```text
+BFPA4:
+    4-bit mantissa + shared block exponent
+```
+
+高风险 refinement：
+
+```text
+top-risk nodes -> BFPA6 / BFPA8
+low-risk nodes -> BFPA4
+```
+
+BFP 的价值在于：它不是普通 INT4 activation。Shared exponent 保留了 block 的动态范围，因此 BFPA4 比普通 W4A4 更稳。
 
 ---
 
-## 7. Predictor-Free Activation-Depth Execution
+## 4. Graph-Aware BFP Refinement
 
-Graph-Bit 不使用 learned predictor，也不使用 oracle error。它使用数值上界判断低位 activation effort 是否还值得继续。
-
-activation 逻辑上是 A8：
+后端不把所有 miss nodes 都用同一精度。它使用 TSER / Degree 作为 selector：
 
 ```text
-A8 = b7 b6 b5 b4 b3 b2 b1 b0
+default:
+    BFPA4
+
+refinement:
+    top risk x% -> BFPA6
 ```
 
-bit-serial datapath 从高位到低位执行：
+当前观察：
 
 ```text
-P8: b7..b0
-P7: b7..b1
-P6: b7..b2
-P5: b7..b3
-P4: b7..b4
+Cora:
+    TSER 比 Degree 更强。
+    说明图语义风险能更好保护敏感节点。
+
+PubMed:
+    Degree 更稳定。
+    说明同质图上 degree / propagation risk 是更强的硬件友好 proxy。
 ```
 
-运行时决策：
+推荐主表配置：
+
+| Dataset | BFP Policy | Selector | Cost | Drop |
+|---|---|---|---:|---:|
+| Cora | 30% BFPA6 + 70% BFPA4 | TSER | 0.319 | 0.49% |
+| PubMed | 30% BFPA6 + 70% BFPA4 | Degree | 0.319 | 0.54% |
+
+更完整结果见：
 
 ```text
-graph risk -> min_depth, tolerance
-
-for depth in min_depth..8:
-    if remaining_low_bit_bound(depth) <= tolerance(node):
-        stop at depth
-        break
-```
-
-当前第一版保持机制轻量，不引入复杂的 operator sensitivity 表：
-
-```text
-node tolerance:
-    degree / propagation risk
-
-runtime bound:
-    A_low_bound(depth) * W_tile_abs_bound
-
-op sensitivity:
-    统一设为 1
-```
-
-也就是说，degree / propagation risk 只决定节点级容忍度；当前 GEMM tile 是否能跳过低位，由 activation 剩余低位上界和 W tile 强度共同决定。Q/K、V/O、FFN up/down 等算子敏感度先不进入主线，只作为后续消融项。
-
-当前实现把 W tile 强度先落成可调标量：
-
-```text
-A_low_bound(depth) = (2^(8 - depth) - 1) / 255
-
-remaining_bound(depth)
-    = bound_scale
-    * A_low_bound(depth)
-    * sqrt(tile_k / 128)
-    * w_strength
-```
-
-`w_strength` 表示当前 W tile 的相对数值强度。强 W tile 会放大低位 activation 的剩余误差上界，因此更不容易 early stop。第一版实验先扫常数 `w_strength`，后续硬件 trace 可以把它替换成真实的 W tile 统计。
-
-关键点：
-
-```text
-Degree / graph risk does not directly assign a fixed P8/P6/P4 ratio.
-It controls min_depth and tolerance.
-The runtime bound decides the actual stop depth.
-```
-
-主要节省：
-
-```text
-PE bit-serial MAC activity
-partial-sum read / update / write
-activation-side issue activity
+docs/results/GRAPH_BFP_PROGRESSIVE_REFINEMENT_RESULT.md
 ```
 
 ---
 
-## 8. W-Stationary Systolic Dataflow
+## 5. W-Stationary Dataflow
 
-Graph-Bit 的主要数据流收益来自 W tile reuse。
-
-LLaMA encoder 的 Linear / FFN 都是：
+BFP encoder 仍然执行 Transformer GEMM：
 
 ```text
 Y = X @ W
 ```
 
-其中：
+其中 `W` 是所有节点共享的模型权重。NPU 不假设整层权重常驻片上，而是让一个 W tile 留在片上，连续服务更多 token rows：
 
 ```text
-W:
-    model weights, shared by all nodes and token rows
-
-X:
-    token rows from current miss-node bucket
+for each W tile:
+    load W tile into SRAM / RF
+    stream token rows from selected miss-node bucket
+    compute X_tile @ W_tile
+    evict W tile
 ```
 
-数据流：
+一个具体量级：
 
 ```text
-for each layer:
-    for each GEMM:
-        for each W tile:
-            load W tile once into SRAM/RF
-            stream token rows from risk bucket
-            execute bit-serial GEMM
-            evict W tile
+128 x 128 W4 tile:
+    128 * 128 * 4 bit = 8 KB
+
+4096 x 4096 W4 matrix:
+    about 8 MB
+
+4096 x 11008 W4 matrix:
+    about 22 MB
 ```
 
-阵列视图：
+所以硬件目标不是把整层 W 放片上，而是：
 
 ```text
-          X token rows
-              |
-              v
-        +------------+
-W tile  | PE PE PE PE|  -> output tile
-stay -> | PE PE PE PE|
-        | PE PE PE PE|
-        +------------+
+keep reusable W tile on chip
+stream selected token rows through it
+avoid unnecessary W tile reloads
 ```
 
-这里借鉴的是 FlashAttention 的 IO-aware 思路：
-
-```text
-把可复用 tile 留在片上
-让连续的消费者数据流过这个 tile
-减少同一 tile 的反复 HBM 读取
-```
-
-区别是：
+这借鉴了 FlashAttention 的 IO-aware 原则，但作用对象不同：
 
 ```text
 FlashAttention:
-    keeps Q/K/V attention tiles on chip.
+    面向 attention Q/K/V tile。
 
-Graph-Bit:
-    keeps Linear/FFN W tiles on chip,
-    and uses graph risk to decide which token rows should consume the tile together.
+Graph-aware BFP encoder:
+    面向 LLaMA Linear/FFN W tile。
+    图风险决定哪些 miss-node token rows 进入同一执行流。
 ```
 
 ---
 
-## 9. Risk-Bucket Scheduler
+## 6. Explored But Not Mainline
 
-如果不同风险节点混在一个 micro-batch，低风险节点可能被高风险节点拖到保守执行。
-
-Graph-Bit 的额外机会来自图前端。如果把 GFM 前端当作普通 LLM encoder batch 来执行，就会把所有节点都视为一批独立 sequence / token rows，从而忽略图任务已经给出的结构信息。Graph-Bit 显式利用这些信息：
+以下路径已经探索过，但不作为当前主贡献：
 
 ```text
-1. 哪些节点已经被 SimHash/CAM 或 residual reuse 过滤掉；
-2. 剩余 miss nodes 的 degree / propagation / graph risk；
-3. 哪些 miss nodes 更适合保守执行，哪些可以更激进 early stop。
-```
+Partial-depth encoder:
+    直接用 L4/L8/L16 hidden state 当 final embedding，掉点过大。
 
-因此，Graph-Bit 可以把同风险 miss nodes 聚成 bucket，再让它们连续消费同一个 W tile。所有节点本来都共享同一个 LLaMA 权重矩阵；分桶的作用不是改变 W，而是让 stop-depth / tolerance 相近的 token rows 连续执行，减少 mixed-risk batch 带来的控制流分裂，并延长 W tile 的有效 service window：
+Cross-row BFP block packing:
+    rowwise BFPA4 较稳，cross-row BFPA4 全层使用过激。
 
-```text
-ordinary order:
-    W tile loaded
-    serves a short / mixed-risk token-row stream
-    evicted
-    later may be loaded again
+Prediction-free bit-plane early stop:
+    思路有价值，但当前 bound validation 不够稳。
+    暂时不作为主线 NPU 贡献。
 
-risk-bucket order:
-    W tile loaded
-    serves a longer same-risk token-row stream
-    evicted after more reuse
-```
-
-Graph-Bit scheduler 做两件事：
-
-```text
-1. group miss nodes by graph risk / stop-depth tendency
-2. make each W tile serve more same-risk token rows before eviction
-```
-
-执行：
-
-```text
-miss nodes
-    -> risk tagging
-    -> bucket queues
-    -> W-stationary tile execution
-```
-
-bucket size 表示 W tile 的 service window，不是 bit-width：
-
-```text
-b16: W tile serves 16 token-row blocks
-b32: W tile serves 32 token-row blocks
-b64: W tile serves 64 token-row blocks
-```
-
-主要收益：
-
-```text
-1. amortize W tile HBM/LLC load over more token rows
-2. improve W-stationary array utilization
-3. keep nodes with similar min_depth / tolerance in the same execution stream
-4. reduce high-risk nodes forcing low-risk nodes into conservative P8-like execution
-```
-
-tradeoff：
-
-```text
-larger bucket:
-    fewer W tile reloads
-    better traffic/cycle reduction
-    higher SRAM pressure and tail handling cost
-
-smaller bucket:
-    easier scheduling
-    lower SRAM pressure
-    weaker W reuse
+FFN channel gating / token compaction:
+    可作为历史探索，不作为当前论文主路径。
 ```
 
 ---
 
-## 10. What Is New
+## 7. Current Contribution Boundary
 
-Graph-Bit does not claim ordinary W tile reuse is new. Ordinary GEMM accelerators already reuse W tiles.
-
-The new point is:
+不要把贡献写成：
 
 ```text
-Graph information changes the encoder execution order.
+degree selects precision
 ```
 
-Specifically:
+当前更准确的贡献边界是：
 
 ```text
-1. SimHash/CAM removes many nodes before encoder execution.
-2. Residual reuse handles fuzzy hits without full encoder.
-3. Miss nodes carry graph risk metadata.
-4. Graph risk forms bucketed token-row streams.
-5. Bucketed streams improve W-stationary reuse.
-6. Graph risk also controls predictor-free activation-depth tolerance.
+1. SimHash/LRU-CAM avoids many encoder calls.
+2. TSER-guided residual reuse turns fuzzy hit into controllable reuse.
+3. TSER / graph-risk-guided BFP refinement reduces cost for remaining miss-node encoder execution.
 ```
 
-This is different from:
+这条主线的关键不是单个 BFP 格式本身，而是：
 
 ```text
-generic Transformer accelerator:
-    sees only tensor shapes
-
-Graph-Bit:
-    sees graph risk, reuse route, support count, and miss-node bucket
+graph task risk controls both reuse safety and miss-node encoder precision.
 ```
 
 ---
 
-## 11. Contribution Boundary
-
-Do not frame the contribution as:
+## 8. Related Documents
 
 ```text
-degree tells the model to use lower precision
-```
-
-Frame it as:
-
-```text
-Graph-aware encoder execution hierarchy:
-    CAM/cache reuse avoids encoder calls.
-    Residual reuse repairs fuzzy anchors.
-    Graph-Bit NPU schedules remaining encoder GEMMs by graph risk.
-    Predictor-free bound controls activation effort inside the datapath.
-```
-
----
-
-## 12. Related Documents
-
-```text
+docs/core/SCORE_DEFINITIONS.md
 docs/core/CAM设计.md
-    HD-CAM / SimHash front-end.
-
 docs/core/RESIDUAL_CORRECTED_REUSE.md
-    Residual reuse path.
-
+docs/results/GRAPH_BFP_PROGRESSIVE_REFINEMENT_RESULT.md
+docs/npu/BFP_ACTIVATION_FORMAT.md
 docs/npu/GRAPH_BIT_SYSTOLIC_FLASH_DATAFLOW.md
-    Systolic + FlashAttention-style W-stationary dataflow.
-
-docs/npu/GRAPH_BIT_EARLY_STOP_IMPLEMENTATION.md
-    Predictor-free early-stop implementation path.
-
-docs/npu/GRAPH_BIT_FULLSTACK_REPRODUCTION_GUIDE.md
-    How to reproduce and tune experiments.
-
 docs/npu/LLAMA_ROOFLINE_PROFILE.md
-    LLaMA GEMM roofline analysis.
 ```

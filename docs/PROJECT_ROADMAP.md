@@ -1,168 +1,197 @@
 # Project Roadmap
 
-当前主线是：
+当前论文目标：
 
 ```text
-Graph-conditioned hierarchical LLM encoder execution for graph-text workloads.
+减少 text-attributed graph inference 中 LLM encoder 的执行次数和剩余执行成本。
 ```
 
-不是所有节点都完整运行 LLM encoder。系统先用 SimHash/LRU-CAM 判断能否复用，再用 Residual-Gate 修复中等置信 fuzzy hit，最后只让 miss / reject 节点进入 Graph-Bit NPU。
+主线不是单独的 degree-guided quantization，而是一个图风险控制的 encoder execution hierarchy。
 
-## 1. System Path
+---
+
+## 1. Paper Logic
+
+### 1.1 SimHash/LRU-CAM
 
 ```text
-P0 Direct reuse:
-    high-confidence CAM hit
-    read cached embedding
+input:
+    graph text node
 
-P1 Residual-Gate reuse:
+output:
+    anchor candidate + support count
+
+role:
+    快速判断节点是否可以复用已有 embedding。
+```
+
+### 1.2 TSER-Guided Residual Reuse
+
+```text
+input:
     fuzzy CAM hit
-    MLP predicts delta and accept/reject
+    TSER / support / distance / cheap feature signals
 
-P2 Graph-Bit NPU:
-    miss/reject nodes
-    graph risk controls scheduling and activation-depth execution
+output:
+    corrected embedding or reject
 
-P3 Full W4A8:
-    conservative reference / fallback
+role:
+    在 fuzzy hit 上做 lightweight correction 和 accept/reject。
 ```
 
-## 2. Current Stable Pieces
+TSER 在这里负责判断 fuzzy reuse 的风险：
 
-### Residual-Gate Front-End
+```text
+TSER = 3 * propagation
+     + 1 * graph_context
+     + 1 * low_unique
+```
 
-Shared online configuration:
+### 1.3 TSER / Graph-Risk-Guided BFP Encoder
+
+```text
+input:
+    residual gate reject / CAM miss nodes
+
+output:
+    encoder embedding
+
+role:
+    默认 BFPA4，只把高风险 miss nodes 提升到 BFPA6/BFPA8。
+```
+
+这部分把 TSER 从前端 reuse 决策扩展到后端 encoder precision 决策：
+
+```text
+front-end:
+    TSER controls reuse safety.
+
+backend:
+    TSER / Degree controls BFP refinement.
+```
+
+---
+
+## 2. Current Stable Results
+
+### 2.1 Cora/LLaMA BFPA Target Residual Reuse
+
+当前 T31 前端：
 
 ```text
 8 heads x 16 bits
 radius = 2
-score gate = on
-score weights = 3 / 1 / 1
-score threshold T = 30
-support >= 5   -> direct reuse
+T = 31
+score = 3 / 1 / 1
+support >= 5  -> direct reuse
 support = 3..4 -> residual candidate
-support < 3    -> encoder / Graph-Bit
-gate_accept_threshold = 0.575
+support < 3   -> compute
 ```
 
-Current ST result:
-
-| Dataset | Reuse | Drop |
+| Target | Residual Reuse | Residual Drop |
 |---|---:|---:|
-| Cora/ST | 46.5% | 0.93% |
-| PubMed/ST | 42.3% | 1.96% |
+| BFPA6 | 39.1% | 1.24% |
+| BFPA4 | 38.5% | 1.74% |
 
-### Graph-Bit NPU
+### 2.2 BFP Progressive Refinement
 
-Current first-line policy:
+| Dataset | Policy | Selector | Cost | Drop |
+|---|---|---|---:|---:|
+| Cora | 30% BFPA6 + 70% BFPA4 | TSER | 0.319 | 0.49% |
+| PubMed | 30% BFPA6 + 70% BFPA4 | Degree | 0.319 | 0.54% |
+
+Takeaway:
 
 ```text
-node tolerance:
-    degree / propagation risk
-
-runtime bound:
-    A_low_bound(depth) * W_tile_abs_bound
-
-op sensitivity:
-    1
+BFPA4 is the low-cost baseline.
+BFPA6 is the most cost-effective refinement.
+BFPA8 adds little extra accuracy for current Cora/PubMed.
 ```
 
-Graph risk sets tolerance. The numerical bound decides actual stop depth. Operator-specific sensitivity is kept as a later ablation, not part of the current mainline.
+---
 
-## 3. Documentation Layout
+## 3. Current Experiment Priorities
+
+### A. Complete Missing BFP Pools
+
+Current missing pools:
 
 ```text
-docs/core/
-    CAM, score definitions, residual reuse, AWQ pool generation
+arxiv:
+    W4BFPA7_B128
+    W4BFPA6_B128
+    W4BFPA5_B128
 
-docs/npu/
-    Graph-Bit NPU design, dataflow, early-stop implementation, reproduction guide
-
-docs/results/
-    current main results and residual/Graph-Bit progress
-
-docs/survey/
-    encoder/general accelerator survey and decoder/serving survey
-
-docs/archive/
-    historical sweeps, old proxy experiments, and superseded design notes
+pubmed:
+    W4BFPA7_B128
 ```
 
-Root `README.md` stays short. Detailed commands and long tables belong in `docs/`.
+Script:
 
-## 4. Current Experiment Priorities
-
-### A. Front-End Alignment
-
-Use the shared online residual-gate configuration as the default ST front-end. LLaMA-7B must use LLaMA target embeddings for residual/gate training and must pass the `FullP8-miss` sanity check before adding Graph-Bit.
-
-### B. Graph-Bit Full-Stack Replay
-
-For each selected front-end:
-
-```text
-1. export route profile:
-       direct / residual / miss
-
-2. export stop-depth trace:
-       D8 / D7 / D6 / D5 / D4 for miss nodes
-
-3. replay risk-bucket scheduler:
-       baseline order
-       b32 / b64 W tile service windows
-
-4. report:
-       cycles / traffic / energy / drop / avg depth / Wloads
+```bash
+bash GraphhopSimhash/scripts/generate_missing_llama_bfp_pools.sh
 ```
 
-### C. PubMed And Arxiv
+### B. Arxiv BFP Accuracy
+
+After missing pools are generated:
 
 ```text
-PubMed:
-    run the same full-stack trace replay as Cora.
-
-Arxiv:
-    first run feasibility-only:
-        reuse/miss profile
-        risk bucket size
-        stop-depth histogram
-        Wloads/Wscale
-        SRAM feasibility
+1. All BFPA4 / BFPA6 / BFPA8 accuracy.
+2. 20%-30% BFPA6 refinement from BFPA4 baseline.
+3. Selector comparison:
+       Random
+       Degree
+       TSER
 ```
 
-## 5. Output Policy
+### C. Full-Stack Table
 
-Main results use stable directories:
-
-```text
-output/graphbit_trace_replay/
-output/residual_reuse/
-output/onnxim_graphbit/
-```
-
-Temporary sweeps can stay under `output/`; summarized results enter `docs/results/`.
-
-## 6. Main Reporting Table
-
-The final hardware-facing table compares:
+For Cora/PubMed/Arxiv:
 
 ```text
-FullP8-miss
-GraphBit-now
-FullP8-bucket-b32 / b64
-RiskBucket-b32 / b64
+Full LLaMA/BFPA8 baseline
+SimHash direct reuse
+TSER-guided residual reuse
+TSER-guided residual reuse + BFP refinement for miss nodes
 ```
 
 Required columns:
 
 ```text
 Reuse
-Miss
-Cycles
-Traffic
-Energy
+Direct / residual / compute ratio
+BFPA4 / BFPA6 / BFPA8 ratio
+Cost
+Acc
 Drop
-AvgDepth
-Wloads
-Wscale
+AvgErr
 ```
+
+---
+
+## 4. Documentation Policy
+
+Primary docs:
+
+```text
+docs/core/SCORE_DEFINITIONS.md
+docs/core/CAM设计.md
+docs/core/RESIDUAL_CORRECTED_REUSE.md
+docs/npu/GRAPH_BIT_NPU_DESIGN.md
+docs/npu/BFP_ACTIVATION_FORMAT.md
+docs/results/GRAPH_BFP_PROGRESSIVE_REFINEMENT_RESULT.md
+```
+
+Archived docs:
+
+```text
+partial-depth encoder
+token compaction
+FFN gating
+prediction-free early stop
+cross-row BFP packing
+old trace replay
+```
+
+Historical docs remain useful for tracing decisions, but they should not appear as the paper's mainline.

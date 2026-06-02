@@ -14,7 +14,7 @@
 
 ```text
 docs/npu/GRAPH_BIT_NPU_DESIGN.md
-docs/npu/GRAPH_BIT_EARLY_STOP_IMPLEMENTATION.md
+docs/archive/npu/GRAPH_BIT_EARLY_STOP_IMPLEMENTATION.md
 ```
 
 本文档重点是运行流程、参数修改方式和结果读取路径。

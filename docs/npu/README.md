@@ -1,37 +1,28 @@
 # NPU Documentation
 
-This folder keeps the current Graph-Bit NPU documents.
+本目录只保留当前后端主线文档。早期 prediction-free early stop、cross-row BFP、旧 full-stack replay 等探索已移到 `docs/archive/npu/`。
 
-## Main Design
+## Mainline
 
 - [GRAPH_BIT_NPU_DESIGN.md](GRAPH_BIT_NPU_DESIGN.md)  
-  Main design entry: SimHash/LRU-CAM, Residual-Gate, Graph-Bit NPU, W-stationary dataflow.
+  当前 NPU 主设计入口：TSER/graph-risk-guided BFPA4/BFPA6 encoder path，以及它和 SimHash / residual reuse 的端到端关系。
 
-- [GRAPH_CONDITIONED_PREDICTION_FREE_DESIGN.md](GRAPH_CONDITIONED_PREDICTION_FREE_DESIGN.md)
-  Graph-conditioned prediction-free design space: node risk, W-tile bound, partial-sum guard, risk-bucket scheduling, and implementation priority.
+- [BFP_ACTIVATION_FORMAT.md](BFP_ACTIVATION_FORMAT.md)  
+  BFP activation 格式、B64/B128/B256 block size、相对普通 W4A8/W4A4 的差异。
 
 - [GRAPH_BIT_SYSTOLIC_FLASH_DATAFLOW.md](GRAPH_BIT_SYSTOLIC_FLASH_DATAFLOW.md)  
-  Systolic-array and FlashAttention-style IO-aware W tile service-window design.
-
-- [GRAPH_BIT_EARLY_STOP_IMPLEMENTATION.md](GRAPH_BIT_EARLY_STOP_IMPLEMENTATION.md)  
-  Code-level path for predictor-free stop-depth, CLI options, runner flow, ONNXim/replay outputs.
-
-- [BFP_ACTIVATION_FORMAT.md](BFP_ACTIVATION_FORMAT.md)
-  BFP activation format, B64/B128/B256 block-size meaning, W4A8 comparison, and Cora/LLaMA-7B block sweep.
-
-- [GRAPH_AWARE_BFP_BLOCK_PACKING.md](GRAPH_AWARE_BFP_BLOCK_PACKING.md)
-  Graph-aware BFP block packing: rowwise vs cross-row exponent-sharing, ordering validation, activation hook results, and next validation steps.
-
-## Reproduction And Profiling
-
-- [GRAPH_BIT_FULLSTACK_REPRODUCTION_GUIDE.md](GRAPH_BIT_FULLSTACK_REPRODUCTION_GUIDE.md)  
-  End-to-end reproduction guide for front-end route profile, stop-depth trace, scheduler replay, and activity breakdown.
+  W-stationary systolic array 与类 FlashAttention 的 IO-aware W tile 数据流。
 
 - [LLAMA_ROOFLINE_PROFILE.md](LLAMA_ROOFLINE_PROFILE.md)  
-  LLaMA projection/FFN roofline profile and large-M GEMM interpretation.
+  LLaMA-7B projection / FFN GEMM 的 roofline 和 large-M 解释。
 
-Historical NPU notes are in:
+## Archived Explorations
+
+这些内容不作为当前论文主贡献，只用于追溯探索过程：
 
 ```text
-docs/archive/npu/
+docs/archive/npu/GRAPH_BIT_EARLY_STOP_IMPLEMENTATION.md
+docs/archive/npu/GRAPH_BIT_FULLSTACK_REPRODUCTION_GUIDE.md
+docs/archive/npu/GRAPH_CONDITIONED_PREDICTION_FREE_DESIGN.md
+docs/archive/npu/GRAPH_AWARE_BFP_BLOCK_PACKING.md
 ```

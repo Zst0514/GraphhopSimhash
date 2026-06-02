@@ -12,7 +12,7 @@ ONNXim 里又如何把这个 stop depth 反映到 activation-side issue、psum u
 
 ```text
 docs/npu/GRAPH_BIT_NPU_DESIGN.md
-docs/npu/GRAPH_BIT_FULLSTACK_REPRODUCTION_GUIDE.md
+docs/archive/npu/GRAPH_BIT_FULLSTACK_REPRODUCTION_GUIDE.md
 ```
 
 ## 0. Current V2 Direction: Tile-Aware Risk Scoring

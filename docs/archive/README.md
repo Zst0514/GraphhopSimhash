@@ -2,23 +2,30 @@
 
 本目录保留历史实验文档和早期设计拆分，便于追溯结果来源，但不作为当前论文主线入口。
 
-当前主线文档入口：
+当前主线入口：
 
 ```text
 docs/README.md
+docs/PROJECT_ROADMAP.md
+docs/core/SCORE_DEFINITIONS.md
+docs/core/CAM设计.md
 docs/core/RESIDUAL_CORRECTED_REUSE.md
 docs/npu/GRAPH_BIT_NPU_DESIGN.md
-docs/npu/GRAPH_BIT_EARLY_STOP_IMPLEMENTATION.md
-docs/npu/GRAPH_BIT_FULLSTACK_REPRODUCTION_GUIDE.md
+docs/npu/BFP_ACTIVATION_FORMAT.md
+docs/results/GRAPH_BFP_PROGRESSIVE_REFINEMENT_RESULT.md
 docs/results/GRAPH_BIT_MAIN_RESULTS.md
 ```
 
-归档规则：
+归档内容包括：
 
 ```text
-archive/npu/
-    Graph-Bit 早期 proxy、旧理论拆分、旧 scheduler 说明。
-
-archive/results/
-    过往 sweep 总结，保留用于查旧数值。
+partial-depth encoder
+token compaction
+FFN channel gating
+prediction-free early stop
+cross-row BFP block packing
+old trace replay
+old tile-bound validation
 ```
+
+这些文档可以用于解释“为什么当前主线这样收束”，但不应作为主贡献叙事。

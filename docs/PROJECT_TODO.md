@@ -1,201 +1,121 @@
 # Project TODO
 
-本文档只记录当前仍需补齐的实验和技术缺口。历史探索保留在 `docs/archive/`。
+本文只保留当前仍然需要补齐的实验。已经验证效果不佳的路径放在 `docs/archive/`。
 
 ## 1. Immediate
 
-### 1.1 PubMed Full-Stack Trace Replay
+### 1.1 Finish Missing LLaMA BFP Pools
 
-输入：
-
-```text
-shared online residual-gate front-end
-degree / propagation risk tolerance
-predictor-free runtime bound
-risk-bucket W-stationary replay
-```
-
-输出：
+缺失：
 
 ```text
-FullP8-miss
-GraphBit-now
-FullP8-bucket-b32 / b64
-RiskBucket-b32 / b64
+arxiv:
+    W4BFPA7_B128
+    W4BFPA6_B128
+    W4BFPA5_B128
+
+pubmed:
+    W4BFPA7_B128
 ```
 
-指标：
+运行：
+
+```bash
+bash GraphhopSimhash/scripts/generate_missing_llama_bfp_pools.sh
+```
+
+### 1.2 Arxiv BFP Progressive Refinement
+
+在 Arxiv/LLaMA 上补：
 
 ```text
-Reuse / Miss / Cycles / Traffic / Energy / Drop / AvgDepth / Wloads / Wscale
+All BFPA4
+All BFPA6
+All BFPA8
+20% BFPA6 + 80% BFPA4
+30% BFPA6 + 70% BFPA4
 ```
 
-### 1.2 LLaMA Residual-Gate Sanity
-
-ST residual MLP 不能直接迁移到 LLaMA embedding 空间。LLaMA front-end 需要：
+Selector：
 
 ```text
-LLaMA W4A8 target embeddings
-LLaMA-specific residual/gate training
-FullP8-miss sanity check
+Random
+Degree
+TSER
 ```
 
-只有 `FullP8-miss` 的 drop 足够低，Graph-Bit 才能接在后面评估 miss-node NPU cost。
+### 1.3 Full-Stack Cora/PubMed Table
 
-### 1.3 HEAT-Like Baseline
-
-需要一个清晰的 baseline：
+固定 T31 front-end：
 
 ```text
-static degree-guided precision
-no residual/reuse hierarchy
-no predictor-free runtime bound
-no risk-bucket scheduler
+8 heads x 16 bits
+radius = 2
+T = 31
+score = 3 / 1 / 1
+support >= 5  -> direct
+support = 3..4 -> residual
+support < 3   -> BFP encoder
 ```
 
-对比目标：
+比较：
 
 ```text
-reuse/residual contributes how much
-runtime bound contributes how much
-risk-bucket scheduling contributes how much
+BFPA8 full encoder
+direct reuse only
+TSER-guided residual reuse
+TSER-guided residual reuse + BFPA4/BFPA6 miss-node refinement
 ```
 
-## 2. Hardware Modeling
+## 2. Medium Priority
 
-### 2.1 Large-M GEMM Roofline
+### 2.1 Residual-Gate BFPA Target For PubMed
 
-真实 encoder GEMM 的 row dimension 是：
+Cora/BFPA4/BFPA6 已跑完。PubMed 需要完整 3-run：
 
 ```text
-M = node_batch * sequence_length
+pubmed BFPA6 target
+pubmed BFPA4 target
 ```
 
-下一轮 profile 使用：
+输出同 Cora：
 
 ```text
-M = 2048 / 4096 / 8192 / 16384 / 65536
+DirectReuse
+SoftDirectReuse
+ResidualReuse
 ```
 
-报告每类 GEMM：
+### 2.2 BFP Cost Model Refinement
+
+当前 BFP cost proxy：
 
 ```text
-Q/K/V/O projection
-FFN gate/up
-FFN down
+BFPA4 = 0.287
+BFPA6 = 0.394
+BFPA8 = 0.500
 ```
 
-并区分：
+下一步可以用 ONNXim / roofline 进一步估计：
 
 ```text
-memory-bound
-compute-bound
+mantissa datapath cost
+block exponent / shift overhead
+BFPA4 vs BFPA6 PE utilization
 ```
 
-### 2.2 Activity Model
+## 3. Historical / Not Mainline
 
-当前 ONNXim component cycles 对 P8/P6/P5 的 latency 差异不够敏感。需要继续保留 activity-level 拆分：
-
-```text
-W_HBM
-A_HBM
-A_RF
-PE
-Psum
-Output
-Scheduler
-```
-
-Graph-Bit mixed-depth 的主要收益先按：
-
-```text
-PE / Psum / activation-side activity
-```
-
-报告；W-stationary bucket scheduling 单独报告 W tile service window 的收益。
-
-### 2.3 Bucket Feasibility
-
-对 b16 / b32 / b64 / b128 做 feasibility sweep：
-
-```text
-bucket size
-Wloads
-tail waste
-SRAM requirement
-cycles / traffic / energy
-```
-
-b32 / b64 表示 W tile service window，不是 bit-width。
-
-## 3. Accuracy Validation
-
-### 3.1 Tolerance Sweep
-
-第一版不引入 operator sensitivity。只扫：
-
-```text
-degree risk -> tolerance
-A_low_bound(depth) * W_tile_abs_bound -> stop depth
-```
-
-输出：
-
-```text
-AvgDepth
-Drop
-Depth histogram
-```
-
-### 3.2 Small-Sample Runtime Check
-
-不全量重跑逐节点、逐层、逐 GEMM 的 LLaMA encoder。只做小样本 sanity：
-
-```text
-sample nodes = 64 / 128
-representative layers = 1-2
-GEMM = projection + FFN up/down
-compare:
-    A8 full
-    W4A6/W4A5 proxy
-    runtime truncated activation depth
-```
-
-目的：
-
-```text
-确认 W4A6/W4A5 embedding pool 和 runtime high-bit truncation 方向一致。
-```
-
-## 4. Documentation
-
-Keep these as primary entry points:
-
-```text
-README.md
-docs/README.md
-docs/results/GRAPH_BIT_MAIN_RESULTS.md
-docs/results/RESIDUAL_GATE_GRAPHBIT_NPU_PROGRESS.md
-docs/npu/GRAPH_BIT_NPU_DESIGN.md
-docs/npu/GRAPH_BIT_FULLSTACK_REPRODUCTION_GUIDE.md
-```
-
-Historical sweeps and superseded proposals belong in:
-
-```text
-docs/archive/
-```
-
-## 5. Low-Priority / Historical
-
-These are not current mainline:
+以下方向不再作为主线推进：
 
 ```text
 partial-depth encoder L4/L8/L16
 token compaction / prefix truncation
 FFN channel gating as main contribution
 oracle error routing
-predictor/calibration-node learned damage model
+calibration-node learned damage predictor
+cross-row BFPA4 packing as full-layer default
+prediction-free early stop as primary NPU contribution
 ```
 
-They can be mentioned as explored alternatives, but not used as the main contribution.
+它们可以在论文中简短说明为设计空间探索，不进入主贡献和主表。

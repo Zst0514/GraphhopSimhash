@@ -1,33 +1,32 @@
 # Results Documentation
 
-This folder keeps current result summaries. Long historical sweeps are under `docs/archive/results/`.
+当前结果文档只保留与论文主线直接相关的内容。
 
-## Current
+## Main Results
 
-- [GRAPH_BIT_MAIN_RESULTS.md](GRAPH_BIT_MAIN_RESULTS.md)
-  Main residual/Graph-Bit result table and trace-replay interpretation.
+- [GRAPH_BFP_PROGRESSIVE_REFINEMENT_RESULT.md](GRAPH_BFP_PROGRESSIVE_REFINEMENT_RESULT.md)  
+  Cora/PubMed LLaMA-7B BFPA4/BFPA6/BFPA8 progressive refinement 主表。
 
-- [GRAPH_BIT_TILE_BOUND_NUMERIC_VALIDATION.md](GRAPH_BIT_TILE_BOUND_NUMERIC_VALIDATION.md)
-  Tile-level numeric validation for Graph-Bit predictor-free stop bounds.
+- [GRAPH_BIT_MAIN_RESULTS.md](GRAPH_BIT_MAIN_RESULTS.md)  
+  当前端到端主结果入口：front-end reuse、residual-gate、BFP miss-node path。
 
-- [GRAPH_BIT_TILE_SCORE_V2_VALIDATION.md](GRAPH_BIT_TILE_SCORE_V2_VALIDATION.md)
-  Tile-aware `node risk + W tile risk + low-bit budget` stop-score validation.
+- [RESIDUAL_GATE_GRAPHBIT_NPU_PROGRESS.md](RESIDUAL_GATE_GRAPHBIT_NPU_PROGRESS.md)  
+  技术进展说明：Residual-Gate 和 BFP NPU 当前状态。
 
-- [RESIDUAL_GATE_GRAPHBIT_NPU_PROGRESS.md](RESIDUAL_GATE_GRAPHBIT_NPU_PROGRESS.md)
-  Technical progress note covering Residual-Gate and Graph-Bit NPU.
+## Front-End Results
 
-- [SHARED_ONLINE_RESIDUAL_REUSE_RESULT.md](SHARED_ONLINE_RESIDUAL_REUSE_RESULT.md)
-  Shared online residual-gate configuration and Cora/PubMed ST result.
+- [SHARED_ONLINE_RESIDUAL_REUSE_RESULT.md](SHARED_ONLINE_RESIDUAL_REUSE_RESULT.md)  
+  共享在线 residual reuse 配置和 ST Cora/PubMed 结果。
 
-- [ST_LLAMA_T31_SHARED_RETRIEVAL_RESULT.md](ST_LLAMA_T31_SHARED_RETRIEVAL_RESULT.md)
-  ST/LLaMA T31 shared retrieval result and backend-specific target notes.
+- [ST_LLAMA_T31_SHARED_RETRIEVAL_RESULT.md](ST_LLAMA_T31_SHARED_RETRIEVAL_RESULT.md)  
+  ST/LLaMA T31 shared retrieval 历史结果和 target 对齐说明。
 
-## Scope
+## Archived Results
 
-Current result docs separate three questions:
+以下结果已归档，不作为当前主线入口：
 
 ```text
-1. How much front-end reuse is safe?
-2. How much miss-node activity does Graph-Bit reduce?
-3. How much W tile service-window reuse comes from risk-bucket scheduling?
+docs/archive/results/GRAPH_BIT_TILE_BOUND_NUMERIC_VALIDATION.md
+docs/archive/results/GRAPH_BIT_TILE_SCORE_V2_VALIDATION.md
+docs/archive/results/GRAPH_BIT_VALIDATION_SUMMARY.md
 ```

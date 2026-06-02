@@ -14,7 +14,7 @@
 更底层的代码实现见：
 
 ```text
-docs/npu/GRAPH_BIT_EARLY_STOP_IMPLEMENTATION.md
+docs/archive/npu/GRAPH_BIT_EARLY_STOP_IMPLEMENTATION.md
 docs/archive/npu/GRAPH_BIT_TRACE_DRIVEN_SCHEDULER.md
 docs/npu/GRAPH_BIT_NPU_DESIGN.md
 ```
