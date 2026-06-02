@@ -19,6 +19,9 @@ This folder keeps the current Graph-Bit NPU documents.
 - [BFP_ACTIVATION_FORMAT.md](BFP_ACTIVATION_FORMAT.md)
   BFP activation format, B64/B128/B256 block-size meaning, W4A8 comparison, and Cora/LLaMA-7B block sweep.
 
+- [GRAPH_AWARE_BFP_BLOCK_PACKING.md](GRAPH_AWARE_BFP_BLOCK_PACKING.md)
+  Graph-aware BFP block packing: rowwise vs cross-row exponent-sharing, ordering validation, activation hook results, and next validation steps.
+
 ## Reproduction And Profiling
 
 - [GRAPH_BIT_FULLSTACK_REPRODUCTION_GUIDE.md](GRAPH_BIT_FULLSTACK_REPRODUCTION_GUIDE.md)  
