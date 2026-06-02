@@ -7,6 +7,9 @@
 - [GRAPH_BIT_NPU_DESIGN.md](GRAPH_BIT_NPU_DESIGN.md)  
   当前 NPU 主设计入口：TSER/graph-risk-guided BFPA4/BFPA6 encoder path，以及它和 SimHash / residual reuse 的端到端关系。
 
+- [PROGRESSIVE_BFP_ENCODER_INTERFACE.md](PROGRESSIVE_BFP_ENCODER_INTERFACE.md)  
+  SimHash / Residual-Gate 前端接入 Progressive BFP encoder 的接口定义和复现实验入口。
+
 - [BFP_ACTIVATION_FORMAT.md](BFP_ACTIVATION_FORMAT.md)  
   BFP activation 格式、B64/B128/B256 block size、相对普通 W4A8/W4A4 的差异。
 

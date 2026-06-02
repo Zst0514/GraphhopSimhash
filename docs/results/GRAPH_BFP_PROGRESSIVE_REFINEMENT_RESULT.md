@@ -176,7 +176,110 @@ Selector:
 | Cora | 30% BFPA6 + 70% BFPA4 | TSER | 0.319 | 0.49% |
 | PubMed | 30% BFPA6 + 70% BFPA4 | Degree | 0.319 | 0.54% |
 
-## 6. Reproduction Command
+## 6. SimHash / Residual-Gate + Progressive BFP Full Stack
+
+前面的表只评估 BFP routing 本身；这一节接入当前前端：
+
+```text
+SimHash:
+    8 heads x 16 bits, radius = 2
+
+Score gate:
+    T = 31, TSER weights = 3 / 1 / 1
+
+Support split:
+    support >= 5  -> direct reuse
+    support = 3..4 -> residual-gate candidate
+    support < 3   -> encoder
+
+Encoder:
+    miss / reject nodes 默认 BFPA4
+    top 30% miss nodes 提升到 BFPA6
+```
+
+Cora 10-run 日志：
+
+```text
+output/progressive_bfp_fullstack/cora_h8_53_T31_bfpa6_r0.30/logs/cora_runs10.log
+```
+
+主表如下：
+
+| Config | Reuse | Direct | Residual | P6 | P4 | Cost | Acc | Drop |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| FullP8 | 39.5% | 18.6% | 20.9% | 0.0% | 0.0% | 0.304 | 0.6964 | 1.64% |
+| AllP6 | 39.5% | 18.6% | 20.9% | 60.5% | 0.0% | 0.239 | 0.6953 | 1.76% |
+| AllP4 | 39.5% | 18.6% | 20.9% | 0.0% | 60.5% | 0.175 | 0.6883 | 2.46% |
+| Rand | 39.5% | 18.6% | 20.9% | 18.1% | 42.3% | 0.194 | 0.6917 | 2.12% |
+| Deg | 39.5% | 18.6% | 20.9% | 18.1% | 42.3% | 0.194 | 0.6906 | 2.22% |
+| TSER | 39.5% | 18.6% | 20.9% | 18.1% | 42.3% | 0.194 | 0.6905 | 2.24% |
+| Uniq | 39.5% | 18.6% | 20.9% | 18.1% | 42.3% | 0.194 | 0.6908 | 2.21% |
+
+这里 `Deg / TSER / Rand` 的 P6/P4 比例相同，区别只是 miss nodes 内部谁被提升到 BFPA6：
+
+```text
+Deg:
+    按 propagation / degree risk 排序。
+
+TSER:
+    按 TSER sensitivity score 排序。
+
+Rand:
+    在同一 miss-node 集合中随机选择同样数量的节点。
+```
+
+这组结果说明：
+
+```text
+1. 前端 residual reuse 已经约简约 39.5% encoder calls。
+2. 后端 Progressive BFP 可以把 cost 从 FullP8 的 0.304 降到 0.194。
+3. 在当前 Cora full-stack 设置下，Deg / TSER / Rand 差距很小。
+4. 纯 degree 或 TSER 对 BFPA4/BFPA6 refinement 的指导性不足。
+```
+
+原因是后端 BFP refinement 的误差来源不只来自图传播风险，还来自 BFP 数值格式本身：
+
+```text
+activation dynamic range
+shared exponent stress
+outlier block
+P4/P6 embedding damage
+```
+
+因此当前已经实现的 full-stack 路径可以作为 baseline。后续更合理的后端 selector 应该从：
+
+```text
+graph risk only
+```
+
+推进到：
+
+```text
+graph risk + BFP numerical stress
+```
+
+也就是在 miss nodes 中联合考虑节点传播风险和 BFP block / embedding damage proxy，再决定哪些节点从 BFPA4 refine 到 BFPA6。
+
+## 7. Reproduction Command
+
+SimHash / Residual-Gate + Progressive BFP full-stack:
+
+```bash
+DATASET=cora RUNS=10 REFINE_BIT=6 REFINE_RATIO=0.30 FORCE=1 \
+  bash GraphhopSimhash/scripts/run_progressive_bfp_fullstack.sh
+```
+
+其中：
+
+```text
+REFINE_BIT=6:
+    miss nodes 默认 BFPA4，top-risk 30% 提升到 BFPA6。
+
+REFINE_BIT=5:
+    miss nodes 默认 BFPA4，top-risk 30% 提升到 BFPA5。
+```
+
+下面命令只评估 BFP routing 本身，不接 SimHash / residual 前端。
 
 P6 refinement example:
 
