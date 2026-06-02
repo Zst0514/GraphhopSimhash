@@ -77,7 +77,7 @@ hash 由文本和图上下文共同产生：
 
 ```text
 self text feature
-neighbor / graph context
+neighbor / topology-aware text feature
 optional structural feature
 ```
 
@@ -197,7 +197,7 @@ low propagation risk:
     more aggressive early stop / batching
 ```
 
-TSER / context / low-unique score 保留为消融和修正项。
+TSER / low-unique score 保留为消融和修正项。
 
 ---
 

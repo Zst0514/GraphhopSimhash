@@ -173,8 +173,8 @@ graph nodes
 
 ```text
 Step 1. risk tagging
-    计算 Degree / TSER / Context 等 graph risk。
-    当前主线优先使用 Degree，TSER/Context 用作消融。
+    计算 Degree / TSER 等 graph risk。
+    当前主线优先使用 Degree，TSER 用作拓扑感知语义风险消融。
 
 Step 2. risk bucket formation
     high-risk bucket:
@@ -378,4 +378,3 @@ W tile 驻留片上
 3. 做 SRAM capacity / bucket tail padding / scheduling latency sensitivity。
 4. 如果要进一步提高硬度，可把 trace replay 下沉到 ONNXim per-tile event trace。
 ```
-

@@ -229,7 +229,7 @@ graph risk -> min_depth + tolerance
 runtime bound -> actual stop depth
 ```
 
-也就是说，Degree / TSER / Context 等图风险分数不直接规定最终一定算 P8/P6/P4，而是规定：
+也就是说，Degree / TSER 等图风险分数不直接规定最终一定算 P8/P6/P4，而是规定：
 
 ```text
 min_depth:
@@ -576,7 +576,7 @@ GraphhopSimhash/cli.py
 --precision_depth_bound_enable
     打开 Graph-Bit runtime-bound policy。
 
---precision_depth_bound_priorities degree tser context low_unique random
+--precision_depth_bound_priorities degree tser low_unique random
     用哪些 risk proxy 生成 bound policy。
 
 --precision_depth_bound_high_min_depth
@@ -651,7 +651,6 @@ build_precision_depth_policy_configs(args, bits)
 ```text
 DegBound
 TSERBound
-CtxBound
 UniqBound
 RandBound
 ```
@@ -776,7 +775,6 @@ select_precision_depth_actions(...)
 1. 取 risk priority
    degree     -> propagation_q
    tser       -> sensitivity_q
-   context    -> graph_context_q
    low_unique -> low_degree_unique_q
    random     -> random score
 
@@ -910,7 +908,7 @@ depth_bucket:
 stop_depth:
     NPU trace replay 使用的 stop depth
 
-degree_q / tser_q / context_q / low_unique_q:
+degree_q / tser_q / low_unique_q:
     各类 risk score
 ```
 

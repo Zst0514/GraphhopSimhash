@@ -54,7 +54,7 @@ for depth in min_depth..8:
 requested depth -> nearest generated pool: P8/P7/P6/P5/P4
 ```
 
-也就是说，`Degree/TSER/Context` 不直接指定固定比例的 P8/P6/P5/P4；它们只提供逐节点风险，最终 stop depth 由 bound 判断得到。
+也就是说，`Degree/TSER` 不直接指定固定比例的 P8/P6/P5/P4；它们只提供逐节点风险，最终 stop depth 由 bound 判断得到。
 
 当前 bound 的第一版实现把 W tile 数值强度写成显式参数：
 
@@ -1000,7 +1000,7 @@ depth_bucket:
 support_hits:
     多 head 支持数
 
-degree_q / tser_q / context_q / low_unique_q:
+degree_q / tser_q / low_unique_q:
     risk score
 ```
 

@@ -845,7 +845,7 @@ def build_parser():
         type=str,
         nargs="+",
         default=["degree", "tser"],
-        choices=["degree", "tser", "context", "low_unique", "random"],
+        choices=["degree", "tser", "low_unique", "random"],
         help="Graph risk proxies to evaluate for bound-based precision-depth policies.",
     )
     parser.add_argument(

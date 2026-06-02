@@ -616,7 +616,6 @@ def build_graph_eager_token_policy_configs(args, lengths):
             ("RandomTokenBudget", {"kind": "budget", "priority": "random"}),
             ("DegreeTokenBudget", {"kind": "budget", "priority": "degree"}),
             ("TSERTokenBudget", {"kind": "budget", "priority": "tser"}),
-            ("ContextTokenBudget", {"kind": "budget", "priority": "context"}),
             ("PredictorTokenBudget", {"kind": "budget", "priority": "predictor"}),
             ("OracleDamageBudget", {"kind": "budget", "priority": "oracle_damage"}),
         ]
@@ -649,8 +648,6 @@ def select_graph_eager_token_actions(
         priority = scores["propagation_q"].to(dtype=torch.float32)
     elif priority_name == "tser":
         priority = scores["sensitivity_q"].to(dtype=torch.float32)
-    elif priority_name == "context":
-        priority = scores["graph_context_q"].to(dtype=torch.float32)
     elif priority_name == "oracle_damage":
         if oracle_priority is None:
             raise ValueError("oracle_damage policy requires oracle_priority")
@@ -1937,7 +1934,6 @@ def build_precision_depth_policy_configs(args, bits):
             ("Rand", {"kind": "budget", "priority": "random"}),
             ("Deg", {"kind": "budget", "priority": "degree"}),
             ("TSER", {"kind": "budget", "priority": "tser"}),
-            ("Ctx", {"kind": "budget", "priority": "context"}),
             ("Uniq", {"kind": "budget", "priority": "low_unique"}),
         ]
     )
@@ -1951,7 +1947,6 @@ def build_precision_depth_policy_configs(args, bits):
         name_by_priority = {
             "degree": f"DegBound{suffix}",
             "tser": f"TSERBound{suffix}",
-            "context": f"CtxBound{suffix}",
             "low_unique": f"UniqBound{suffix}",
             "random": f"RandBound{suffix}",
         }
@@ -2176,8 +2171,6 @@ def select_precision_depth_actions(
         priority = scores["propagation_q"].to(dtype=torch.float32)
     elif priority_name == "tser":
         priority = scores["sensitivity_q"].to(dtype=torch.float32)
-    elif priority_name == "context":
-        priority = scores["graph_context_q"].to(dtype=torch.float32)
     elif priority_name == "low_unique":
         priority = scores["low_degree_unique_q"].to(dtype=torch.float32)
     elif priority_name == "oracle_damage":
@@ -2507,7 +2500,6 @@ def export_residual_precision_depth_node_trace(
                 risk_key_by_priority = {
                     "degree": "degree_q",
                     "tser": "tser_q",
-                    "context": "context_q",
                     "low_unique": "low_unique_q",
                 }
                 risk_key = risk_key_by_priority.get(priority, "degree_q")
@@ -2618,7 +2610,6 @@ def run_precision_depth_ablation(args):
                 ref_margin = node_logit_margin(ref_logits)
                 proxy_items = [
                     ("Degree", scores["propagation_q"]),
-                    ("Context", scores["graph_context_q"]),
                     ("LowUnique", scores["low_degree_unique_q"]),
                     ("TSER", scores["sensitivity_q"]),
                 ]
@@ -3649,7 +3640,6 @@ def run_graph_eager_token_experiment(args):
                 ref_margin = node_logit_margin(ref_logits)
                 proxy_items = [
                     ("Degree", scores["propagation_q"]),
-                    ("Context", scores["graph_context_q"]),
                     ("LowUnique", scores["low_degree_unique_q"]),
                     ("TSER", scores["sensitivity_q"]),
                 ]

@@ -17,7 +17,7 @@ BFP activation 的核心是：
 
 ```text
 SimHash bucket
-graph context
+graph risk
 degree / propagation risk
 reuse / miss route
 ```
@@ -92,12 +92,12 @@ output/graphbfp_shared_exponent/cora_a3_extreme/summary.txt
 
 ```text
 rowwise_1x128:
-    Original / Random / Activation-norm / SimHash / Graph-context 完全一致。
+    Original / Random / Activation-norm / SimHash order 差异很小。
     说明当前已有 BFP pool 的 layout 下，节点排序不会改变 BFP 误差。
 
 cross-row tile:
     Random 通常更差。
-    SimHash / Graph-context 在若干设置下略好。
+    SimHash order 在若干设置下略好。
     说明只有当 exponent-sharing block 横跨多个 rows 时，graph-aware grouping 才有作用空间。
 ```
 
@@ -222,7 +222,7 @@ tile_32x4:
 
 ```text
 真实 LLaMA activation 上，cross-row tile 的 BFP error 明显低于 rowwise。
-目前 Original / Random / SimHash / Graph-context 的排序差异还不稳定。
+目前 Original / Random / SimHash 的排序差异还不稳定。
 这说明 cross-row tile 本身已经有价值；graph-aware ordering 需要更真实的 scheduler 和更大 batch 继续验证。
 ```
 
@@ -252,14 +252,14 @@ P6 lift 30%:
     Random Drop = 0.72%
     Degree Drop = 0.66%
     TSER Drop = 0.54%
-    Context Drop = 0.48%
+    TSER Drop = 0.49%
 
 P8 lift 30%:
     Cost = 0.351
     Random Drop = 0.74%
     Degree Drop = 0.59%
     TSER Drop = 0.44%
-    Context Drop = 0.57%
+    TSER Drop = 0.56%
 ```
 
 解释：
@@ -282,7 +282,7 @@ W4BFPA4_B128_T32X4:
     每个 BFP block = 32 token rows x 4 hidden dims。
 
 W4BFPA4_B128_T16X8_GCTX / T32X4_GCTX:
-    编码前按 graph-context SimHash order 重排 node batch，
+    编码前按 SimHash / graph-risk order 重排 node batch，
     编码后恢复原始 node order。
 ```
 
@@ -320,7 +320,7 @@ T32X4 BFPA4               0.6868   4.21%   0.02265
 ```
 
 ```text
-Graph-context order full encoder pool
+Graph-risk order full encoder pool
 
 Config                    Acc      Drop    AvgErr
 All W4A8                  0.7289   0.00%   0.00000
@@ -337,7 +337,7 @@ T32X4_GCTX BFPA4          0.6849   4.40%   0.02241
 ```text
 1. T1X128 rowwise BFPA4 是真实 full activation-level pool，drop 为 1.11%，明显比 cross-row tile 更稳。
 2. Full activation-level cross-row BFPA4 明显比 embedding-level proxy 更难。
-3. Original 和 graph-context order 都在 4% drop 左右，说明主要问题不是 graph-context order 本身，而是全层 cross-row BFPA4 对中间 activation 过于激进。
+3. Original 和 graph-risk order 都在 4% drop 左右，说明主要问题不是排序本身，而是全层 cross-row BFPA4 对中间 activation 过于激进。
 4. T16X8 略好于 T32X4，但差距不够改变结论。
 5. 当前 full-pool 结果不支持直接把所有 Linear activation 都切到 cross-row BFPA4。
 ```
@@ -359,7 +359,7 @@ T32X4_GCTX BFPA4          0.6849   4.40%   0.02241
 ```text
 BFP format 本身不是新点。
 新点应放在 graph-aware BFP block packing:
-    利用 SimHash / graph context / risk 信息组织 exponent-sharing group。
+    利用 SimHash / graph risk 信息组织 exponent-sharing group。
 但 full encoder 侧不能直接用 proxy 结论，需要进一步做更保守的 BFPA6 或算子选择。
 ```
 
@@ -371,7 +371,7 @@ full encoder pool 已经证明 BFPA4 cross-row 过激。下一步优先验证：
 
 ```text
 cross-row BFPA6:
-    T16X8 / T32X4 / graph-context order
+    T16X8 / T32X4 / graph-risk order
 
 operator-selective cross-row BFPA4:
     只作用于 FFN 或只作用于部分 projection
@@ -390,7 +390,7 @@ Cora 上找到安全设置后，扩展 PubMed：
 
 ```text
 BFPA6 rowwise vs cross-row
-graph-context / SimHash grouping
+graph-risk / SimHash grouping
 3 runs accuracy
 ```
 
@@ -496,7 +496,7 @@ Full activation-level pool：
   --overwrite
 ```
 
-Graph-context full activation-level pool：
+Graph-risk full activation-level pool：
 
 ```bash
 /home/zhangshangtong/.conda/envs/OFA/bin/python \

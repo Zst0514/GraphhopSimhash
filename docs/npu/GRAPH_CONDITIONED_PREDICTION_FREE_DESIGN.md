@@ -30,7 +30,7 @@ Graph-Bit 可以使用的信号分成三类。
 degree / propagation risk:
     节点错误 embedding 会传播到多少邻居。
 
-graph context / boundary risk:
+topology-aware semantic risk:
     节点是否处在语义或结构边界。
 
 low-degree unique:
