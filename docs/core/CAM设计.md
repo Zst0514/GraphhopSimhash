@@ -42,7 +42,7 @@ direct / residual / compute 三段式复用
 
 它适合 exact match，不适合直接回答“差 1 位、差 2 位是否也算命中”。
 
-之前采用的普通 CAM 检索流程如下：
+之前采用的普通 CAM 检索（CAM粗筛 + XOR/popcount）流程如下：
 
 ![普通 CAM 检索流程](../figures/CAM_forward.png)
 
@@ -327,6 +327,268 @@ for a 28nm 8x16-bit multi-head design. This is extrapolated from the 65nm
 
 ---
 
-## 12. 参考文献
+## 12. 两条实现路线的评价总结
+
+针对当前配置：
+
+```text
+8 个 head
+每个 head 16bit
+每个 CAM 的汉明距离阈值 HD <= 2
+```
+
+目前有两条可行路线：
+
+### 12.1 路线 A：普通 CAM 分块粗筛 + XOR/Popcount 精确校验
+
+思路如下：
+
+```text
+16bit query
+-> 切成 n 个 chunk
+-> 每个 chunk 用普通 CAM 做 exact match 粗筛
+-> 保留满足“至少 n-2 个 chunk 相等”的候选
+-> 对候选做 XOR + popcount
+-> 最终判定 HD <= 2
+```
+
+这个路线的本质是：
+
+```text
+前端做 cheap filter
+后端做 exact verify
+```
+
+它的优点是：
+
+- 最终结果是 `bit-exact` 的，没有 false positive / false negative
+- 可以直接得到精确汉明距离，而不只是 `hit/miss`
+- 后续如果要做 top-k、最近邻排序、rerank，这条路线更自然
+- 全数字实现，RTL、STA、功能验证和跨工艺迁移都更直接
+
+它的缺点是：
+
+- 16bit 很短，`HD<=2` 时分块粗筛的收益不如 64bit 场景明显
+- 分块后会复制 CAM 子阵列、matchline、编码和候选聚合逻辑，外围开销偏大
+- 如果粗筛不够锋利，仍会留下较多候选进入 `XOR + popcount` 二级校验
+- 整体是两级路径，最坏情况延迟大于单级阈值比较
+
+这里最关键的判断是：**图中的 `64bit -> 4 x 16bit chunk` 流程在 64bit/radius-2 上很合适，但缩到 16bit 后，同样的思路不再那么占优。**
+
+原因是 16bit 太短：
+
+- 如果切成 `4 x 4bit`，则真命中要求至少 `2/4` 个 chunk 完全相等，但随机候选通过粗筛的概率仍然不低
+- 如果继续切细，例如切成 `8 x 2bit`，粗筛会更锋利，但 chunk 数、投票逻辑和外围管理成本也会进一步上升
+- 如果切到 `1bit`，则已经接近直接做 popcount，本身就失去 coarse filter 的意义
+
+换句话说：
+
+```text
+路线 A 的核心优势来自“大 bit-width + 小阈值”。
+当 word length 缩到 16bit 时，这个优势会明显下降。
+```
+
+### 12.2 路线 B：HD-CAM 直接做汉明距离阈值比较
+
+思路如下：
+
+```text
+16bit query
+-> 直接送入 16bit HD-CAM bank
+-> 利用 match line 放电速度/电压反映 mismatch 数量
+-> 直接判定 HD <= 2 是否成立
+```
+
+这个路线的本质是：
+
+```text
+不显式求 HD 数值，
+而是直接做 thresholded approximate match
+```
+
+它的优点是：
+
+- 单级判定，路径更短，更接近真正 CAM 的单拍比较风格
+- 不需要 chunk 切分、vote counter、candidate queue、二级 full-hash 读出
+- 对于只关心 `HD<=2?` 的应用，面积和功耗通常更有优势
+- `8 x 16bit` 的 bank 组织天然适合多头 support 聚合
+
+它的缺点是：
+
+- 本质上不是数字精确计数，而是 mixed-signal threshold sensing
+- 结果受 `Veval`、`Vref`、PVT、版图寄生和 sensing margin 影响
+- 如果后续需要精确 HD 数值、top-k 或最近邻排序，就不如 `XOR + popcount` 直接
+- 设计和验证门槛高于普通数字逻辑
+
+### 12.3 针对 `8 x 16bit, HD<=2` 的判断
+
+对于当前这个具体设计点，我的结论是：
+
+```text
+如果目标是 strict bit-exact + 数字友好实现，选路线 A；
+如果目标是低延迟、低外围开销、直接做阈值命中，选路线 B。
+```
+
+但如果必须给出一个更偏工程决策的主判断，那么我更倾向于：
+
+```text
+在 8 x 16bit, HD<=2 这个点上，
+HD-CAM 直接阈值比较整体上更自然。
+```
+
+原因如下。
+
+#### (1) 16bit 太短，路线 A 的 coarse filter 不够“锋利”
+
+在 64bit / radius-2 时，分成 `4 x 16bit chunk` 后，随机数据很难同时命中多个 16bit chunk，因此粗筛非常有效。
+
+但在 16bit / radius-2 时：
+
+- 只能切成更小的 chunk
+- 小 chunk 的 exact match 碰撞概率会上升
+- 结果就是粗筛后的候选数量不会像 64bit 那样快速下降
+
+所以：
+
+```text
+路线 A 在 16bit 上仍然可用，
+但其“CAM coarse filter”的收益已经明显弱于 64bit 场景。
+```
+
+#### (2) 路线 A 的外围逻辑开始变得不太划算
+
+对 8 个 head，如果每个 16bit head 再切 chunk，那么系统里除了 CAM 本体，还要承担：
+
+- chunk 级 CAM 子阵列复制
+- 多路 matchline 输出汇聚
+- vote / support 统计
+- 候选队列
+- full-hash 读出
+- XOR + popcount verifier
+
+当 word 长度只有 16bit 时，这些外围会比长字长场景更显眼。
+
+#### (3) 路线 B 更契合“只判断是否命中阈值”的任务
+
+我们这里的前端职责不是：
+
+```text
+给出每个候选的精确 HD 排名
+```
+
+而是：
+
+```text
+快速筛出“足够近”的候选
+```
+
+这和 HD-CAM 的能力正好对齐：
+
+- 它最擅长的是 `HD <= T ?`
+- 而不是输出一个精确距离值
+
+在这个任务定义下，路线 B 更专用，也更直接。
+
+### 12.4 `16-bit, HD<=2` 的不同切法对比
+
+为了更直观地说明普通 CAM 分块粗筛在 `16-bit, HD<=2` 下的筛选强度，我们以：
+
+```text
+数据库规模 N = 160,000
+每个 survivor 只回读该 head 的 16-bit = 2 bytes
+```
+
+为基线，给出不同切法的理论比较结果。这里：
+
+- `粗筛通过概率` 指随机候选通过第一级 chunk-CAM coarse filter 的概率
+- `期望 survivor/head` = `N x 粗筛通过概率`
+- `相对真命中放大量` 以随机 16-bit 下 `HD<=2` 的期望真命中数 `334.5` 为基准
+- `二级回读/head` 表示每个 head 进入 `XOR + popcount` verifier 的数据读出量
+
+| 切法 | 粗筛通过概率 | 期望 survivor/head | 相对真命中放大量 | 二级回读/head | 二级回读/8 heads |
+|---|---:|---:|---:|---:|---:|
+| `4+4+4+4` | `2.153%` | `3445` | `10.3x` | `6.73 KB` | `53.8 KB` |
+| `4+3+3+3+3` | `1.157%` | `1851` | `5.53x` | `3.61 KB` | `28.9 KB` |
+| `3+3+3+3+2+2` | `0.772%` | `1235` | `3.69x` | `2.41 KB` | `19.3 KB` |
+| `3+3+2+2+2+2+2` | `0.578%` | `925` | `2.77x` | `1.81 KB` | `14.5 KB` |
+| `2+2+2+2+2+2+2+2` | `0.423%` | `676` | `2.02x` | `1.32 KB` | `10.6 KB` |
+| `2+2+2+2+2+2+2+1+1` | `0.391%` | `625` | `1.87x` | `1.22 KB` | `9.77 KB` |
+| `1x16` | `0.209%` | `334.5` | `1.00x` | `0.65 KB` | `5.23 KB` |
+
+这张表说明了三件事：
+
+1. `4+4+4+4` 的 coarse filter 虽然已经有效，但仍会留下大约 `3445` 个候选，约为期望真命中数的 `10.3x`。
+2. 如果继续沿着普通 CAM 路线优化，`4+3+3+3+3` 和 `3+3+3+3+2+2` 是更值得优先尝试的折中点。
+3. 当切法继续细化到 `2-bit` 甚至 `1-bit` 级别时，survivor 数确实继续下降，但结构上已经越来越接近直接做 bitwise threshold compare，也就越来越接近 HD-CAM 的设计动机。
+
+### 12.5 从不同维度的最终比较
+
+#### 正确性
+
+- 路线 A 更强：最终经过 `XOR + popcount` 精确校验，输出是 bit-exact
+- 路线 B 较弱：依赖阈值感测，需要通过 PVT 和 Monte Carlo 来证明误判边界
+
+#### 面积
+
+- 路线 A：存储本体不复杂，但 chunk 化和二级校验带来明显外围开销
+- 路线 B：如果只做阈值判定，通常省去大量显式计数逻辑和候选管理逻辑
+
+对于当前 `16bit/head` 的配置，更倾向路线 B 的系统面积更优。
+
+#### 功耗
+
+- 路线 A：会消耗在 CAM chunk 搜索、候选聚合、full-hash 读出和 `XOR + popcount`
+- 路线 B：直接单级阈值比较，没有二级 verifier 的数字切换开销
+
+对于当前配置，更倾向路线 B 的功耗更低。
+
+#### 延迟
+
+- 路线 A：两级路径，粗筛后还要精确验证
+- 路线 B：单级阈值判定
+
+因此路线 B 的单次查询时延通常更好。
+
+#### 可扩展性
+
+- 路线 A 更适合 `L 大、r 小` 的情况，例如 `64bit, HD<=2`
+- 路线 B 对短字长更自然，不依赖 chunk theorem 才能成立
+
+所以在 `16bit, HD<=2` 这个点上，路线 B 更像“第一选择”，而不是路线 A。
+
+#### 功能完整性
+
+- 路线 A 可以自然拿到精确 HD，并支持排序、top-k、rerank
+- 路线 B 更适合做 yes/no threshold match
+
+如果未来需要精确距离输出，那么路线 A 的扩展性更好。
+
+### 12.6 最终推荐
+
+综合上面的比较，可以把选择标准归纳成下面一句话：
+
+```text
+如果前端目标是“快速筛出 HD<=2 的候选”，优先考虑 HD-CAM；
+如果前端目标是“既筛候选又要拿到精确 HD”，优先考虑普通 CAM + XOR/Popcount。
+```
+
+对 GraphhopSimhash 当前的任务定义而言，前端更接近第一种：
+
+```text
+多头近似搜索
+support 聚合
+direct / residual / compute 三段式决策
+```
+
+因此，我对这两条路线的最终评价是：
+
+```text
+64bit/radius-2: 路线 A 很有竞争力；
+16bit/head, HD<=2: 路线 B 整体上更合适。
+```
+
+---
+
+## 13. 参考文献
 
 Garzón E, Rechef E, Golman R, et al. A 128-kbit Approximate Search-Capable Content-Addressable Memory (CAM) With Tunable Hamming Distance[J]. IEEE Journal of Solid-State Circuits, 2025, 60(8): 3009-3019.
