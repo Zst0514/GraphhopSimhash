@@ -7,6 +7,9 @@
 - [GRAPH_BFP_PROGRESSIVE_REFINEMENT_RESULT.md](GRAPH_BFP_PROGRESSIVE_REFINEMENT_RESULT.md)  
   Cora/PubMed LLaMA-7B BFPA4/BFPA6/BFPA8 progressive refinement 主表。
 
+- [UNIFIED_FRONTEND_POLICY_RESULT.md](UNIFIED_FRONTEND_POLICY_RESULT.md)  
+  固定在线控制流下的 dataset-level `T` policy register 收敛结果，包含 Cora/PubMed/Arxiv 当前主线参数。
+
 - [GRAPH_BIT_MAIN_RESULTS.md](GRAPH_BIT_MAIN_RESULTS.md)  
   当前端到端主结果入口：front-end reuse、residual-gate、BFP miss-node path。
 
