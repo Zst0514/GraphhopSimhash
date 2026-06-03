@@ -10,6 +10,9 @@
 - [PROGRESSIVE_BFP_ENCODER_INTERFACE.md](PROGRESSIVE_BFP_ENCODER_INTERFACE.md)  
   SimHash / Residual-Gate 前端接入 Progressive BFP encoder 的接口定义和复现实验入口。
 
+- [PROGRESSIVE_BFP_ARRAY_DESIGN_AND_EXPERIMENTS.md](PROGRESSIVE_BFP_ARRAY_DESIGN_AND_EXPERIMENTS.md)  
+  BFP 阵列本身的设计、PE/dataflow/service-window 机制，以及需要补齐的 array-level 实验路线。
+
 - [BFP_ACTIVATION_FORMAT.md](BFP_ACTIVATION_FORMAT.md)  
   BFP activation 格式、B64/B128/B256 block size、相对普通 W4A8/W4A4 的差异。
 

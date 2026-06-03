@@ -95,7 +95,7 @@ base_format:
     W4BFPA4_B128
 
 refine_format:
-    W4BFPA6_B128 or W4BFPA5_B128
+    W4BFPA6_B128
 
 selector_score:
     Degree / TSER / LowUnique / Random
@@ -108,7 +108,7 @@ all encoder nodes:
     execute BFPA4 base
 
 top-risk encoder nodes:
-    execute additional mantissa refinement to BFPA6/BFPA5
+    execute additional mantissa refinement to BFPA6
 ```
 
 这里的 `top-risk` 只在 encoder miss nodes 内排序，不会影响已经 direct / residual reuse 的节点。
@@ -170,7 +170,7 @@ on-chip execution:
     optional extra mantissa-plane cycles
 ```
 
-因此 BFPA5/BFPA6 是 execution depth，不要求 HBM 以 5-bit 或 6-bit 非对齐格式存储。这样可以避免非整字节压缩带来的地址生成、burst 传输和 packing/unpacking 复杂度。
+因此 BFPA6 是 execution depth，不要求 HBM 以 6-bit 非对齐格式存储。这样可以避免非整字节压缩带来的地址生成、burst 传输和 packing/unpacking 复杂度。
 
 阵列层面采用 W4-capable bit-sliced / bit-serial data path：
 
@@ -200,7 +200,7 @@ graph risk controls which miss nodes need refinement
 W4BFPA8_B128:
     reference P8 pool
 
-W4BFPA6_B128 / W4BFPA5_B128:
+W4BFPA6_B128:
     refined pool
 
 W4BFPA4_B128:
@@ -240,7 +240,7 @@ GNN classifier measures final drop
 
 | Config | Reuse | P6 | P4 | Cost | Drop |
 |---|---:|---:|---:|---:|---:|
-| FullP8 | 39.5% | 0.0% | 0.0% | 0.304 | 1.64% |
+| RefP8 | 39.5% | 0.0% | 0.0% | 0.304 | 1.64% |
 | AllP6 | 39.5% | 60.5% | 0.0% | 0.239 | 1.76% |
 | AllP4 | 39.5% | 0.0% | 60.5% | 0.175 | 2.46% |
 | Rand | 39.5% | 18.1% | 42.3% | 0.194 | 2.12% |
@@ -257,13 +257,6 @@ GNN classifier measures final drop
 
 ```bash
 DATASET=cora RUNS=10 REFINE_BIT=6 REFINE_RATIO=0.30 FORCE=1 \
-  bash GraphhopSimhash/scripts/run_progressive_bfp_fullstack.sh
-```
-
-BFPA5 中间档：
-
-```bash
-DATASET=cora RUNS=3 REFINE_BIT=5 REFINE_RATIO=0.30 \
   bash GraphhopSimhash/scripts/run_progressive_bfp_fullstack.sh
 ```
 

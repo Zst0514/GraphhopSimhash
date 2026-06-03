@@ -10,7 +10,7 @@ TSER-guided residual reuse:
     用图传播风险和语义风险控制 fuzzy reuse，并用轻量 MLP 修正中风险 fuzzy hit。
 
 TSER / graph-risk-guided BFP encoder:
-    对 reject / miss nodes，用 BFPA4 作为低成本底座，只把高风险节点提升到 BFPA6/BFPA8。
+    对 reject / miss nodes，用 BFPA4 作为低成本底座，只把高风险节点提升到 BFPA6。
 ```
 
 因此 TSER 不是只服务前端 reuse。它是贯穿前后端的风险信号：
@@ -131,7 +131,7 @@ BFPA4:
 高风险 refinement：
 
 ```text
-top-risk nodes -> BFPA6 / BFPA8
+top-risk nodes -> BFPA6
 low-risk nodes -> BFPA4
 ```
 
