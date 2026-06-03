@@ -242,9 +242,35 @@ Y6 = A_hi4 @ W4
 
 这里的 `extra2` 不是新的 learned correction matrix，而是同一个 activation mantissa 低位的数值 refinement。
 
-### 4.2 为什么阵列应该 BFPA6-capable
+### 4.2 平均执行深度
 
-实验上：
+如果一个 miss-node batch 中有比例 `r` 的 rows 需要 BFPA6 refinement，其余 rows 只走 BFPA4 base，则平均 mantissa 执行深度为：
+
+```text
+avg_bits = 4 * (1 - r) + 6 * r
+         = 4 + 2r
+```
+
+例如：
+
+```text
+r = 0.30:
+    avg_bits = 4.6
+
+相对 all-BFPA6:
+    4.6 / 6 = 76.7%
+    mantissa MAC activity 约少 23.3%
+
+相对 all-BFPA4:
+    4.6 / 4 = 115.0%
+    额外付出约 15% mantissa work
+```
+
+因此 progressive BFP 的目标不是追求最低 bit，而是在 BFPA4 的低成本基础上，用少量 BFPA6 refinement 拉回精度。
+
+### 4.3 为什么阵列应该 BFPA6-capable
+
+实验趋势上：
 
 ```text
 BFPA4:
@@ -274,9 +300,88 @@ progressive mantissa refinement
 
 ---
 
-## 5. PE Microarchitecture
+## 5. Hardware Overview
 
-### 5.1 PE 输入
+### 5.1 整体模块
+
+Progressive BFP encoder 的硬件可以拆成五个主要模块：
+
+```text
+Encoder miss queue
+    |
+    v
+Risk / precision scheduler
+    |
+    v
+Activation BFP loader + metadata buffer
+    |
+    v
+W4 weight-tile buffer  --->  W4 x BFP systolic array  --->  psum / output buffer
+    |
+    v
+Scale / exponent restore
+```
+
+各模块职责：
+
+```text
+Encoder miss queue:
+    接收前端 direct / residual 之后剩余的 miss / reject nodes。
+
+Risk / precision scheduler:
+    根据 selector score 给 miss rows 打 BFPA4 或 BFPA6 标签。
+    当前实验支持 Random / Degree / TSER。
+
+Activation BFP loader:
+    读取 token rows 的 BFP mantissa 和 rowwise exponent metadata。
+
+W4 weight-tile buffer:
+    一次加载一个 W4 tile 到片上。
+    同一个 W tile 连续服务多个 token-row blocks。
+
+W4 x BFP systolic array:
+    执行 mantissa integer x W4 integer MAC。
+    BFPA4 rows 执行 base mantissa。
+    BFPA6 rows 执行 base mantissa + extra mantissa refinement。
+
+Scale / exponent restore:
+    用 BFP exponent 和 W4 scale 恢复输出尺度。
+```
+
+### 5.2 固定硬件、可配置策略
+
+硬件固定支持：
+
+```text
+W:
+    W4 integer weight
+
+A:
+    rowwise BFP activation
+    BFPA4 base
+    BFPA6 refinement
+
+Dataflow:
+    W-stationary systolic GEMM
+```
+
+运行时可配置的是少量 policy register：
+
+```text
+score threshold T
+residual accept threshold
+refine ratio
+selector mode: random / degree / tser / numeric+graph
+service window: b16 / b32 / b64
+```
+
+这些 register 不改变阵列结构，只改变 request 接收宽松程度、miss rows 的 refinement 选择和 tile 调度窗口。
+
+---
+
+## 6. PE Microarchitecture
+
+### 6.1 PE 输入
 
 每个 PE 接收：
 
@@ -297,7 +402,7 @@ precision tag:
     P4 / P6
 ```
 
-### 5.2 PE 内部模块
+### 6.2 PE 内部模块
 
 一个合理的 PE 可以拆成：
 
@@ -321,7 +426,40 @@ precision tag:
    根据 row tag 决定是否执行 extra mantissa planes。
 ```
 
-### 5.3 两种 PE 设计选项
+### 6.3 base/refinement 执行时序
+
+对同一个 W tile，阵列按 row precision tag 执行：
+
+```text
+BFPA4 row:
+    issue high-4 mantissa MAC
+    finish output tile
+
+BFPA6 row:
+    issue high-4 mantissa MAC
+    issue extra-2 mantissa MAC
+    accumulate into the same output tile
+```
+
+关键点：
+
+```text
+1. BFPA6 refinement 不重新加载另一个 W。
+2. extra-2 mantissa 使用同一个 W4 tile。
+3. 输出 partial sum 在同一个 tile 生命周期内完成 base + refinement。
+```
+
+因此 progressive refinement 的额外开销主要是：
+
+```text
+extra mantissa MAC cycles
+extra activation mantissa reads
+slightly longer psum lifetime for refined rows
+```
+
+它不需要新的权重矩阵，也不需要额外 learned correction。
+
+### 6.4 两种 PE 设计选项
 
 #### Option A: bit-sliced PE
 
@@ -371,9 +509,100 @@ BFPA6 是主目标。
 
 ---
 
-## 6. Array-Level Dataflow
+## 7. Buffer And Metadata Design
 
-### 6.1 W-stationary dataflow
+### 7.1 Activation buffer
+
+当前主线不要求 HBM 使用非标准 4-bit / 6-bit activation layout。更实际的设计是：
+
+```text
+HBM / DMA:
+    使用 byte-aligned container 传输 activation tile。
+
+On-chip:
+    unpack 成 BFP mantissa + exponent metadata。
+    BFPA4 只消费 high-4 mantissa。
+    BFPA6 再消费 extra-2 mantissa。
+```
+
+这样避免了 6-bit 非对齐 HBM burst、地址生成和跨 cache-line packing 的复杂度。代价是 activation HBM payload 不一定随 BFPA4/BFPA6 完全等比例下降；主要收益来自片上 mantissa MAC activity 和 miss-node W tile 调度。
+
+### 7.2 Exponent metadata
+
+rowwise `1 x 128` BFP block 意味着：
+
+```text
+hidden dim = 4096
+block size = 128
+exponent blocks per token row = 4096 / 128 = 32
+```
+
+如果每个 exponent 用 8 bit 存储，则：
+
+```text
+node_batch = 4
+sequence_length = 512
+M = 2048 token rows
+
+exponent metadata = 2048 * 32 byte = 64 KB
+BFPA4 mantissa payload = 2048 * 4096 * 4 bit = 4 MB
+
+metadata / mantissa payload = about 1.6%
+```
+
+因此 exponent metadata 需要被建模，但不是主要存储负担。
+
+### 7.3 W tile buffer
+
+典型 W tile：
+
+```text
+tile_k = 128
+tile_n = 128
+W4 payload = 128 * 128 * 4 bit = 8 KB
+```
+
+同一个 LLaMA 线性层的完整 W 很大：
+
+```text
+4096 x 4096 W4:
+    about 8 MB
+
+4096 x 11008 W4:
+    about 22 MB
+```
+
+所以阵列不假设整层 W 常驻片上。它假设：
+
+```text
+一次只缓存一个或少量 W tiles；
+通过 service window 让一个 W tile 连续服务更多 token rows；
+减少同一 W tile 的重复加载。
+```
+
+### 7.4 Psum / output buffer
+
+BFPA6 rows 需要在 high-4 base 后继续追加 extra-2 refinement。实现上有两种方式：
+
+```text
+homogeneous precision batch:
+    BFPA4 rows 和 BFPA6 rows 分开调度。
+    BFPA6 rows 在同一次 tile residency 内完成 base + extra。
+    控制简单，利用率稳定。
+
+mixed precision mask:
+    BFPA4/BFPA6 rows 混在同一 micro-batch。
+    BFPA4 rows 在 extra cycles 中被 mask。
+    控制简单但 lane utilization 可能下降。
+```
+
+当前更推荐 homogeneous precision batch，因为它能减少分支和 mask 导致的阵列空转。
+
+---
+
+## 8. Array-Level Dataflow
+
+### 8.1 W-stationary dataflow
 
 阵列采用 W-stationary：
 
@@ -411,7 +640,7 @@ for each layer:
 让它服务尽可能多的有效 token rows。
 ```
 
-### 6.2 Risk bucket 与 service window
+### 8.2 Risk bucket 与 service window
 
 前端输出 miss nodes 后，后端按风险和 precision tag 组织 token rows：
 
@@ -447,9 +676,141 @@ b64:
     bucket 太小时会退化。
 ```
 
+### 8.3 一个 W tile 的执行例子
+
+以 `128 x 128 W4` tile 为例：
+
+```text
+1. Load W tile:
+       8 KB W4 payload + scale metadata
+
+2. Select row block:
+       从 miss queue 中取同 precision / 同 bucket 的 token rows
+
+3. Execute BFPA4 base:
+       high-4 mantissa x W4
+
+4. Optional BFPA6 refinement:
+       仅对 refine rows 追加 extra-2 mantissa x W4
+
+5. Write output tile:
+       输出进入下一层或 embedding pooling path
+
+6. Keep or evict W tile:
+       如果 bucket 里还有 rows，继续服务；
+       否则换下一个 W tile。
+```
+
+这个过程的关键是：
+
+```text
+同一 W tile 对所有节点相同；
+不同节点只是在 activation mantissa depth 和调度顺序上不同；
+图前端提供 risk / reuse 信息，让后端知道哪些 miss rows 可以组成更稳定的 service window。
+```
+
 ---
 
-## 7. 需要补齐的实验
+## 9. Selector And Control Policy
+
+### 9.1 当前 selector
+
+当前实验主要比较：
+
+```text
+Random:
+    随机选择一部分 miss rows 升到 BFPA6。
+
+Degree:
+    传播风险更高的 miss rows 升到 BFPA6。
+
+TSER:
+    使用 TSER score 综合传播风险和语义风险。
+```
+
+当前 Cora/PubMed 的趋势显示，单纯 Degree/TSER 在 BFPA4/BFPA6 selector 上不总是显著优于 Random。后续更完整的 selector 应加入 BFP 数值压力：
+
+```text
+graph risk:
+    节点误差对 GNN 传播的影响。
+
+BFP stress:
+    当前 row / block 用 BFPA4 是否数值危险。
+```
+
+### 9.2 推荐 selector 形式
+
+一个轻量可实现的 selector：
+
+```text
+score(v) =
+    lambda_g * normalize(graph_risk(v))
+  + lambda_b * normalize(bfp_stress(v))
+```
+
+其中：
+
+```text
+graph_risk:
+    degree / propagation / TSER score
+
+bfp_stress:
+    activation block dynamic range
+    exponent outlier ratio
+    BFPA4 vs BFPA6 estimated quantization residual
+```
+
+硬件上，`graph_risk` 来自前端 metadata，`bfp_stress` 可以由 activation loader 在 BFP block 统计阶段顺带产生。
+
+---
+
+## 10. Cost Accounting
+
+最终评估需要把成本拆成以下几类：
+
+```text
+W tile load:
+    W4 tile 从 HBM/LLC 到片上 buffer 的次数。
+
+Activation load:
+    token rows 和 BFP metadata 的读入。
+
+Mantissa MAC:
+    high-4 base cycles 和 optional extra-2 refinement cycles。
+
+Psum / output:
+    output tile accumulation 和写回。
+
+Scheduler overhead:
+    bucket fill、row reorder、precision tag 管理。
+```
+
+Progressive BFP 的收益来源要分清：
+
+```text
+BFPA4/BFPA6:
+    主要减少 mantissa MAC 和片上 activity。
+
+W-stationary service window:
+    主要摊薄 W tile load。
+
+front-end reuse/residual:
+    直接减少进入 encoder 的 node 数。
+```
+
+报告时应同时给出：
+
+```text
+accuracy drop
+normalized cost
+W tile load count
+average mantissa depth
+service-window utilization
+```
+
+---
+
+## 11. 需要补齐的实验
 
 当前已有的 embedding-pool 实验只能说明：
 
@@ -467,9 +828,9 @@ BFPA4/BFPA6 对下游 GNN 精度有什么影响。
 
 ---
 
-## 8. Experiment Layer 1: Numerical Correctness
+## 12. Experiment Layer 1: Numerical Correctness
 
-### 8.1 目标
+### 12.1 目标
 
 证明软件 BFP pool 与阵列数值定义一致：
 
@@ -481,7 +842,7 @@ W4 scale
 progressive refinement
 ```
 
-### 8.2 实验
+### 12.2 实验
 
 构造小矩阵：
 
@@ -518,13 +879,13 @@ BFPA6 明显优于 BFPA4。
 
 ---
 
-## 9. Experiment Layer 2: PE / Tile Microbench
+## 13. Experiment Layer 2: PE / Tile Microbench
 
-### 9.1 目标
+### 13.1 目标
 
 证明同一个 W tile 下，BFPA4/BFPA6 的 PE activity 和 cycles 有清晰差异。
 
-### 9.2 GEMM 形状
+### 13.2 GEMM 形状
 
 至少覆盖 LLaMA-7B 的三类关键 GEMM：
 
@@ -545,7 +906,7 @@ FFN down:
 M = 2048 / 4096 / 8192 / 16384
 ```
 
-### 9.3 指标
+### 13.3 指标
 
 ```text
 cycles
@@ -559,7 +920,7 @@ energy proxy
 array utilization
 ```
 
-### 9.4 对比
+### 13.4 对比
 
 ```text
 All BFPA6
@@ -586,13 +947,13 @@ memory saving:
 
 ---
 
-## 10. Experiment Layer 3: Scheduler / W Tile Reuse
+## 14. Experiment Layer 3: Scheduler / W Tile Reuse
 
-### 10.1 目标
+### 14.1 目标
 
 证明 risk-bucket scheduler 能让 W tile 服务更多有效 rows。
 
-### 10.2 输入 trace
+### 14.2 输入 trace
 
 从 full-stack 前端实验导出：
 
@@ -610,7 +971,7 @@ risk score
 
 只对 miss/reject nodes 做后端 replay。
 
-### 10.3 调度策略
+### 14.3 调度策略
 
 对比：
 
@@ -628,7 +989,7 @@ oracle-size bucket:
     只用于上界，不作为主线。
 ```
 
-### 10.4 指标
+### 14.4 指标
 
 ```text
 W tile load count
@@ -647,9 +1008,9 @@ cycles / traffic / energy
 
 ---
 
-## 11. Experiment Layer 4: Full-Stack Evaluation
+## 15. Experiment Layer 4: Full-Stack Evaluation
 
-### 11.1 目标
+### 15.1 目标
 
 把前端 reuse/residual 与后端 BFP array 串起来：
 
@@ -661,7 +1022,7 @@ BFP array cost model
 GNN accuracy
 ```
 
-### 11.2 主表
+### 15.2 主表
 
 最终需要类似下面的表：
 
@@ -672,7 +1033,7 @@ GNN accuracy
 | Reuse + Progressive BFP | ... | ... | BFPA4/BFPA6 | ... | ... | ... |
 | Reuse + Progressive BFP + bucket scheduler | ... | ... | BFPA4/BFPA6 + WS | ... | ... | ... |
 
-### 11.3 数据集
+### 15.3 数据集
 
 最低需要：
 
@@ -689,9 +1050,9 @@ Arxiv:
 
 ---
 
-## 12. 必须回答的几个问题
+## 16. 必须回答的几个问题
 
-### 12.1 BFPA6 是否值得做成 refinement 主档
+### 16.1 BFPA6 是否值得做成 refinement 主档
 
 需要证明：
 
@@ -702,7 +1063,7 @@ BFPA6 的额外 mantissa-plane 开销小于直接提高所有 miss nodes 精度�
 
 如果 BFPA6 与离线 BFPA8 reference 的精度差距很小，则在线阵列只支持到 BFPA6 是合理的。
 
-### 12.2 BFPA4 base 是否足够安全
+### 16.2 BFPA4 base 是否足够安全
 
 需要区分两种使用方式：
 
@@ -717,7 +1078,7 @@ Progressive BFPA4:
 
 如果 All BFPA4 drop 太高，但 progressive BFPA4+BFPA6 可控，则说明阵列需要 refinement，而不是固定 BFPA4。
 
-### 12.3 Graph selector 是否真的有用
+### 16.3 Graph selector 是否真的有用
 
 需要对比：
 
@@ -730,7 +1091,7 @@ Degree + BFP stress
 TSER + BFP stress
 ```
 
-如果图风险单独不强，不能强行包装。更合理的最终 selector 是：
+如果图风险单独区分度不足，最终 selector 需要同时纳入数值侧的 BFP stress：
 
 ```text
 graph risk:
@@ -742,7 +1103,7 @@ BFP stress:
 
 两者结合才是后端 BFP selector 的完整逻辑。
 
-### 12.4 阵列收益来自哪里
+### 16.4 阵列收益来自哪里
 
 最终报告必须拆分：
 
@@ -761,7 +1122,7 @@ W-stationary bucket:
 
 ---
 
-## 13. 推荐实验顺序
+## 17. 推荐实验顺序
 
 ### Step A: Array functional model
 
@@ -829,7 +1190,7 @@ same routing policy:
 
 ---
 
-## 14. 当前结论
+## 18. 当前结论
 
 当前 BFP 阵列还没有完整闭环，已经有的是：
 
