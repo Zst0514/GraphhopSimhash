@@ -13,6 +13,12 @@
 - [PROGRESSIVE_BFP_ARRAY_DESIGN_AND_EXPERIMENTS.md](PROGRESSIVE_BFP_ARRAY_DESIGN_AND_EXPERIMENTS.md)  
   BFP 阵列本身的设计、PE/dataflow/service-window 机制，以及需要补齐的 array-level 实验路线。
 
+- [GRAPH_AWARE_BFP_REFINEMENT_POLICY.md](GRAPH_AWARE_BFP_REFINEMENT_POLICY.md)  
+  Graph risk 与真实 LLaMA activation block stress 联合指导 BFPA4/BFPA6 refinement 的策略、接口和实验流程。
+
+- [GRAPH_AWARE_BFP_VALIDATION_PLAN.md](GRAPH_AWARE_BFP_VALIDATION_PLAN.md)  
+  验证 activation stress、graph risk 以及二者联合 refinement 是否有效的分层实验设计。
+
 - [BFP_ACTIVATION_FORMAT.md](BFP_ACTIVATION_FORMAT.md)  
   BFP activation 格式、B64/B128/B256 block size、相对普通 W4A8/W4A4 的差异。
 
