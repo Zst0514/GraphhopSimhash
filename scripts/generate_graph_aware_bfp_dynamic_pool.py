@@ -20,7 +20,7 @@ import os
 import sys
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, Optional
 
 import torch
 import torch.nn as nn
@@ -95,11 +95,34 @@ class GraphAwareBFPController:
         self.current_node_ids: torch.Tensor | None = None
         self.total_blocks = 0
         self.refined_blocks = 0
+        self.module_stats: dict[str, dict[str, Any]] = {}
+
+    @staticmethod
+    def _new_module_stat(module_name: str, in_features: Optional[int], out_features: Optional[int]) -> dict[str, Any]:
+        return {
+            "module": module_name,
+            "in_features": int(in_features or 0),
+            "out_features": int(out_features or 0),
+            "calls": 0,
+            "token_rows": 0,
+            "total_blocks": 0,
+            "refined_blocks": 0,
+            "base_bit_macs": 0,
+            "extra_bit_macs": 0,
+            "full_refine_bit_macs": 0,
+            "full_p8_bit_macs": 0,
+        }
 
     def set_batch_node_ids(self, node_ids: torch.Tensor) -> None:
         self.current_node_ids = node_ids.detach().to(torch.long).cpu()
 
-    def quantize(self, x: torch.Tensor) -> torch.Tensor:
+    def quantize(
+        self,
+        x: torch.Tensor,
+        module_name: str = "unknown",
+        in_features: Optional[int] = None,
+        out_features: Optional[int] = None,
+    ) -> torch.Tensor:
         if self.current_node_ids is None or x.dim() < 2:
             return bfp_fake_quantize(x, self.base_mantissa, self.block_size, dim=-1)
 
@@ -126,31 +149,102 @@ class GraphAwareBFPController:
         q_base = _bfp_quantize_grouped(grouped, self.base_mantissa)
         q_refine = _bfp_quantize_grouped(grouped, self.refine_mantissa)
         out = torch.where(refine_mask.unsqueeze(-1), q_refine, q_base)
-        self.total_blocks += int(refine_mask.numel())
-        self.refined_blocks += int(refine_mask.sum().item())
+        total_blocks = int(refine_mask.numel())
+        refined_blocks = int(refine_mask.sum().item())
+        self.total_blocks += total_blocks
+        self.refined_blocks += refined_blocks
+
+        # Trace hardware-relevant activity at Linear-module granularity.
+        # grouped shape is [..., k_blocks, block_size], so token rows are the
+        # dimensions before k_blocks.  The padded K tail is counted as a full
+        # block because a block-sliced array would still reserve that issue slot.
+        token_rows = int(math.prod(grouped.shape[:-2])) if grouped.dim() >= 2 else 0
+        out_dim = int(out_features or 0)
+        block_macs = int(self.block_size) * out_dim
+        base_bit_macs = int(self.base_mantissa) * total_blocks * block_macs
+        extra_bit_macs = int(self.refine_mantissa - self.base_mantissa) * refined_blocks * block_macs
+        full_refine_bit_macs = int(self.refine_mantissa) * total_blocks * block_macs
+        full_p8_bit_macs = 8 * total_blocks * block_macs
+
+        stat = self.module_stats.get(module_name)
+        if stat is None:
+            stat = self._new_module_stat(module_name, in_features, out_features)
+            self.module_stats[module_name] = stat
+        stat["calls"] += 1
+        stat["token_rows"] += token_rows
+        stat["total_blocks"] += total_blocks
+        stat["refined_blocks"] += refined_blocks
+        stat["base_bit_macs"] += base_bit_macs
+        stat["extra_bit_macs"] += extra_bit_macs
+        stat["full_refine_bit_macs"] += full_refine_bit_macs
+        stat["full_p8_bit_macs"] += full_p8_bit_macs
 
         out = out.reshape(*x_work.shape)
         if pad:
             out = out[..., :hidden]
         return torch.nan_to_num(out.reshape(orig_shape), nan=0.0, posinf=0.0, neginf=0.0)
 
+    def trace_summary(self) -> dict[str, Any]:
+        modules = []
+        for name, stat in sorted(self.module_stats.items()):
+            total = int(stat["total_blocks"])
+            refined = int(stat["refined_blocks"])
+            dynamic_bit_macs = int(stat["base_bit_macs"]) + int(stat["extra_bit_macs"])
+            module = dict(stat)
+            module["refined_ratio"] = float(refined / max(1, total))
+            module["dynamic_bit_macs"] = dynamic_bit_macs
+            module["effective_bits"] = float(
+                self.base_mantissa
+                + (self.refine_mantissa - self.base_mantissa) * refined / max(1, total)
+            )
+            module["dynamic_vs_bfpa4"] = float(dynamic_bit_macs / max(1, int(stat["base_bit_macs"])))
+            module["dynamic_vs_bfpa6"] = float(dynamic_bit_macs / max(1, int(stat["full_refine_bit_macs"])))
+            module["dynamic_vs_bfpa8"] = float(dynamic_bit_macs / max(1, int(stat["full_p8_bit_macs"])))
+            modules.append(module)
+        return {
+            "total_blocks": int(self.total_blocks),
+            "refined_blocks": int(self.refined_blocks),
+            "refined_ratio": float(self.refined_blocks / max(1, self.total_blocks)),
+            "effective_bits": float(
+                self.base_mantissa
+                + (self.refine_mantissa - self.base_mantissa)
+                * self.refined_blocks
+                / max(1, self.total_blocks)
+            ),
+            "modules": modules,
+        }
+
 
 class GraphAwareBFPActivationLinear(nn.Module):
-    def __init__(self, original_linear: nn.Linear, controller: GraphAwareBFPController) -> None:
+    def __init__(self, original_linear: nn.Linear, controller: GraphAwareBFPController, module_name: str) -> None:
         super().__init__()
         self.linear = original_linear
         self.controller = controller
+        self.module_name = module_name
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.linear(self.controller.quantize(x))
+        return self.linear(
+            self.controller.quantize(
+                x,
+                module_name=self.module_name,
+                in_features=self.linear.in_features,
+                out_features=self.linear.out_features,
+            )
+        )
 
 
-def replace_linear_with_graph_bfp(module: nn.Module, controller: GraphAwareBFPController, skip_names=("lm_head",)) -> None:
+def replace_linear_with_graph_bfp(
+    module: nn.Module,
+    controller: GraphAwareBFPController,
+    skip_names=("lm_head",),
+    prefix: str = "",
+) -> None:
     for name, child in list(module.named_children()):
+        child_name = f"{prefix}.{name}" if prefix else name
         if isinstance(child, nn.Linear) and name not in set(skip_names):
-            setattr(module, name, GraphAwareBFPActivationLinear(child, controller))
+            setattr(module, name, GraphAwareBFPActivationLinear(child, controller, child_name))
         else:
-            replace_linear_with_graph_bfp(child, controller, skip_names=skip_names)
+            replace_linear_with_graph_bfp(child, controller, skip_names=skip_names, prefix=child_name)
 
 
 def _forward_last_hidden_state(model, tokens):
@@ -342,6 +436,7 @@ def main() -> None:
             "refined_ratio": float(refined_ratio),
             "effective_bits": float(effective_bits),
             "policy": "degree_risk(node) * activation_stress(block) >= threshold",
+            "array_trace": controller.trace_summary(),
         }
         meta_path.write_text(json.dumps(metadata, indent=2, sort_keys=True) + "\n", encoding="utf-8")
         if args.save_to_cache:

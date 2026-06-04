@@ -489,6 +489,63 @@ replace_linear_with_graph_bfp:
 
 这一步已经进入 LLaMA forward 内部，不是简单 embedding-level 后处理。
 
+### 7.1 Array Trace and Cycle/Activity Proxy
+
+当前实现已经在 dynamic BFP wrapper 内部记录阵列相关 trace。每个 wrapped Linear 会统计：
+
+```text
+module name
+in_features / out_features
+calls
+token_rows
+total activation blocks
+refined activation blocks
+BFPA4 base bit-MACs
+extra 2-bit refinement bit-MACs
+full BFPA6 / BFPA8 reference bit-MACs
+```
+
+这些字段随 dynamic pool metadata 一起保存：
+
+```text
+cache_data/{dataset}_llama2_7b_oracle_W4GraphBFPA4to6_B128_deg_t0.20.json
+```
+
+对应的阵列侧汇总脚本是：
+
+```text
+GraphhopSimhash/scripts/simulate_dynamic_bfp_array_trace.py
+```
+
+它读取 metadata 中的 `array_trace`，输出：
+
+```text
+module_array_trace.tsv:
+    每个 Linear module 的 refined ratio、effective bits、dynamic cycles。
+
+kind_array_trace.tsv:
+    q/k/v/o/gate/up/down 等模块类别聚合。
+
+summary.json / summary.md:
+    全局 refined ratio、effective bits、
+    dynamic/BFPA4、dynamic/BFPA6、dynamic/BFPA8 cycles ratio。
+```
+
+当前 cycle 统计是 progressive BFP array 的 activity/cycle proxy：
+
+```text
+BFPA4 base cycles:
+    all blocks execute 4 mantissa-bit planes
+
+BFPA6 refinement cycles:
+    selected blocks execute extra 2 mantissa-bit planes
+
+dynamic cycles:
+    BFPA4 base cycles + selected extra-2-bit refinement cycles
+```
+
+它不是 RTL 级逐 PE 仿真，但已经从真实 LLaMA forward 的 per-module refined block trace 出发，而不是只用一个全局 refined ratio。
+
 ---
 
 ## 8. Reproduction Commands
@@ -515,6 +572,22 @@ Output:
 
 ```text
 output/graphbfp_dynamic_pool/cora/
+```
+
+如果使用 `--save_to_cache`，metadata 会写到标准 cache 路径。之后可以直接汇总阵列 trace：
+
+```bash
+/home/zhangshangtong/.conda/envs/OFA/bin/python \
+  GraphhopSimhash/scripts/simulate_dynamic_bfp_array_trace.py \
+  --metadata cache_data/cora_llama2_7b_oracle_W4GraphBFPA4to6_B128_deg_t0.20.json \
+  --output_dir output/dynamic_bfp_fullstack/cora_array_trace_t020
+```
+
+全栈脚本会自动检测 metadata 里是否包含 `array_trace`。如果包含，会自动调用上述 simulator：
+
+```bash
+DATASETS=cora RUNS=1 FORCE_DYNAMIC=1 FORCE_FULLSTACK=1 \
+  bash GraphhopSimhash/scripts/run_dynamic_bfp_fullstack.sh
 ```
 
 ### 8.2 Cora threshold = 0.35
@@ -682,4 +755,3 @@ Cora / LLaMA-7B:
        BFP exponent/stress estimator overhead
        metadata lookup overhead
 ```
-

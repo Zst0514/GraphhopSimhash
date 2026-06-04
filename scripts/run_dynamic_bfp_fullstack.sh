@@ -116,6 +116,13 @@ meta = json.loads(Path("${meta_path}").read_text(encoding="utf-8"))
 print(f"{float(meta['refined_ratio']):.6f}")
 PY
 )"
+  has_array_trace="$("${PYTHON_BIN}" - <<PY
+import json
+from pathlib import Path
+meta = json.loads(Path("${meta_path}").read_text(encoding="utf-8"))
+print("1" if (meta.get("array_trace") or {}).get("modules") else "0")
+PY
+)"
 
   out_dir="${OFA_DIR}/output/dynamic_bfp_fullstack/${dataset}_T${frontend_t}_${DYNAMIC_TAG}_runs${runs}"
   mkdir -p "${out_dir}"
@@ -132,6 +139,15 @@ note=runner row AllP4 loads this dynamic BFPA4/BFPA6 pool; use effective_mantiss
 EOF
 
   echo "[$(timestamp)] [FullStack] effective_bits=${effective_bits} refined_ratio=${refined_ratio}"
+  if [[ "${has_array_trace}" == "1" ]]; then
+    echo "[$(timestamp)] [ArrayTrace] summarizing dynamic BFPA4/BFPA6 array activity"
+    "${PYTHON_BIN}" GraphhopSimhash/scripts/simulate_dynamic_bfp_array_trace.py \
+      --metadata "${meta_path}" \
+      --output_dir "${out_dir}/array_trace"
+  else
+    echo "[$(timestamp)] [ArrayTrace] metadata has no per-module trace; regenerate the pool with the updated generator to enable array simulation"
+  fi
+
   FORCE="${FORCE_FULLSTACK}" \
   DATASET="${dataset}" \
   RUNS="${runs}" \
