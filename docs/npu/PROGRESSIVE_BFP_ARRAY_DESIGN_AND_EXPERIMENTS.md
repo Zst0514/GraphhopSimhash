@@ -221,7 +221,9 @@ block exponent / scale shift
 
 ### 4.1 Base + refinement
 
-BFPA6 可以看成 BFPA4 base 加上 extra mantissa planes：
+BFPA6 可以看成 BFPA4 base 加上 extra mantissa planes。这里的
+`refinement` 不是 learned residual，也不是重新运行另一套 encoder，而是把同一个
+BFP activation mantissa 的低 2 位补算回来。
 
 ```text
 BFPA4:
@@ -241,6 +243,68 @@ Y6 = A_hi4 @ W4
 ```
 
 这里的 `extra2` 不是新的 learned correction matrix，而是同一个 activation mantissa 低位的数值 refinement。
+
+更具体地，假设一个 BFPA6 mantissa 为：
+
+```text
+m6 = b5 b4 b3 b2 b1 b0
+```
+
+BFPA4 base 使用高 4 位：
+
+```text
+m4 = b5 b4 b3 b2
+```
+
+BFPA6 refinement 使用剩余低 2 位：
+
+```text
+extra2 = b1 b0
+```
+
+数值上：
+
+```text
+m6 = (m4 << 2) + extra2
+```
+
+因此：
+
+```text
+m6 * W4 = ((m4 * W4) << 2) + (extra2 * W4)
+```
+
+阵列执行时先计算所有需要 encoder 的 rows 的 `m4 * W4` base partial sum；只有被 selector 标记为 BFPA6 的 rows，才继续发射 `extra2 * W4` refinement，并把结果按对应 shift / exponent scale 加回同一个 output tile。
+
+一个最小例子：
+
+```text
+BFPA6 mantissa = 101101b = 45
+
+high4 = 1011b = 11
+low2  = 01b   = 1
+
+45 * W = (11 * W) * 4 + (1 * W)
+```
+
+所以 BFPA6 refinement 的含义是：
+
+```text
+BFPA4 base:
+    先算 high-4 mantissa 与 W4 的乘积。
+
+BFPA6 refinement:
+    对需要保护的 rows，追加 low-2 mantissa 与同一个 W4 tile 的乘积。
+```
+
+关键性质：
+
+```text
+1. 不重新加载另一份 W。
+2. 不启动另一个 kernel。
+3. 不学习额外 correction matrix。
+4. refinement 只增加被保护 rows 的 extra mantissa cycles。
+```
 
 ### 4.2 平均执行深度
 
@@ -268,7 +332,75 @@ r = 0.30:
 
 因此 progressive BFP 的目标不是追求最低 bit，而是在 BFPA4 的低成本基础上，用少量 BFPA6 refinement 拉回精度。
 
-### 4.3 为什么阵列应该 BFPA6-capable
+### 4.3 对周期的影响
+
+如果阵列按 mantissa slice 执行，则单个 row 的 mantissa compute cycles 与执行的 mantissa 位数近似成正比：
+
+```text
+BFPA4 row:
+    high-4 mantissa slice
+    -> 4-bit work
+
+BFPA6 row:
+    high-4 mantissa slice
+    + low-2 refinement slice
+    -> 6-bit work
+```
+
+所以单个 row 从 BFPA4 升到 BFPA6，mantissa compute work 增加：
+
+```text
+(6 - 4) / 4 = 50%
+```
+
+但 full batch 中只有比例 `r` 的 rows 触发 refinement，因此 batch-level 平均开销是：
+
+```text
+avg_bits = 4 + 2r
+```
+
+例如 `r = 0.30` 时：
+
+```text
+avg_bits = 4.6
+
+vs all-BFPA4:
+    +15% mantissa compute
+
+vs all-BFPA6:
+    -23.3% mantissa compute
+```
+
+这也是 progressive BFP 的硬件意义：不是把所有 miss rows 都拖到 BFPA6，而是在 BFPA4 base 上只给少量高风险 rows 追加 low-2 mantissa cycles。
+
+周期影响分为两层：
+
+```text
+PE / mantissa path:
+    BFPA6 rows 多执行 extra-2 mantissa MAC。
+
+W path:
+    BFPA4 和 BFPA6 使用同一个 W4 tile。
+    refinement 不增加 W HBM reload。
+```
+
+因此 refinement 的额外代价主要来自：
+
+```text
+extra mantissa issue cycles
+extra activation mantissa reads
+extra psum update
+```
+
+而不是：
+
+```text
+extra W matrix
+extra W tile load
+extra full encoder pass
+```
+
+### 4.4 为什么阵列应该 BFPA6-capable
 
 实验趋势上：
 
@@ -381,6 +513,10 @@ service window: b16 / b32 / b64
 
 ## 6. PE Microarchitecture
 
+![Progressive BFP PE](../figures/progressive_bfp_pe.svg)
+
+图中展示的是一个 PE 级别的数据流。BFPA4 rows 只执行 high-4 mantissa base phase；BFPA6 rows 在同一个 W4 tile 生命周期内继续执行 low-2 mantissa refinement。这个 refinement 是 activation mantissa 低位的数值补算，不是 learned residual，也不需要重新加载另一份 W。
+
 ### 6.1 PE 输入
 
 每个 PE 接收：
@@ -459,14 +595,44 @@ slightly longer psum lifetime for refined rows
 
 它不需要新的权重矩阵，也不需要额外 learned correction。
 
+更直观的数据流如下：
+
+```text
+             W4 tile loaded once
+                     |
+                     v
+        +--------------------------+
+        |      W4 x BFP PE array   |
+        +--------------------------+
+             ^                ^
+             |                |
+    high-4 mantissa      low-2 mantissa
+    base slice           refinement slice
+    all encoder rows     BFPA6 rows only
+             |                |
+             +--------+-------+
+                      v
+             base psum + refinement psum
+```
+
+如果 BFPA4 和 BFPA6 rows 混在一个 micro-batch 中，阵列需要 row tag / row mask 来避免 BFPA4 rows 在 refinement phase 中被空转拖到 6-bit。更稳的调度方式是：
+
+```text
+1. 对同一个 W tile，先执行 BFPA4 base phase。
+2. 对标记为 BFPA6 的 rows，继续执行 extra-2 refinement phase。
+3. BFPA4 rows 在 extra phase 不发射。
+```
+
+这样 progressive BFP 的 latency / activity 才与实际 BFPA6 row 比例相关。
+
 ### 6.4 两种 PE 设计选项
 
 #### Option A: bit-sliced PE
 
 ```text
-每次处理若干 mantissa bits。
-BFPA4 执行 base slices。
-BFPA6 追加 extra slices。
+每次处理一个 mantissa slice，而不是固定一次性处理完整 6-bit。
+BFPA4 执行 high-4 base slice。
+BFPA6 在 high-4 base 后追加 low-2 refinement slice。
 ```
 
 优点：
@@ -475,6 +641,7 @@ BFPA6 追加 extra slices。
 自然支持 BFPA4/BFPA6。
 控制逻辑清晰。
 可以复用同一个 W tile。
+BFPA4 rows 不需要占用 low-2 refinement cycles。
 ```
 
 缺点：
@@ -506,6 +673,16 @@ BFPA6 是主目标。
 ```
 
 当前更推荐 Option A，因为它更能体现 progressive refinement 的硬件意义。
+
+这里的 bit-sliced PE 不等同于每拍只处理 1 bit 的极端 bit-serial 设计。当前主线更接近：
+
+```text
+mantissa-sliced execution:
+    high-4 slice 作为 base
+    low-2 slice 作为 optional refinement
+```
+
+也就是说，它继承 bit-serial / bit-sliced 的可变位宽执行能力，但以 BFPA4/BFPA6 这两个硬件友好的 slice 为主。
 
 ---
 
@@ -797,6 +974,42 @@ W-stationary service window:
 front-end reuse/residual:
     直接减少进入 encoder 的 node 数。
 ```
+
+对 BFPA6 refinement 的单独开销可以写成：
+
+```text
+refine_ratio = 需要 BFPA6 的 miss rows 比例
+
+avg_mantissa_bits = 4 + 2 * refine_ratio
+
+mantissa_activity_vs_BFPA4 = avg_mantissa_bits / 4
+mantissa_activity_vs_BFPA6 = avg_mantissa_bits / 6
+```
+
+例如 `refine_ratio = 0.30`：
+
+```text
+avg_mantissa_bits = 4.6
+
+vs all-BFPA4:
+    4.6 / 4 = 1.15
+    多约 15% mantissa activity
+
+vs all-BFPA6:
+    4.6 / 6 = 0.767
+    少约 23.3% mantissa activity
+```
+
+这个公式只描述 mantissa path。端到端 cost 还要叠加：
+
+```text
+W tile load / reuse
+activation load
+output writeback
+scheduler overhead
+```
+
+因此报告里应避免只用 bit 数推导整体加速，而要同时报告 mantissa activity 和 full-stack normalized cost。
 
 报告时应同时给出：
 
