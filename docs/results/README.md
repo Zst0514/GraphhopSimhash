@@ -10,6 +10,9 @@
 - [UNIFIED_FRONTEND_POLICY_RESULT.md](UNIFIED_FRONTEND_POLICY_RESULT.md)  
   固定在线控制流下的 dataset-level `T` policy register 收敛结果，包含 Cora/PubMed/Arxiv 当前主线参数。
 
+- [DYNAMIC_BFP_FULLSTACK_RESULT.md](DYNAMIC_BFP_FULLSTACK_RESULT.md)  
+  当前最终 full-stack 入口：SimHash/residual 前端 + graph-aware dynamic BFPA4/BFPA6 miss-node encoder。
+
 - [GRAPH_BIT_MAIN_RESULTS.md](GRAPH_BIT_MAIN_RESULTS.md)  
   当前端到端主结果入口：front-end reuse、residual-gate、BFP miss-node path。
 

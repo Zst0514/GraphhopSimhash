@@ -14,6 +14,7 @@ each Linear wrapper during the LLaMA forward pass.
 from __future__ import annotations
 
 import argparse
+import json
 import math
 import os
 import sys
@@ -241,6 +242,16 @@ def main() -> None:
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--cache_dir", default="cache_data/model")
     parser.add_argument("--output_dir", default="output/graphbfp_dynamic_pool")
+    parser.add_argument(
+        "--save_to_cache",
+        action="store_true",
+        help="Save the generated pool to the standard cache_data path so other suites can load it by tag.",
+    )
+    parser.add_argument(
+        "--cache_tag",
+        default=None,
+        help="Optional explicit cache tag. Defaults to W4GraphBFPA{base}to{refine}_B{block}_deg_t{threshold}.",
+    )
     parser.add_argument("--overwrite", action="store_true")
     parser.add_argument("--awq_calib_samples", type=int, default=128)
     parser.add_argument("--awq_seqlen", type=int, default=512)
@@ -255,11 +266,23 @@ def main() -> None:
 
     out_dir = Path(args.output_dir) / args.dataset
     out_dir.mkdir(parents=True, exist_ok=True)
-    tag = f"W4GraphBFPA{args.base_mantissa}to{args.refine_mantissa}_B{args.block_size}_deg_t{args.threshold:g}"
-    out_path = out_dir / f"{args.dataset}_{args.llm_name}_{tag}.pt"
+    default_tag = f"W4GraphBFPA{args.base_mantissa}to{args.refine_mantissa}_B{args.block_size}_deg_t{args.threshold:g}"
+    tag = args.cache_tag or default_tag
+    if args.save_to_cache:
+        out_path = Path(default_pool_path(args.dataset, args.llm_name, tag))
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+    else:
+        out_path = out_dir / f"{args.dataset}_{args.llm_name}_{tag}.pt"
+    meta_path = out_dir / f"{tag}_metadata.json"
+    cache_meta_path = Path(default_pool_path(args.dataset, args.llm_name, tag)).with_suffix(".json")
+    metadata: dict[str, Any] = {}
     if out_path.exists() and not args.overwrite:
         print(f"[Skip] {out_path} exists. Use --overwrite to regenerate.")
         embs = torch.load(out_path, map_location="cpu").to(torch.float32)
+        for candidate in (cache_meta_path, meta_path):
+            if candidate.exists():
+                metadata = json.loads(candidate.read_text(encoding="utf-8"))
+                break
     else:
         texts = load_raw_texts(args.dataset)
         risk = build_degree_risk(args.dataset, len(texts))
@@ -300,9 +323,33 @@ def main() -> None:
         )
         torch.save(embs, out_path)
         refined_ratio = controller.refined_blocks / max(1, controller.total_blocks)
+        effective_bits = float(args.base_mantissa) + refined_ratio * float(
+            int(args.refine_mantissa) - int(args.base_mantissa)
+        )
+        metadata = {
+            "dataset": args.dataset,
+            "llm_name": args.llm_name,
+            "tag": tag,
+            "default_tag": default_tag,
+            "pool_path": str(out_path),
+            "threshold": float(args.threshold),
+            "stress_scale": float(args.stress_scale),
+            "block_size": int(args.block_size),
+            "base_mantissa": int(args.base_mantissa),
+            "refine_mantissa": int(args.refine_mantissa),
+            "total_blocks": int(controller.total_blocks),
+            "refined_blocks": int(controller.refined_blocks),
+            "refined_ratio": float(refined_ratio),
+            "effective_bits": float(effective_bits),
+            "policy": "degree_risk(node) * activation_stress(block) >= threshold",
+        }
+        meta_path.write_text(json.dumps(metadata, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        if args.save_to_cache:
+            cache_meta_path.write_text(json.dumps(metadata, indent=2, sort_keys=True) + "\n", encoding="utf-8")
         print(
             f"[Saved] {out_path} | shape={tuple(embs.shape)} "
-            f"| refined_blocks={controller.refined_blocks}/{controller.total_blocks} ({refined_ratio:.2%})"
+            f"| refined_blocks={controller.refined_blocks}/{controller.total_blocks} ({refined_ratio:.2%}) "
+            f"| effective_bits={effective_bits:.3f}"
         )
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -311,6 +358,9 @@ def main() -> None:
     note = (
         f"Graph-aware dynamic BFP pool | dataset={args.dataset} | tag={tag}\n"
         f"output={out_path}\n"
+        f"metadata={meta_path}\n"
+        f"refined_ratio={metadata.get('refined_ratio', 'unknown')}\n"
+        f"effective_bits={metadata.get('effective_bits', 'unknown')}\n"
         f"Baseline Acc: {result['baseline']:.4f}\n"
         f"Dynamic Acc:  {result['acc']:.4f}\n"
         f"Dynamic Drop: {result['drop']:.2%}\n"
