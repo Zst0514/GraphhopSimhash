@@ -46,6 +46,14 @@ Rand / Deg / TSER:
     reuse/residual 前端保持不变；
     miss nodes 中一部分走 W4BFPA6_B128 refinement，
     其余走 W4BFPA4_B128 base。
+
+AllP4:
+    reuse/residual 前端保持不变；
+    所有 miss nodes 都走 W4BFPA4_B128。
+
+Best Rescue:
+    AllP4 Drop - min(Rand Drop, Deg Drop, TSER Drop)。
+    它表示 BFPA6 refinement 相对全 BFPA4 低成本路径救回了多少掉点。
 ```
 
 因此 `FullP8 Drop` 主要反映前端 reuse/residual 的误差；`Deg/TSER Drop` 反映前端误差再叠加 progressive BFP 后端误差。
@@ -54,26 +62,30 @@ Rand / Deg / TSER:
 
 当前最稳的三数据集 policy register 如下：
 
-| Dataset | T | Refine Ratio | Runs | Reuse | Direct | Residual | FullP8 Drop | Rand Drop | Deg Drop | TSER Drop | BFP Cost | 推荐用途 |
-|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|
-| Cora | 31 | 0.25 | 10 | 39.0% | 18.5% | 20.5% | 1.56% | 2.10% | 2.15% | 2.21% | 0.193 | 稳健主点 |
-| PubMed | 31 | 0.25 | 3 | 42.3% | 42.2% | 0.0% | 1.95% | 2.69% | 2.52% | 2.53% | 0.181 | 当前可用点 |
-| Arxiv | 22 | 0.25 | 1 | 46.2% | 20.4% | 25.8% | 2.02% | 2.06% | 2.11% | 2.10% | 0.170 | 当前最佳折中 |
+| Dataset | T | Refine Ratio | Runs | Reuse | Direct | Residual | FullP8 Drop | AllP4 Drop | Rand Drop | Deg Drop | TSER Drop | Best Rescue | BFP Cost | 推荐用途 |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|
+| Cora | 31 | 0.25 | 10 | 39.0% | 18.5% | 20.5% | 1.56% | 2.34% | 2.10% | 2.15% | 2.21% | 0.24% | 0.193 | 稳健主点 |
+| PubMed | 31 | 0.25 | 3 | 42.3% | 42.2% | 0.0% | 1.95% | 2.92% | 2.69% | 2.52% | 2.53% | 0.40% | 0.181 | 当前可用点 |
+| Arxiv | 22 | 0.25 | 1 | 46.2% | 20.4% | 25.8% | 2.02% | 2.10% | 2.06% | 2.11% | 2.10% | 0.04% | 0.170 | 当前最佳折中 |
 
 解释：
 
 ```text
 Cora:
     T31 比 T30 更稳，10-run 下 FullP8 drop 约 1.56%。
-    progressive BFP 后端把 cost 从 0.306 降到 0.193，Rand/Deg/TSER drop 分别约 2.10%/2.15%/2.21%。
+    全 BFPA4 的 drop 为 2.34%。
+    25% BFPA6 refinement 后，Rand/Deg/TSER drop 分别约 2.10%/2.15%/2.21%。
+    也就是最多救回约 0.24% drop，同时 cost 从 0.306 降到 0.193。
 
 PubMed:
     T31 + refine_ratio=0.25 时前端 reuse 约 42.3%，FullP8 drop 约 1.95%。
     继续提高 refine_ratio 到 0.30 会引入 residual bucket，FullP8 drop 升到 3.50%，过宽。
+    全 BFPA4 的 drop 为 2.92%；25% BFPA6 refinement 下 Deg/TSER 能救回约 0.40%/0.39% drop。
 
 Arxiv:
     T22 是当前低 T sweep 中最合适的点。
     T20 更稳但 reuse 只有 36.8%；T23 reuse 接近 50%，但 drop 已到 2.46%。
+    Arxiv 的 AllP4 drop 已经接近 FullP8，因此 BFPA6 refinement 的精度挽救较小，主要用于统一后端配置。
 ```
 
 ## 3. Cora 结果
@@ -82,14 +94,14 @@ Arxiv:
 
 Cora 使用 `T=31`，10 runs：
 
-| Refine Ratio | Reuse | Direct | Residual | FullP8 Cost | FullP8 Drop | BFP Cost | Rand Drop | Deg Drop | TSER Drop | Log |
-|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|
-| 0.05 | 39.1% | 18.4% | 20.7% | 0.306 | 1.74% | 0.179 | 2.43% | 2.41% | 2.36% | `output/progressive_bfp_fullstack/cora_h8_53_T31_bfpa6_r0.05/logs/cora_runs10.log` |
-| 0.10 | 39.1% | 18.4% | 20.7% | 0.305 | 1.74% | 0.183 | 2.40% | 2.40% | 2.40% | `output/progressive_bfp_fullstack/cora_h8_53_T31_bfpa6_r0.10/logs/cora_runs10.log` |
-| 0.15 | 38.9% | 18.5% | 20.4% | 0.307 | 1.59% | 0.186 | 2.20% | 2.19% | 2.23% | `output/progressive_bfp_fullstack/cora_h8_53_T31_bfpa6_r0.15/logs/cora_runs10.log` |
-| 0.20 | 39.1% | 18.4% | 20.7% | 0.305 | 1.70% | 0.189 | 2.24% | 2.27% | 2.29% | `output/progressive_bfp_fullstack/cora_h8_53_T31_bfpa6_r0.20/logs/cora_runs10.log` |
-| 0.25 | 39.0% | 18.5% | 20.5% | 0.306 | 1.56% | 0.193 | 2.10% | 2.15% | 2.21% | `output/progressive_bfp_fullstack/cora_h8_53_T31_bfpa6_r0.25/logs/cora_runs10.log` |
-| 0.30 | 39.5% | 18.6% | 20.9% | 0.304 | 1.64% | 0.194 | 2.12% | 2.22% | 2.24% | `output/progressive_bfp_fullstack/cora_h8_53_T31_bfpa6_r0.30/logs/cora_runs10.log` |
+| Refine Ratio | Reuse | Direct | Residual | FullP8 Drop | AllP4 Drop | Rand Drop | Deg Drop | TSER Drop | Best Rescue | BFP Cost | Log |
+|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|
+| 0.05 | 39.1% | 18.4% | 20.7% | 1.74% | 2.47% | 2.43% | 2.41% | 2.36% | 0.11% | 0.179 | `output/progressive_bfp_fullstack/cora_h8_53_T31_bfpa6_r0.05/logs/cora_runs10.log` |
+| 0.10 | 39.1% | 18.4% | 20.7% | 1.74% | 2.49% | 2.40% | 2.40% | 2.40% | 0.09% | 0.183 | `output/progressive_bfp_fullstack/cora_h8_53_T31_bfpa6_r0.10/logs/cora_runs10.log` |
+| 0.15 | 38.9% | 18.5% | 20.4% | 1.59% | 2.34% | 2.20% | 2.19% | 2.23% | 0.15% | 0.186 | `output/progressive_bfp_fullstack/cora_h8_53_T31_bfpa6_r0.15/logs/cora_runs10.log` |
+| 0.20 | 39.1% | 18.4% | 20.7% | 1.70% | 2.44% | 2.24% | 2.27% | 2.29% | 0.20% | 0.189 | `output/progressive_bfp_fullstack/cora_h8_53_T31_bfpa6_r0.20/logs/cora_runs10.log` |
+| 0.25 | 39.0% | 18.5% | 20.5% | 1.56% | 2.34% | 2.10% | 2.15% | 2.21% | 0.24% | 0.193 | `output/progressive_bfp_fullstack/cora_h8_53_T31_bfpa6_r0.25/logs/cora_runs10.log` |
+| 0.30 | 39.5% | 18.6% | 20.9% | 1.64% | 2.46% | 2.12% | 2.22% | 2.24% | 0.34% | 0.194 | `output/progressive_bfp_fullstack/cora_h8_53_T31_bfpa6_r0.30/logs/cora_runs10.log` |
 
 当前 Cora 推荐用 `T=31, refine_ratio=0.25`。它比 `0.30` 略稳，Deg drop 为 `2.15%`。
 
@@ -115,14 +127,14 @@ output/progressive_bfp_fullstack/cora_h8_53_T30_bfpa6_r0.25/logs/cora_runs3.log
 
 PubMed 使用 `T=31`，3 runs。这里 refine ratio 对 front-end 的 accepted reuse 也会产生影响，因为 residual gate / alpha 选择会随训练和验证目标变化。
 
-| Refine Ratio | Reuse | Direct | Residual | FullP8 Cost | FullP8 Drop | BFP Cost | Rand Drop | Deg Drop | TSER Drop | Log |
-|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|
-| 0.05 | 42.7% | 42.6% | 0.0% | 0.287 | 2.01% | 0.168 | 2.96% | 2.80% | 2.82% | `output/progressive_bfp_fullstack/pubmed_h8_53_T31_bfpa6_r0.05/logs/pubmed_runs3.log` |
-| 0.10 | 42.7% | 42.7% | 0.0% | 0.287 | 2.01% | 0.171 | 2.92% | 2.77% | 2.75% | `output/progressive_bfp_fullstack/pubmed_h8_53_T31_bfpa6_r0.10/logs/pubmed_runs3.log` |
-| 0.15 | 42.7% | 42.6% | 0.0% | 0.287 | 2.01% | 0.174 | 2.90% | 2.72% | 2.71% | `output/progressive_bfp_fullstack/pubmed_h8_53_T31_bfpa6_r0.15/logs/pubmed_runs3.log` |
-| 0.20 | 42.7% | 42.7% | 0.0% | 0.287 | 2.03% | 0.177 | 2.87% | 2.65% | 2.64% | `output/progressive_bfp_fullstack/pubmed_h8_53_T31_bfpa6_r0.20/logs/pubmed_runs3.log` |
-| 0.25 | 42.3% | 42.2% | 0.0% | 0.289 | 1.95% | 0.181 | 2.69% | 2.52% | 2.53% | `output/progressive_bfp_fullstack/pubmed_h8_53_T31_bfpa6_r0.25/logs/pubmed_runs3.log` |
-| 0.30 | 59.5% | 42.7% | 16.9% | 0.203 | 3.50% | 0.130 | 4.18% | 3.96% | 3.98% | `output/progressive_bfp_fullstack/pubmed_h8_53_T31_bfpa6_r0.30/logs/pubmed_runs3.log` |
+| Refine Ratio | Reuse | Direct | Residual | FullP8 Drop | AllP4 Drop | Rand Drop | Deg Drop | TSER Drop | Best Rescue | BFP Cost | Log |
+|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|
+| 0.05 | 42.7% | 42.6% | 0.0% | 2.01% | 3.00% | 2.96% | 2.80% | 2.82% | 0.20% | 0.168 | `output/progressive_bfp_fullstack/pubmed_h8_53_T31_bfpa6_r0.05/logs/pubmed_runs3.log` |
+| 0.10 | 42.7% | 42.7% | 0.0% | 2.01% | 2.99% | 2.92% | 2.77% | 2.75% | 0.24% | 0.171 | `output/progressive_bfp_fullstack/pubmed_h8_53_T31_bfpa6_r0.10/logs/pubmed_runs3.log` |
+| 0.15 | 42.7% | 42.6% | 0.0% | 2.01% | 3.00% | 2.90% | 2.72% | 2.71% | 0.29% | 0.174 | `output/progressive_bfp_fullstack/pubmed_h8_53_T31_bfpa6_r0.15/logs/pubmed_runs3.log` |
+| 0.20 | 42.7% | 42.7% | 0.0% | 2.03% | 3.02% | 2.87% | 2.65% | 2.64% | 0.38% | 0.177 | `output/progressive_bfp_fullstack/pubmed_h8_53_T31_bfpa6_r0.20/logs/pubmed_runs3.log` |
+| 0.25 | 42.3% | 42.2% | 0.0% | 1.95% | 2.92% | 2.69% | 2.52% | 2.53% | 0.40% | 0.181 | `output/progressive_bfp_fullstack/pubmed_h8_53_T31_bfpa6_r0.25/logs/pubmed_runs3.log` |
+| 0.30 | 59.5% | 42.7% | 16.9% | 3.50% | 4.41% | 4.18% | 3.96% | 3.98% | 0.45% | 0.130 | `output/progressive_bfp_fullstack/pubmed_h8_53_T31_bfpa6_r0.30/logs/pubmed_runs3.log` |
 
 当前 PubMed 推荐用 `T=31, refine_ratio=0.25`。`0.30` 虽然 reuse 提高到 `59.5%`，但前端过宽，FullP8 drop 已经达到 `3.50%`。
 
@@ -130,15 +142,15 @@ PubMed 使用 `T=31`，3 runs。这里 refine ratio 对 front-end 的 accepted r
 
 Arxiv 当前为 single-run T sweep，`refine_ratio=0.25`。
 
-| T | Reuse | Direct | Residual | FullP8 Cost | FullP8 Drop | BFP Cost | Rand Drop | Deg Drop | TSER Drop | Log |
-|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|
-| 20 | 36.8% | 15.6% | 21.2% | 0.317 | 1.77% | 0.199 | 1.84% | 1.89% | 1.86% | `output/progressive_bfp_fullstack_unified_t_sweep/arxiv_T20_r0.25_runs1/logs/arxiv_runs1.log` |
-| 22 | 46.2% | 20.4% | 25.8% | 0.270 | 2.02% | 0.170 | 2.06% | 2.11% | 2.10% | `output/progressive_bfp_fullstack_unified_t_sweep/arxiv_T22_r0.25_runs1/logs/arxiv_runs1.log` |
-| 23 | 49.8% | 22.0% | 27.8% | 0.252 | 2.32% | 0.159 | 2.47% | 2.46% | 2.48% | `output/progressive_bfp_fullstack_unified_t_sweep/arxiv_T23_r0.25_runs1/logs/arxiv_runs1.log` |
-| 24 | 51.5% | 23.2% | 28.3% | 0.244 | 2.66% | 0.154 | 2.79% | 2.73% | 2.77% | `output/progressive_bfp_fullstack_unified_t_sweep/arxiv_T24_r0.25_runs1/logs/arxiv_runs1.log` |
-| 26 | 57.3% | 25.8% | 31.5% | 0.215 | 2.90% | 0.136 | 2.96% | 2.94% | 2.96% | `output/progressive_bfp_fullstack_unified_t_sweep/arxiv_T26_r0.25_runs1/logs/arxiv_runs1.log` |
-| 28 | 58.9% | 26.5% | 32.4% | 0.207 | 3.20% | 0.131 | 3.29% | 3.31% | 3.32% | `output/progressive_bfp_fullstack_unified_t_sweep/arxiv_T28_r0.25_runs1/logs/arxiv_runs1.log` |
-| 30 | 61.3% | 26.5% | 34.8% | 0.195 | 3.34% | 0.123 | 3.47% | 3.46% | 3.47% | `output/progressive_bfp_fullstack_unified_t_sweep/arxiv_T30_r0.25_runs1/logs/arxiv_runs1.log` |
+| T | Reuse | Direct | Residual | FullP8 Drop | AllP4 Drop | Rand Drop | Deg Drop | TSER Drop | Best Rescue | BFP Cost | Log |
+|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|
+| 20 | 36.8% | 15.6% | 21.2% | 1.77% | 1.86% | 1.84% | 1.89% | 1.86% | 0.02% | 0.199 | `output/progressive_bfp_fullstack_unified_t_sweep/arxiv_T20_r0.25_runs1/logs/arxiv_runs1.log` |
+| 22 | 46.2% | 20.4% | 25.8% | 2.02% | 2.10% | 2.06% | 2.11% | 2.10% | 0.04% | 0.170 | `output/progressive_bfp_fullstack_unified_t_sweep/arxiv_T22_r0.25_runs1/logs/arxiv_runs1.log` |
+| 23 | 49.8% | 22.0% | 27.8% | 2.32% | 2.48% | 2.47% | 2.46% | 2.48% | 0.02% | 0.159 | `output/progressive_bfp_fullstack_unified_t_sweep/arxiv_T23_r0.25_runs1/logs/arxiv_runs1.log` |
+| 24 | 51.5% | 23.2% | 28.3% | 2.66% | 2.81% | 2.79% | 2.73% | 2.77% | 0.08% | 0.154 | `output/progressive_bfp_fullstack_unified_t_sweep/arxiv_T24_r0.25_runs1/logs/arxiv_runs1.log` |
+| 26 | 57.3% | 25.8% | 31.5% | 2.90% | 3.01% | 2.96% | 2.94% | 2.96% | 0.07% | 0.136 | `output/progressive_bfp_fullstack_unified_t_sweep/arxiv_T26_r0.25_runs1/logs/arxiv_runs1.log` |
+| 28 | 58.9% | 26.5% | 32.4% | 3.20% | 3.31% | 3.29% | 3.31% | 3.32% | 0.02% | 0.131 | `output/progressive_bfp_fullstack_unified_t_sweep/arxiv_T28_r0.25_runs1/logs/arxiv_runs1.log` |
+| 30 | 61.3% | 26.5% | 34.8% | 3.34% | 3.51% | 3.47% | 3.46% | 3.47% | 0.05% | 0.123 | `output/progressive_bfp_fullstack_unified_t_sweep/arxiv_T30_r0.25_runs1/logs/arxiv_runs1.log` |
 
 当前 Arxiv 推荐用 `T=22`。它在 single-run 下达到 `46.2%` reuse，FullP8 drop 为 `2.02%`，Deg/TSER progressive BFP drop 约 `2.1%`。
 
