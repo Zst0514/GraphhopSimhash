@@ -16,6 +16,9 @@
 - [GRAPH_AWARE_BFP_REFINEMENT_POLICY.md](GRAPH_AWARE_BFP_REFINEMENT_POLICY.md)  
   Graph risk 与真实 LLaMA activation block stress 联合指导 BFPA4/BFPA6 refinement 的策略、接口和实验流程。
 
+- [GRAPH_AWARE_DYNAMIC_BFP_REFINEMENT_NPU.md](GRAPH_AWARE_DYNAMIC_BFP_REFINEMENT_NPU.md)  
+  当前后端 NPU 主实现：BFPA4 base always compute，按 `graph risk × activation stress` 在 activation block 内动态追加 BFPA6 refinement。
+
 - [GRAPH_AWARE_BFP_VALIDATION_PLAN.md](GRAPH_AWARE_BFP_VALIDATION_PLAN.md)  
   验证 activation stress、graph risk 以及二者联合 refinement 是否有效的分层实验设计。
 
