@@ -1023,7 +1023,7 @@ CAM 前端先做候选筛选、物理相似度感知或 hash-space retrieval，
 
 #### 5.2.1 CAMsure（交叉论文，正文见 §3.2）
 
-`CAMsure` 的正文已经放在 [CAM_SURVEY.md](/home/qiumingzhi/Simhash-S/OneForAll/GraphhopSimhash/hardware_8h16b3vote/paper/survey/CAM_SURVEY.md:548)，这里仅在路线图里重新归类：
+`CAMsure` 的正文已经放在 [CAM_SURVEY.md](/home/qiumingzhi/Simhash-S/OneForAll/GraphhopSimhash/CAM_sim/paper/survey/CAM_SURVEY.md:548)，这里仅在路线图里重新归类：
 
 - 不是显式 `XNOR + popcount`
 - 更像 `secure LSH embedding + CAM lookup`

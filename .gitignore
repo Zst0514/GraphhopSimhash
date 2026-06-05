@@ -18,5 +18,5 @@ data/
 models/
 
 
-# `hardware_8h16b3vote/` keeps its own `.gitignore`.
+# `CAM_sim/` keeps its own `.gitignore`.
 # Do not ignore the whole subtree here.

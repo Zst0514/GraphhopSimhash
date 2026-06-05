@@ -19,10 +19,10 @@
 
 文档对应当前实现：
 
-- [analog_cam_engine.cpp](/home/qiumingzhi/Simhash-S/OneForAll/GraphhopSimhash/hardware_8h16b3vote/analog_cam_cpp/analog_cam_engine.cpp)
-- [analog_cam_default.json](/home/qiumingzhi/Simhash-S/OneForAll/GraphhopSimhash/hardware_8h16b3vote/analog_cam_cpp/configs/analog_cam_default.json)
-- [analog_cam_legacy_proxy.json](/home/qiumingzhi/Simhash-S/OneForAll/GraphhopSimhash/hardware_8h16b3vote/analog_cam_cpp/configs/analog_cam_legacy_proxy.json)
-- [8x16bit_latency_comparison_zh.md](/home/qiumingzhi/Simhash-S/OneForAll/GraphhopSimhash/hardware_8h16b3vote/docs/8x16bit_latency_comparison_zh.md)
+- [analog_cam_engine.cpp](/home/qiumingzhi/Simhash-S/OneForAll/GraphhopSimhash/CAM_sim/analog_cam_cpp/analog_cam_engine.cpp)
+- [analog_cam_default.json](/home/qiumingzhi/Simhash-S/OneForAll/GraphhopSimhash/CAM_sim/analog_cam_cpp/configs/analog_cam_default.json)
+- [analog_cam_legacy_proxy.json](/home/qiumingzhi/Simhash-S/OneForAll/GraphhopSimhash/CAM_sim/analog_cam_cpp/configs/analog_cam_legacy_proxy.json)
+- [8x16bit_latency_comparison_zh.md](/home/qiumingzhi/Simhash-S/OneForAll/GraphhopSimhash/CAM_sim/docs/8x16bit_latency_comparison_zh.md)
 
 ---
 

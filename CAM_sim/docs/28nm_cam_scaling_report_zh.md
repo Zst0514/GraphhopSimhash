@@ -45,8 +45,8 @@ Match-line 电容沿用仓库现有 16-bit proxy 的线性缩放：
 
 输出文件：
 
-- [SPICE 汇总表](/home/qiumingzhi/Simhash-S/OneForAll/GraphhopSimhash/hardware_8h16b3vote/spice_28nm/scaling_study_runs/summary.md)
-- [SPICE 原始 JSON](/home/qiumingzhi/Simhash-S/OneForAll/GraphhopSimhash/hardware_8h16b3vote/spice_28nm/scaling_study_runs/summary.json)
+- [SPICE 汇总表](/home/qiumingzhi/Simhash-S/OneForAll/GraphhopSimhash/CAM_sim/spice_28nm/scaling_study_runs/summary.md)
+- [SPICE 原始 JSON](/home/qiumingzhi/Simhash-S/OneForAll/GraphhopSimhash/CAM_sim/spice_28nm/scaling_study_runs/summary.json)
 
 ## 4. SPICE 结果
 
@@ -106,10 +106,10 @@ DC 使用 Docker 中的 Synopsys DC O-2018.06-SP1 和本机 28nm 标准单元库
 
 对应文件：
 
-- [RTL](/home/qiumingzhi/Simhash-S/OneForAll/GraphhopSimhash/hardware_8h16b3vote/dc_28nm/rtl/hamming_threshold_compare.v)
-- [DC TCL](/home/qiumingzhi/Simhash-S/OneForAll/GraphhopSimhash/hardware_8h16b3vote/dc_28nm/run_dc.tcl)
-- [16b timing](/home/qiumingzhi/Simhash-S/OneForAll/GraphhopSimhash/hardware_8h16b3vote/dc_28nm/reports/hamming_threshold_compare16.timing.rpt)
-- [64b timing](/home/qiumingzhi/Simhash-S/OneForAll/GraphhopSimhash/hardware_8h16b3vote/dc_28nm/reports/hamming_threshold_compare64.timing.rpt)
+- [RTL](/home/qiumingzhi/Simhash-S/OneForAll/GraphhopSimhash/CAM_sim/dc_28nm/rtl/hamming_threshold_compare.v)
+- [DC TCL](/home/qiumingzhi/Simhash-S/OneForAll/GraphhopSimhash/CAM_sim/dc_28nm/run_dc.tcl)
+- [16b timing](/home/qiumingzhi/Simhash-S/OneForAll/GraphhopSimhash/CAM_sim/dc_28nm/reports/hamming_threshold_compare16.timing.rpt)
+- [64b timing](/home/qiumingzhi/Simhash-S/OneForAll/GraphhopSimhash/CAM_sim/dc_28nm/reports/hamming_threshold_compare64.timing.rpt)
 
 ## 6. DC 结果
 

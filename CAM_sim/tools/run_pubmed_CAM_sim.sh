@@ -11,7 +11,7 @@ TRACE_PATH="${ROOT_DIR}/traces/pubmed_8h16b_r2.trace"
 BUILD_DIR="${ROOT_DIR}/build"
 REPORT_DIR="${ROOT_DIR}/reports"
 
-python -m GraphhopSimhash.hardware_8h16b3vote.tools.export_graphhop_trace \
+python -m GraphhopSimhash.CAM_sim.tools.export_graphhop_trace \
   --datasets pubmed \
   --learned_hash_epochs 10 \
   --learned_hash_dim 128 \

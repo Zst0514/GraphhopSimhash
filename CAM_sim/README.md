@@ -26,9 +26,9 @@ that the digital and CAM lookup frontends are compared on the same surface.
 ```bash
 cd /home/qiumingzhi/Simhash-S/OneForAll/GraphhopSimhash
 
-cmake -S hardware_8h16b3vote -B hardware_8h16b3vote/build
-cmake --build hardware_8h16b3vote/build -j
-ctest --test-dir hardware_8h16b3vote/build
+cmake -S CAM_sim -B CAM_sim/build
+cmake --build CAM_sim/build -j
+ctest --test-dir CAM_sim/build
 ```
 
 ## Export A Real Trace
@@ -37,7 +37,7 @@ Run from `/home/qiumingzhi/Simhash-S/OneForAll` so `python -m GraphhopSimhash`
 uses the local package:
 
 ```bash
-python -m GraphhopSimhash.hardware_8h16b3vote.tools.export_graphhop_trace \
+python -m GraphhopSimhash.CAM_sim.tools.export_graphhop_trace \
   --datasets pubmed \
   --learned_hash_epochs 10 \
   --learned_hash_dim 128 \
@@ -45,13 +45,13 @@ python -m GraphhopSimhash.hardware_8h16b3vote.tools.export_graphhop_trace \
   --main_hash_head_bits 16 16 16 16 16 16 16 16 \
   --route_min_support_hits 3 \
   --radius 2 \
-  --output GraphhopSimhash/hardware_8h16b3vote/traces/pubmed_8h16b_r2.trace
+  --output GraphhopSimhash/CAM_sim/traces/pubmed_8h16b_r2.trace
 ```
 
 ## Run Both Simulators
 
 ```bash
-cd /home/qiumingzhi/Simhash-S/OneForAll/GraphhopSimhash/hardware_8h16b3vote
+cd /home/qiumingzhi/Simhash-S/OneForAll/GraphhopSimhash/CAM_sim
 
 ./build/digital_logic_cpp/digital_hash_reuse \
   --trace traces/pubmed_8h16b_r2.trace \
@@ -88,7 +88,7 @@ timing proxy。它在 `500 MHz` 下对应 `1` 个搜索周期，而不是旧的�
 One-command smoke path:
 
 ```bash
-bash hardware_8h16b3vote/tools/run_pubmed_8h16b3vote.sh
+bash CAM_sim/tools/run_pubmed_CAM_sim.sh
 ```
 
 ## Trace Format
