@@ -1,3 +1,5 @@
+import re
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -125,6 +127,67 @@ def format_bucket_label(bucket_value, bucket_mode="support"):
         dist = bucket_value % 10
         return f"{support}h_d{dist}"
     return str(bucket_value)
+
+
+def parse_bucket_label(bucket_label, bucket_mode="support"):
+    text = str(bucket_label).strip().lower()
+    if not text:
+        raise ValueError("Empty residual bucket label")
+    if str(bucket_mode) == "support":
+        if text.endswith("h"):
+            text = text[:-1]
+        return int(text)
+    if str(bucket_mode) == "support_dist":
+        if re.fullmatch(r"\d+", text):
+            return int(text)
+        match = re.fullmatch(r"(\d+)h(?:[_-]?d(\d+))?", text)
+        if match is None:
+            raise ValueError(f"Invalid support_dist bucket label: {bucket_label}")
+        support = int(match.group(1))
+        dist = int(match.group(2) or 0)
+        return support * 10 + dist
+    raise ValueError(f"Unknown residual bucket mode: {bucket_mode}")
+
+
+def parse_bucket_threshold_specs(specs, bucket_mode="support"):
+    if not specs:
+        return None
+    default_value = None
+    by_support = {}
+    for raw_spec in specs:
+        text = str(raw_spec).strip()
+        if not text:
+            continue
+        if "=" not in text:
+            raise ValueError(f"Invalid residual bucket threshold spec: {raw_spec}")
+        raw_key, raw_value = text.split("=", 1)
+        key = raw_key.strip().lower()
+        value = float(raw_value.strip())
+        if key in {"default", "*", "all"}:
+            default_value = value
+            continue
+        by_support[parse_bucket_label(key, bucket_mode=bucket_mode)] = value
+    if default_value is None and not by_support:
+        return None
+    config = {"by_support": by_support}
+    if default_value is not None:
+        config["default"] = float(default_value)
+    return config
+
+
+def format_bucket_threshold_config(threshold_config, bucket_mode="support"):
+    if threshold_config is None:
+        return "none"
+    if isinstance(threshold_config, dict):
+        parts = []
+        default_value = threshold_config.get("default", None)
+        if default_value is not None:
+            parts.append(f"default={float(default_value):.3f}")
+        by_support = threshold_config.get("by_support", threshold_config)
+        for bucket_value, threshold in sorted(dict(by_support).items()):
+            parts.append(f"{format_bucket_label(int(bucket_value), bucket_mode)}={float(threshold):.3f}")
+        return ", ".join(parts) if parts else "none"
+    return f"{float(threshold_config):.3f}"
 
 
 def compute_total_degree(edge_index, num_nodes, device):
@@ -1365,6 +1428,7 @@ def apply_residual_adapter(
     min_dist=1.0,
     correction_mask=None,
     normalize_corrected=False,
+    bucket_mode=None,
 ):
     if adapter is None:
         return direct_embeddings, {
@@ -1416,19 +1480,27 @@ def apply_residual_adapter(
     else:
         default_alpha = float(alpha)
 
-    gate_threshold = None if gate_accept_threshold is None else float(gate_accept_threshold)
+    gate_threshold_map = None
+    if isinstance(gate_accept_threshold, dict):
+        gate_threshold_map = _as_float_dict(gate_accept_threshold.get("by_support", gate_accept_threshold))
+        if "default" in gate_accept_threshold:
+            gate_threshold = float(gate_accept_threshold["default"])
+        else:
+            gate_threshold = 1.0 if gate_threshold_map else None
+    else:
+        gate_threshold = None if gate_accept_threshold is None else float(gate_accept_threshold)
 
-    def _apply_with(local_adapter, node_subset, local_alpha):
+    def _apply_with(local_adapter, node_subset, local_alpha, local_gate_threshold):
         local_adapter.eval()
         with torch.no_grad():
             x = build_residual_pair_inputs(verify_features, edge_index, trace, node_subset, risk_scores=risk_scores)
             source_ids = trace["source_ids"][node_subset].to(device=device, dtype=torch.long)
             anchors = target_embeddings[source_ids]
             residual, _raw_delta, correction_gate, accept_gate = _adapter_forward(local_adapter, x)
-            if accept_gate is None or gate_threshold is None or gate_threshold <= 0.0:
+            if accept_gate is None or local_gate_threshold is None or float(local_gate_threshold) <= 0.0:
                 accept_mask = torch.ones(node_subset.numel(), dtype=torch.bool, device=device)
             else:
-                accept_mask = accept_gate.view(-1) >= gate_threshold
+                accept_mask = accept_gate.view(-1) >= float(local_gate_threshold)
             reject_mask = ~accept_mask
             if bool(accept_mask.any().item()):
                 accept_nodes = node_subset[accept_mask]
@@ -1452,6 +1524,7 @@ def apply_residual_adapter(
     support_alpha_used = {}
     support_gate_used = {}
     support_accept_gate_used = {}
+    support_gate_threshold_used = {}
     weighted_alpha = 0.0
     weighted_count = 0
     weighted_gate = 0.0
@@ -1459,15 +1532,22 @@ def apply_residual_adapter(
     total_accepted = 0
     total_rejected = 0
     rejected_nodes = []
-    if isinstance(adapter, SupportAwareResidualAdapter):
-        bucket_mode = adapter.bucket_mode
+    if bucket_mode is None:
+        if isinstance(adapter, SupportAwareResidualAdapter):
+            resolved_bucket_mode = adapter.bucket_mode
+        else:
+            resolved_bucket_mode = "support"
     else:
-        bucket_mode = "support"
-    bucket_values = compute_bucket_values_from_tensors(support_hits, best_dists, bucket_mode=bucket_mode).to(
+        resolved_bucket_mode = str(bucket_mode)
+    bucket_values = compute_bucket_values_from_tensors(support_hits, best_dists, bucket_mode=resolved_bucket_mode).to(
         device=device, dtype=torch.long
     )
     unique_supports = sorted(set(int(v) for v in bucket_values.detach().cpu().tolist()))
-    use_support_loop = isinstance(adapter, SupportAwareResidualAdapter) or alpha_map is not None
+    use_support_loop = (
+        isinstance(adapter, SupportAwareResidualAdapter)
+        or alpha_map is not None
+        or gate_threshold_map is not None
+    )
 
     if use_support_loop:
         for support_value in unique_supports:
@@ -1479,9 +1559,17 @@ def apply_residual_adapter(
                 local_adapter = adapter
                 support_adapters = 0
             local_alpha = default_alpha if alpha_map is None else float(alpha_map.get(int(support_value), default_alpha))
+            local_gate_threshold = (
+                gate_threshold
+                if gate_threshold_map is None
+                else float(gate_threshold_map.get(int(support_value), gate_threshold))
+            )
             support_alpha_used[int(support_value)] = float(local_alpha)
+            support_gate_threshold_used[int(support_value)] = (
+                None if local_gate_threshold is None else float(local_gate_threshold)
+            )
             correction_gate_mean, accept_gate_mean, accepted_count, rejected_count, rejected_subset = _apply_with(
-                local_adapter, node_subset, local_alpha
+                local_adapter, node_subset, local_alpha, local_gate_threshold
             )
             support_gate_used[int(support_value)] = float(correction_gate_mean)
             support_accept_gate_used[int(support_value)] = float(accept_gate_mean)
@@ -1501,6 +1589,7 @@ def apply_residual_adapter(
             "alpha_by_support": support_alpha_used,
             "gate_by_support": support_gate_used,
             "accept_gate_by_support": support_accept_gate_used,
+            "gate_accept_threshold_by_support": support_gate_threshold_used,
             "accepted": int(total_accepted),
             "rejected": int(total_rejected),
             "rejected_nodes": torch.cat(rejected_nodes, dim=0) if rejected_nodes else torch.empty(0, dtype=torch.long, device=device),
@@ -1509,7 +1598,7 @@ def apply_residual_adapter(
         }
 
     correction_gate_mean, accept_gate_mean, accepted_count, rejected_count, rejected_subset = _apply_with(
-        adapter, hit_nodes, default_alpha
+        adapter, hit_nodes, default_alpha, gate_threshold
     )
     return corrected, {
         "corrected": int(hit_nodes.numel()),
@@ -1520,6 +1609,7 @@ def apply_residual_adapter(
         "rejected": int(rejected_count),
         "rejected_nodes": rejected_subset,
         "gate_accept_threshold": gate_threshold,
+        "gate_accept_threshold_by_support": None,
     }
 
 

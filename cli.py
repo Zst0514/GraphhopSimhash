@@ -461,6 +461,16 @@ def build_parser():
         help="If non-negative, only soft hits with gate >= threshold remain reused; lower-gate hits fall back to compute.",
     )
     parser.add_argument(
+        "--residual_gate_accept_threshold_by_bucket",
+        nargs="+",
+        default=None,
+        help=(
+            "Optional per-bucket residual accept thresholds, e.g. "
+            "'default=1.0 3h_d1=0.95 3h_d2=0.99 4h_d1=0.70 4h_d2=0.90'. "
+            "When set, bucket entries override the scalar threshold for their buckets."
+        ),
+    )
+    parser.add_argument(
         "--residual_gate_accept_grid",
         nargs="+",
         type=float,

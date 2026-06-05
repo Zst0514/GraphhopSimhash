@@ -31,7 +31,9 @@ from .residual_reuse import (
     apply_residual_adapter,
     compute_bucket_values_from_trace,
     embedding_error,
+    format_bucket_threshold_config,
     format_bucket_label,
+    parse_bucket_threshold_specs,
     train_residual_adapter,
 )
 from .routing import (
@@ -116,6 +118,31 @@ def apply_config_overrides(args, cfg):
     for key, value in cfg.get("overrides", {}).items():
         setattr(cfg_args, key, value)
     return cfg_args
+
+
+def resolve_residual_gate_threshold_config(args):
+    specs = getattr(args, "residual_gate_accept_threshold_by_bucket", None)
+    if not specs:
+        return None
+    threshold_config = parse_bucket_threshold_specs(specs, bucket_mode=args.residual_bucket_mode)
+    if threshold_config is None:
+        return None
+    if "default" not in threshold_config and float(getattr(args, "residual_gate_accept_threshold", -1.0)) >= 0.0:
+        threshold_config["default"] = float(args.residual_gate_accept_threshold)
+    return threshold_config
+
+
+def summarize_residual_gate_threshold(apply_info, bucket_mode):
+    by_bucket = apply_info.get("gate_accept_threshold_by_support", None)
+    default_value = apply_info.get("gate_accept_threshold", None)
+    if by_bucket:
+        return format_bucket_threshold_config(
+            {"default": default_value, "by_support": by_bucket},
+            bucket_mode=bucket_mode,
+        )
+    if default_value is None:
+        return "none"
+    return f"{float(default_value):.3f}"
 
 
 def make_run_args(args, run_seed):
@@ -1352,6 +1379,7 @@ def run_residual_reuse_experiment(args):
 
                 if adapter is not None:
                     support_alpha_enabled = bool(args.residual_support_aware_alpha)
+                    bucket_gate_threshold_config = resolve_residual_gate_threshold_config(args)
                     full_bucket_values = compute_bucket_values_from_trace(
                         trace,
                         torch.arange(trace["hit_mask"].numel(), device=device),
@@ -1369,14 +1397,17 @@ def run_residual_reuse_experiment(args):
                         if float(args.residual_alpha) < 0.0
                         else [max(0.0, float(args.residual_alpha))]
                     )
-                    gate_grid = (
-                        sorted(float(value) for value in args.residual_gate_accept_grid)
-                        if float(args.residual_gate_accept_threshold) < 0.0
-                        else [max(0.0, float(args.residual_gate_accept_threshold))]
-                    )
+                    if bucket_gate_threshold_config is not None:
+                        gate_grid = [bucket_gate_threshold_config]
+                    else:
+                        gate_grid = (
+                            sorted(float(value) for value in args.residual_gate_accept_grid)
+                            if float(args.residual_gate_accept_threshold) < 0.0
+                            else [max(0.0, float(args.residual_gate_accept_threshold))]
+                        )
 
                     selected_alpha = float(alpha_grid[0])
-                    selected_gate_threshold = float(gate_grid[0])
+                    selected_gate_threshold = gate_grid[0]
                     selected_val_acc = -1.0
                     for alpha in alpha_grid:
                         for gate_threshold in gate_grid:
@@ -1392,12 +1423,13 @@ def run_residual_reuse_experiment(args):
                                 gate_accept_threshold=gate_threshold,
                                 min_dist=args.residual_min_dist,
                                 correction_mask=correction_mask,
+                                bucket_mode=args.residual_bucket_mode,
                             )
                             val_acc = evaluate_raw_node_features(model, data, candidate_features, mask=data.val_mask)
                             if val_acc > selected_val_acc + 1e-12:
                                 selected_val_acc = val_acc
                                 selected_alpha = float(alpha)
-                                selected_gate_threshold = float(gate_threshold)
+                                selected_gate_threshold = gate_threshold
                     if support_alpha_enabled:
                         alpha_by_support = {}
                         support_note_parts = []
@@ -1421,6 +1453,7 @@ def run_residual_reuse_experiment(args):
                                         gate_accept_threshold=selected_gate_threshold,
                                         min_dist=args.residual_min_dist,
                                         correction_mask=support_mask,
+                                        bucket_mode=args.residual_bucket_mode,
                                     )
                                     val_acc = evaluate_raw_node_features(
                                         model,
@@ -1444,17 +1477,33 @@ def run_residual_reuse_experiment(args):
                     else:
                         alpha_for_apply = float(selected_alpha)
                         alpha_note = f"auto(val_acc={selected_val_acc:.4f})"
-                    gate_threshold_for_apply = float(selected_gate_threshold)
-                    gate_note = (
-                        f"auto({selected_val_acc:.4f}, tau={selected_gate_threshold:.3f})"
-                        if float(args.residual_gate_accept_threshold) < 0.0
-                        else "fixed"
-                    )
+                    gate_threshold_for_apply = selected_gate_threshold
+                    if bucket_gate_threshold_config is not None:
+                        gate_note = (
+                            "bucket-fixed("
+                            + format_bucket_threshold_config(selected_gate_threshold, args.residual_bucket_mode)
+                            + ")"
+                        )
+                    else:
+                        gate_note = (
+                            f"auto({selected_val_acc:.4f}, tau={float(selected_gate_threshold):.3f})"
+                            if float(args.residual_gate_accept_threshold) < 0.0
+                            else "fixed"
+                        )
                 else:
                     alpha_for_apply = max(0.0, float(args.residual_alpha))
                     alpha_note = "fixed"
-                    gate_threshold_for_apply = max(0.0, float(args.residual_gate_accept_threshold))
-                    gate_note = "fixed"
+                    bucket_gate_threshold_config = resolve_residual_gate_threshold_config(args)
+                    if bucket_gate_threshold_config is not None:
+                        gate_threshold_for_apply = bucket_gate_threshold_config
+                        gate_note = (
+                            "bucket-fixed("
+                            + format_bucket_threshold_config(bucket_gate_threshold_config, args.residual_bucket_mode)
+                            + ")"
+                        )
+                    else:
+                        gate_threshold_for_apply = max(0.0, float(args.residual_gate_accept_threshold))
+                        gate_note = "fixed"
 
                 residual_features, apply_info = apply_residual_adapter(
                     direct_embeddings=residual_base_features,
@@ -1468,6 +1517,7 @@ def run_residual_reuse_experiment(args):
                     gate_accept_threshold=gate_threshold_for_apply,
                     min_dist=args.residual_min_dist,
                     correction_mask=correction_mask,
+                    bucket_mode=args.residual_bucket_mode,
                 )
                 residual_acc = evaluate_raw_node_features(model, data, residual_features)
                 residual_drop = base_acc - residual_acc
@@ -1484,6 +1534,7 @@ def run_residual_reuse_experiment(args):
                 residual_hit_err = (
                     float(residual_err[effective_residual_hit_mask].mean().item()) if residual_hit_count > 0 else 0.0
                 )
+                tau_text = summarize_residual_gate_threshold(apply_info, args.residual_bucket_mode)
                 direct_reuse_rate = direct_hit_count / max(1, stats["total_queries"])
                 residual_reuse_rate = residual_hit_count / max(1, stats["total_queries"])
                 if soft_direct_err is not None:
@@ -1553,7 +1604,7 @@ def run_residual_reuse_experiment(args):
                     f"| ExtraPairs={train_info.get('extra_pairs', 0)} "
                     f"| NegPairs={train_info.get('negative_pairs', 0)} "
                     f"| Alpha={apply_info['alpha']:.3f} ({alpha_note}) "
-                    f"| Tau={apply_info.get('gate_accept_threshold', 0.0):.3f} ({gate_note}) "
+                    f"| Tau={tau_text} ({gate_note}) "
                     f"| Gate={apply_info.get('gate', 1.0):.3f} "
                     f"| AcceptGate={apply_info.get('accept_gate', 1.0):.3f} "
                     f"| Rejected={apply_info.get('rejected', 0)} "
@@ -1589,6 +1640,12 @@ def run_residual_reuse_experiment(args):
                         for k, v in sorted(apply_info["accept_gate_by_support"].items())
                     )
                     log_important(f"  AcceptGateBySupport: {gate_support_text}")
+                if apply_info.get("gate_accept_threshold_by_support"):
+                    tau_support_text = ", ".join(
+                        f"{format_bucket_label(int(k), args.residual_bucket_mode)}={float(v):.3f}"
+                        for k, v in sorted(apply_info["gate_accept_threshold_by_support"].items())
+                    )
+                    log_important(f"  TauBySupport: {tau_support_text}")
                 if train_info.get("support_aware"):
                     support_pair_text = ", ".join(
                         f"{format_bucket_label(int(k), train_info.get('bucket_mode', args.residual_bucket_mode))}={int(v)}"
@@ -3271,6 +3328,7 @@ def run_residual_precision_depth_experiment(args):
 
                 if adapter is not None:
                     support_alpha_enabled = bool(run_args.residual_support_aware_alpha)
+                    bucket_gate_threshold_config = resolve_residual_gate_threshold_config(run_args)
                     full_bucket_values = compute_bucket_values_from_trace(
                         trace,
                         torch.arange(trace["hit_mask"].numel(), device=device),
@@ -3288,13 +3346,16 @@ def run_residual_precision_depth_experiment(args):
                         if float(run_args.residual_alpha) < 0.0
                         else [max(0.0, float(run_args.residual_alpha))]
                     )
-                    gate_grid = (
-                        sorted(float(value) for value in run_args.residual_gate_accept_grid)
-                        if float(run_args.residual_gate_accept_threshold) < 0.0
-                        else [max(0.0, float(run_args.residual_gate_accept_threshold))]
-                    )
+                    if bucket_gate_threshold_config is not None:
+                        gate_grid = [bucket_gate_threshold_config]
+                    else:
+                        gate_grid = (
+                            sorted(float(value) for value in run_args.residual_gate_accept_grid)
+                            if float(run_args.residual_gate_accept_threshold) < 0.0
+                            else [max(0.0, float(run_args.residual_gate_accept_threshold))]
+                        )
                     selected_alpha = float(alpha_grid[0])
-                    selected_gate_threshold = float(gate_grid[0])
+                    selected_gate_threshold = gate_grid[0]
                     selected_val_acc = -1.0
                     for alpha in alpha_grid:
                         for gate_threshold in gate_grid:
@@ -3310,12 +3371,13 @@ def run_residual_precision_depth_experiment(args):
                                 gate_accept_threshold=gate_threshold,
                                 min_dist=run_args.residual_min_dist,
                                 correction_mask=correction_mask,
+                                bucket_mode=run_args.residual_bucket_mode,
                             )
                             val_acc = evaluate_raw_node_features(model, data, candidate_raw, mask=data.val_mask)
                             if val_acc > selected_val_acc + 1e-12:
                                 selected_val_acc = val_acc
                                 selected_alpha = float(alpha)
-                                selected_gate_threshold = float(gate_threshold)
+                                selected_gate_threshold = gate_threshold
                     if support_alpha_enabled:
                         alpha_by_support = {}
                         support_note_parts = []
@@ -3339,6 +3401,7 @@ def run_residual_precision_depth_experiment(args):
                                         gate_accept_threshold=selected_gate_threshold,
                                         min_dist=run_args.residual_min_dist,
                                         correction_mask=support_mask,
+                                        bucket_mode=run_args.residual_bucket_mode,
                                     )
                                     val_acc = evaluate_raw_node_features(
                                         model,
@@ -3364,17 +3427,33 @@ def run_residual_precision_depth_experiment(args):
                     else:
                         alpha_for_apply = float(selected_alpha)
                         alpha_note = f"auto(val_acc={selected_val_acc:.4f})"
-                    gate_threshold_for_apply = float(selected_gate_threshold)
-                    gate_note = (
-                        f"auto({selected_val_acc:.4f}, tau={selected_gate_threshold:.3f})"
-                        if float(run_args.residual_gate_accept_threshold) < 0.0
-                        else "fixed"
-                    )
+                    gate_threshold_for_apply = selected_gate_threshold
+                    if bucket_gate_threshold_config is not None:
+                        gate_note = (
+                            "bucket-fixed("
+                            + format_bucket_threshold_config(selected_gate_threshold, run_args.residual_bucket_mode)
+                            + ")"
+                        )
+                    else:
+                        gate_note = (
+                            f"auto({selected_val_acc:.4f}, tau={float(selected_gate_threshold):.3f})"
+                            if float(run_args.residual_gate_accept_threshold) < 0.0
+                            else "fixed"
+                        )
                 else:
                     alpha_for_apply = max(0.0, float(run_args.residual_alpha))
                     alpha_note = "fixed"
-                    gate_threshold_for_apply = max(0.0, float(run_args.residual_gate_accept_threshold))
-                    gate_note = "fixed"
+                    bucket_gate_threshold_config = resolve_residual_gate_threshold_config(run_args)
+                    if bucket_gate_threshold_config is not None:
+                        gate_threshold_for_apply = bucket_gate_threshold_config
+                        gate_note = (
+                            "bucket-fixed("
+                            + format_bucket_threshold_config(bucket_gate_threshold_config, run_args.residual_bucket_mode)
+                            + ")"
+                        )
+                    else:
+                        gate_threshold_for_apply = max(0.0, float(run_args.residual_gate_accept_threshold))
+                        gate_note = "fixed"
 
                 residual_raw, apply_info = apply_residual_adapter(
                     direct_embeddings=direct_raw,
@@ -3388,6 +3467,7 @@ def run_residual_precision_depth_experiment(args):
                     gate_accept_threshold=gate_threshold_for_apply,
                     min_dist=run_args.residual_min_dist,
                     correction_mask=correction_mask,
+                    bucket_mode=run_args.residual_bucket_mode,
                 )
                 active_residual_mask = (
                     build_active_residual_mask(trace, correction_mask, run_args.residual_min_dist, device)
@@ -4343,6 +4423,7 @@ def run_hierarchical_encoder_experiment(args):
                             alpha=alpha,
                             min_dist=run_args.residual_min_dist,
                             correction_mask=correction_mask,
+                            bucket_mode=run_args.residual_bucket_mode,
                         )
                         val_acc = evaluate_raw_node_features(model, data, candidate_raw, mask=data.val_mask)
                         if val_acc > selected_val_acc + 1e-12:
@@ -4363,6 +4444,7 @@ def run_hierarchical_encoder_experiment(args):
                     alpha=alpha_for_apply,
                     min_dist=run_args.residual_min_dist,
                     correction_mask=correction_mask,
+                    bucket_mode=run_args.residual_bucket_mode,
                 )
 
                 scores = build_real_quant_scores(verify_features, data, run_args, device)
