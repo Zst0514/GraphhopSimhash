@@ -95,6 +95,9 @@ def main() -> None:
         out.write(f"| Exact reuse | {digital['exact_reuse']} | {analog['exact_reuse']} |\n")
         out.write(f"| Fuzzy reuse | {digital['fuzzy_reuse']} | {analog['fuzzy_reuse']} |\n")
         out.write(f"| Cycles/query | {float(digital['cycles_per_query']):.3f} | {float(analog['cycles_per_query']):.3f} |\n")
+        out.write(f"| Search cycles/query | {float(digital.get('search_cycles_per_query', 0.0)):.3f} | {float(analog.get('search_cycles_per_query', 0.0)):.3f} |\n")
+        out.write(f"| Verify cycles/query | {float(digital.get('verify_cycles_per_query', 0.0)):.3f} | {float(analog.get('verify_cycles_per_query', 0.0)):.3f} |\n")
+        out.write(f"| Verified rows/query | {float(digital.get('verified_rows_per_query', 0.0)):.3f} | {float(analog.get('verified_rows_per_query', 0.0)):.3f} |\n")
         out.write(f"| Throughput qps | {float(digital['throughput_qps']):.2f} | {float(analog['throughput_qps']):.2f} |\n")
         out.write(f"| Energy/query pJ | {float(digital['energy_per_query_pj']):.6f} | {float(analog['energy_per_query_pj']):.6f} |\n")
         out.write(f"| EDP pJ*cycle/query | {float(digital['edp_pj_cycle_per_query']):.6f} | {float(analog['edp_pj_cycle_per_query']):.6f} |\n")
@@ -115,8 +118,8 @@ def main() -> None:
 
         out.write("\n## Interpretation\n\n")
         out.write(
-            "Digital Logic uses direct-indexed SRAM bucket lookup plus neighbor enumeration. "
-            "It is usually better when the cache is small, radius is low, and exact/fuzzy probes remain cheap.\n\n"
+            "Digital Logic uses ordinary CAM chunk coarse filtering plus XOR/popcount verification. "
+            "It is usually better when the coarse filter is selective enough that the survivor set stays small.\n\n"
         )
         out.write(
             "Analog CAM uses threshold search across active rows. It can become attractive when fuzzy enumeration "

@@ -8,7 +8,7 @@
   "parallel_subarrays": 1,
   "cam_chunk_bits": 4,
   "cam_search_cycles": 1,
-  "shared_verifier_lanes": 1,
+  "shared_verifier_lanes": 0,
   "verify_lanes": 32,
   "verify_cycles": 1,
   "candidate_select_cycles": 1,

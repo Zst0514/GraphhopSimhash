@@ -21,32 +21,60 @@ struct AnalogCamConfig {
     int candidate_cam_entries = 512;
     int subarray_rows = 512;
     int parallel_subarrays = 1;
-    int cam_search_cycles = 3;
+    int cam_search_cycles = 1;
     int candidate_select_cycles = 1;
     int cache_write_cycles = 1;
     double cam_compare_energy_fj_per_bit = 0.35;
     double candidate_cam_probe_energy_pj = 0.20;
     double cam_write_energy_pj = 0.30;
     double cam_cell_area_um2 = 0.18;
-    double vdd = 1.0;
-    double matchline_base_cap_f = 2.0e-15;
-    double matchline_cap_per_bit_f = 0.5e-15;
-    double mismatch_conductance_s = 4.0e-5;
+    double vdd = 0.9;
+    double veval = 0.6;
+    double meval_threshold_v = 0.35;
+    double matchline_base_cap_f = 0.6e-15;
+    double matchline_cap_per_bit_f = 0.2e-15;
+    double mismatch_conductance_s = 1.5862000976892227e-5;
+    double exact_mismatch_conductance_s = 2.245073554097771e-5;
     double match_leak_conductance_s = 2.0e-7;
-    double precharge_time_ps = 40.0;
-    double eval_time_ps = 100.0;
+    double precharge_time_ps = 30.78091366820998;
+    double eval_time_ps = 64.0;
     double sense_time_ps = 20.0;
+    double fixed_vref = 0.6;
     double comparator_vref = -1.0;
     double device_sigma_rel = 0.0;
     double sense_noise_sigma_v = 0.0;
     double comparator_noise_sigma_v = 0.0;
     int rng_seed = 12345;
-    std::string calibration = "proxy";
+    std::string calibration = "spice_28nm_16b_timing_proxy";
 };
 
 struct AnalogCamResult {
     SimulationStats stats;
     std::vector<Decision> decisions;
+};
+
+struct FrontendVoltagePoint {
+    int dist = 0;
+    double hdcam_v_ml = 0.0;
+    double hdcam_t_cross_ps = 0.0;
+    double exact_cam_v_ml = 0.0;
+    double exact_cam_t_cross_ps = 0.0;
+};
+
+struct FrontendSpeedAnalysis {
+    uint32_t word_bits = kDefaultHashBits;
+    int max_dist = 5;
+    int hd_boundary = 2;
+    double vdd = 0.0;
+    double veval = -1.0;
+    double vref = 0.0;
+    double matchline_cap_f = 0.0;
+    double hdcam_eval_time_ps = 0.0;
+    double exact_cam_eval_time_ps = 0.0;
+    double hdcam_search_time_ps = 0.0;
+    double exact_cam_search_time_ps = 0.0;
+    double search_time_ratio = 0.0;
+    std::vector<FrontendVoltagePoint> points;
 };
 
 class AnalogCamHashReuseEngine {
@@ -100,6 +128,7 @@ private:
     uint64_t search_cycles_for_active_rows(uint64_t max_active_rows) const;
     double sample_zero_mean_gaussian(double sigma);
     double matchline_cap_f(uint32_t word_bits) const;
+    double effective_veval_scale() const;
     double nominal_matchline_voltage(int dist, uint32_t word_bits) const;
     double row_matchline_voltage(const CamEntry& row, int dist, uint32_t word_bits) const;
     double comparator_vref_for_word_bits(uint32_t word_bits) const;
@@ -107,5 +136,6 @@ private:
 };
 
 AnalogCamConfig analog_cam_config_from_file(const std::string& path);
+FrontendSpeedAnalysis analyze_cam_frontends(const AnalogCamConfig& config, uint32_t word_bits, int max_dist);
 
 }  // namespace ghhw

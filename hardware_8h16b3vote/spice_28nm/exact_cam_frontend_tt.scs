@@ -1,0 +1,42 @@
+simulator lang=spectre
+global 0
+
+// 28nm model deck (1.8V top-level include, tt section)
+include "/opt/synopsys/TSMC28/iPDK_CRN28HPC+_v1.0_2p2a_20160226_all/CRN28HPCp/models/spectre/toplevel_1d8.scs" section=top_tt
+
+parameters VDD=1.2
+parameters VREF=0.8
+parameters ML_CAP=3.8f
+parameters W_DIS=140n
+parameters L_DIS=40n
+parameters TSTOP=1n
+
+// 最小普通 CAM 放电路径：
+// - 先把 ML 预充到 VDD
+// - mismatch 出现后，单个 nMOS 直接把 ML 拉向地
+// - 用 crossing time 衡量 d=0/1 的判决速度
+
+VDD_SRC (vdd 0) vsource dc=VDD
+
+// 预充后拉低，模拟 evaluation 开始
+VPC (pc 0) vsource type=pulse val0=VDD val1=0 delay=50p rise=2p fall=2p width=500p period=1n
+
+// mismatch 使能，高表示出现 mismatch
+VMIS (mis 0) vsource type=pulse val0=0 val1=VDD delay=50p rise=2p fall=2p width=500p period=1n
+
+// 简化的 matchline
+CML (ml 0) capacitor c=ML_CAP ic=VDD
+
+// 预充 PMOS
+MPRE (ml pc vdd vdd) pch_lvt_mac w=170n l=40n
+
+// mismatch 放电 NMOS
+MDIS (ml mis 0 0) nch_lvt_mac w=W_DIS l=L_DIS
+
+tran tran stop=TSTOP maxstep=1p
+
+// 可在 Spectre/Ocean 中读取：
+// - V(ml)
+// - cross(V(ml)-VREF, -1)
+
+save ml mis pc

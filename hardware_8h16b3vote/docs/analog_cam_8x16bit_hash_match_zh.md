@@ -21,6 +21,8 @@
 
 - [analog_cam_engine.cpp](/home/qiumingzhi/Simhash-S/OneForAll/GraphhopSimhash/hardware_8h16b3vote/analog_cam_cpp/analog_cam_engine.cpp)
 - [analog_cam_default.json](/home/qiumingzhi/Simhash-S/OneForAll/GraphhopSimhash/hardware_8h16b3vote/analog_cam_cpp/configs/analog_cam_default.json)
+- [analog_cam_legacy_proxy.json](/home/qiumingzhi/Simhash-S/OneForAll/GraphhopSimhash/hardware_8h16b3vote/analog_cam_cpp/configs/analog_cam_legacy_proxy.json)
+- [8x16bit_latency_comparison_zh.md](/home/qiumingzhi/Simhash-S/OneForAll/GraphhopSimhash/hardware_8h16b3vote/docs/8x16bit_latency_comparison_zh.md)
 
 ---
 
@@ -147,8 +149,8 @@ ML = VDD
 当前模型使用：
 
 ```text
-precharge_time_ps = 40 ps
-eval_time_ps = 100 ps
+precharge_time_ps = 30.78 ps
+eval_time_ps = 64 ps
 sense_time_ps = 20 ps
 ```
 
@@ -338,18 +340,28 @@ memo_k = 3
 
 ```text
 clock_mhz = 500
-vdd = 1.0
-matchline_base_cap_f = 2.0e-15
-matchline_cap_per_bit_f = 5.0e-16
-mismatch_conductance_s = 4.0e-5
+vdd = 0.9
+veval = 0.6
+fixed_vref = 0.6
+matchline_base_cap_f = 6.0e-16
+matchline_cap_per_bit_f = 2.0e-16
+mismatch_conductance_s = 1.5862e-5
+exact_mismatch_conductance_s = 2.2451e-5
 match_leak_conductance_s = 2.0e-7
-precharge_time_ps = 40
-eval_time_ps = 100
+precharge_time_ps = 30.7809
+eval_time_ps = 64
 sense_time_ps = 20
+cam_search_cycles = 1
 comparator_vref = -1.0
 device_sigma_rel = 0.0
 sense_noise_sigma_v = 0.0
 comparator_noise_sigma_v = 0.0
+```
+
+旧的保守 `3-cycle` 版本仍保留在：
+
+```text
+analog_cam_cpp/configs/analog_cam_legacy_proxy.json
 ```
 
 这些参数分别决定：

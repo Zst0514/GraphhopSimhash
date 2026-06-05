@@ -16,3 +16,7 @@ saved_exp/
 cache_data/
 data/
 models/
+
+
+# `hardware_8h16b3vote/` keeps its own `.gitignore`.
+# Do not ignore the whole subtree here.

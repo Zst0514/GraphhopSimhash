@@ -4,8 +4,8 @@
 #include <cstdint>
 #include <deque>
 #include <string>
-#include <unordered_map>
 #include <vector>
+#include <unordered_map>
 
 #include "../common/metrics.h"
 #include "../common/trace_format.h"
@@ -17,16 +17,22 @@ struct DigitalConfig {
     int radius = 2;
     int support_threshold = 3;
     int memo_k = 3;
-    int neighbor_lookup_lanes = 16;
     int candidate_cam_entries = 512;
-    int exact_lookup_cycles = 1;
+    int subarray_rows = 512;
+    int parallel_subarrays = 1;
+    int cam_chunk_bits = 4;
+    int cam_search_cycles = 1;
+    int shared_verifier_lanes = 1;
+    int verify_lanes = 32;
+    int verify_cycles = 1;
     int candidate_select_cycles = 1;
     int cache_write_cycles = 1;
-    double sram_probe_energy_pj = 0.025;
+    double cam_compare_energy_fj_per_bit = 0.35;
+    double xor_popcount_energy_fj_per_bit = 1.20;
     double candidate_cam_probe_energy_pj = 0.20;
-    double bucket_write_energy_pj = 0.08;
-    double sram_bitcell_area_um2 = 0.08;
-    int bucket_pointer_bits = 32;
+    double cam_write_energy_pj = 0.30;
+    double cam_cell_area_um2 = 0.18;
+    double xor_popcount_lane_area_um2 = 20.0;
 };
 
 struct DigitalResult {
@@ -40,10 +46,15 @@ public:
     DigitalResult run(const TraceData& trace);
 
 private:
-    struct BucketEntry {
+    struct CamEntry {
         uint32_t node_id = 0;
+        uint16_t hash = 0;
         uint64_t timestamp = 0;
-        std::array<uint16_t, kDefaultHeads> head_hashes{};
+        bool active = true;
+    };
+
+    struct BucketEntry {
+        size_t cam_index = 0;
     };
 
     struct Candidate {
@@ -55,13 +66,14 @@ private:
 
     using Bucket = std::deque<BucketEntry>;
     DigitalConfig config_;
-    std::array<std::vector<Bucket>, kDefaultHeads> tables_;
+    std::array<std::vector<Bucket>, kDefaultHeads> buckets_;
+    std::array<std::vector<CamEntry>, kDefaultHeads> cam_rows_;
     uint64_t timestamp_ = 0;
 
     void insert_record(const TraceRecord& rec, SimulationStats& stats);
-    void add_bucket_candidates(
+    void add_candidate(
         std::unordered_map<uint32_t, Candidate>& candidates,
-        const Bucket& bucket,
+        const CamEntry& entry,
         int dist,
         SimulationStats& stats
     ) const;
@@ -70,6 +82,13 @@ private:
         uint32_t query_node_id,
         const std::string& kind
     ) const;
+    uint64_t active_rows_for_head(uint32_t head) const;
+    uint64_t active_rows_all_heads() const;
+    uint64_t search_cycles_for_active_rows(uint64_t max_active_rows) const;
+    uint64_t verify_cycles_for_survivors(const std::array<uint64_t, kDefaultHeads>& verified_rows_per_head) const;
+    int chunk_count_for_word_bits(uint32_t word_bits) const;
+    int matching_chunks(uint16_t lhs, uint16_t rhs, uint32_t word_bits) const;
+    bool coarse_filter_hit(uint16_t row_hash, uint16_t query_hash, uint32_t word_bits) const;
 };
 
 DigitalConfig digital_config_from_file(const std::string& path);

@@ -18,6 +18,10 @@ struct Decision {
     int support = 0;
     int min_dist = -1;
     std::string kind = "miss";
+    uint64_t active_rows = 0;
+    uint64_t search_cycles = 0;
+    uint64_t verify_cycles = 0;
+    uint64_t verified_rows = 0;
 };
 
 struct SimulationStats {
@@ -34,6 +38,9 @@ struct SimulationStats {
     uint64_t cam_searches = 0;
     uint64_t cam_compared_rows = 0;
     uint64_t bucket_writes = 0;
+    uint64_t frontend_search_cycles = 0;
+    uint64_t frontend_verify_cycles = 0;
+    uint64_t frontend_verified_rows = 0;
     uint64_t cycles = 0;
     double clock_mhz = 1000.0;
     double energy_pj = 0.0;
@@ -49,6 +56,18 @@ struct SimulationStats {
 
     double energy_per_query_pj() const {
         return total_queries == 0 ? 0.0 : energy_pj / static_cast<double>(total_queries);
+    }
+
+    double search_cycles_per_query() const {
+        return total_queries == 0 ? 0.0 : static_cast<double>(frontend_search_cycles) / static_cast<double>(total_queries);
+    }
+
+    double verify_cycles_per_query() const {
+        return total_queries == 0 ? 0.0 : static_cast<double>(frontend_verify_cycles) / static_cast<double>(total_queries);
+    }
+
+    double verified_rows_per_query() const {
+        return total_queries == 0 ? 0.0 : static_cast<double>(frontend_verified_rows) / static_cast<double>(total_queries);
     }
 
     double throughput_qps() const {

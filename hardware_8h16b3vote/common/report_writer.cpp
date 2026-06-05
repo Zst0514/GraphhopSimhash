@@ -85,14 +85,18 @@ void write_decisions_csv(const std::string& path, const std::vector<Decision>& d
     if (!out) {
         throw std::runtime_error("failed to write decisions file: " + path);
     }
-    out << "node_id,hit,source_id,support,min_dist,kind\n";
+    out << "node_id,hit,source_id,support,min_dist,kind,active_rows,search_cycles,verify_cycles,verified_rows\n";
     for (const Decision& decision : decisions) {
         out << decision.node_id << ','
             << (decision.hit ? 1 : 0) << ','
             << decision.source_id << ','
             << decision.support << ','
             << decision.min_dist << ','
-            << decision.kind << '\n';
+            << decision.kind << ','
+            << decision.active_rows << ','
+            << decision.search_cycles << ','
+            << decision.verify_cycles << ','
+            << decision.verified_rows << '\n';
     }
 }
 
@@ -131,9 +135,15 @@ void write_report_json(
     out << "  \"cam_searches\": " << stats.cam_searches << ",\n";
     out << "  \"cam_compared_rows\": " << stats.cam_compared_rows << ",\n";
     out << "  \"bucket_writes\": " << stats.bucket_writes << ",\n";
+    out << "  \"frontend_search_cycles\": " << stats.frontend_search_cycles << ",\n";
+    out << "  \"frontend_verify_cycles\": " << stats.frontend_verify_cycles << ",\n";
+    out << "  \"frontend_verified_rows\": " << stats.frontend_verified_rows << ",\n";
     out << "  \"cycles\": " << stats.cycles << ",\n";
     out << "  \"clock_mhz\": " << stats.clock_mhz << ",\n";
     out << "  \"cycles_per_query\": " << stats.cycles_per_query() << ",\n";
+    out << "  \"search_cycles_per_query\": " << stats.search_cycles_per_query() << ",\n";
+    out << "  \"verify_cycles_per_query\": " << stats.verify_cycles_per_query() << ",\n";
+    out << "  \"verified_rows_per_query\": " << stats.verified_rows_per_query() << ",\n";
     out << "  \"throughput_qps\": " << stats.throughput_qps() << ",\n";
     out << "  \"energy_pj\": " << stats.energy_pj << ",\n";
     out << "  \"energy_per_query_pj\": " << stats.energy_per_query_pj() << ",\n";
