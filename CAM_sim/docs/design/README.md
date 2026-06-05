@@ -11,11 +11,11 @@
 ## 当前主文档
 
 - 硬件模型总说明：
-  [HARDWARE_MODEL.md](/home/qiumingzhi/Simhash-S/OneForAll/GraphhopSimhash-main/CAM_sim/docs/HARDWARE_MODEL.md)
+  [HARDWARE_MODEL.md](/home/qiumingzhi/Simhash-S/OneForAll/GraphhopSimhash/CAM_sim/docs/HARDWARE_MODEL.md)
 - 模拟 CAM 的 8x16bit 匹配机制解释：
-  [analog_cam_8x16bit_hash_match_zh.md](/home/qiumingzhi/Simhash-S/OneForAll/GraphhopSimhash-main/CAM_sim/docs/analog_cam_8x16bit_hash_match_zh.md)
+  [analog_cam_8x16bit_hash_match_zh.md](/home/qiumingzhi/Simhash-S/OneForAll/GraphhopSimhash/CAM_sim/docs/analog_cam_8x16bit_hash_match_zh.md)
 - 外部 CAM 模拟器与参考说明：
-  [CAM_SIMULATOR_NOTES.md](/home/qiumingzhi/Simhash-S/OneForAll/GraphhopSimhash-main/CAM_sim/docs/CAM_SIMULATOR_NOTES.md)
+  [CAM_SIMULATOR_NOTES.md](/home/qiumingzhi/Simhash-S/OneForAll/GraphhopSimhash/CAM_sim/docs/CAM_SIMULATOR_NOTES.md)
 
 ## 这一层建议放什么
 

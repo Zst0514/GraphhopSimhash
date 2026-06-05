@@ -12,8 +12,8 @@
 
 为了方便直接查结论，这里把原本分散在：
 
-- [HARDWARE_MODEL.md](/home/qiumingzhi/Simhash-S/OneForAll/GraphhopSimhash-main/CAM_sim/docs/HARDWARE_MODEL.md)
-- [three_trace_three_impls_500mhz.md](/home/qiumingzhi/Simhash-S/OneForAll/GraphhopSimhash-main/CAM_sim/reports/three_trace_three_impls_500mhz.md)
+- [HARDWARE_MODEL.md](/home/qiumingzhi/Simhash-S/OneForAll/GraphhopSimhash/CAM_sim/docs/HARDWARE_MODEL.md)
+- [three_trace_three_impls_500mhz.md](/home/qiumingzhi/Simhash-S/OneForAll/GraphhopSimhash/CAM_sim/reports/three_trace_three_impls_500mhz.md)
 
 里的结果单独整理成一页。
 
@@ -129,10 +129,10 @@
 
 如果你后面要继续追原始数据，建议从下面这些文件看起：
 
-- [HARDWARE_MODEL.md](/home/qiumingzhi/Simhash-S/OneForAll/GraphhopSimhash-main/CAM_sim/docs/HARDWARE_MODEL.md)
-- [three_trace_three_impls_500mhz.md](/home/qiumingzhi/Simhash-S/OneForAll/GraphhopSimhash-main/CAM_sim/reports/three_trace_three_impls_500mhz.md)
-- [cora_analog_500mhz.json](/home/qiumingzhi/Simhash-S/OneForAll/GraphhopSimhash-main/CAM_sim/reports/cora_analog_500mhz.json)
-- [cora_digital_per_head_verify_500mhz.json](/home/qiumingzhi/Simhash-S/OneForAll/GraphhopSimhash-main/CAM_sim/reports/cora_digital_per_head_verify_500mhz.json)
-- [pubmed_analog_same_trace.json](/home/qiumingzhi/Simhash-S/OneForAll/GraphhopSimhash-main/CAM_sim/reports/pubmed_analog_same_trace.json)
-- [pubmed_digital_per_head_verify_500mhz.json](/home/qiumingzhi/Simhash-S/OneForAll/GraphhopSimhash-main/CAM_sim/reports/pubmed_digital_per_head_verify_500mhz.json)
-- [arxiv_digital_per_head_verify_500mhz.json](/home/qiumingzhi/Simhash-S/OneForAll/GraphhopSimhash-main/CAM_sim/reports/arxiv_digital_per_head_verify_500mhz.json)
+- [HARDWARE_MODEL.md](/home/qiumingzhi/Simhash-S/OneForAll/GraphhopSimhash/CAM_sim/docs/HARDWARE_MODEL.md)
+- [three_trace_three_impls_500mhz.md](/home/qiumingzhi/Simhash-S/OneForAll/GraphhopSimhash/CAM_sim/reports/three_trace_three_impls_500mhz.md)
+- [cora_analog_500mhz.json](/home/qiumingzhi/Simhash-S/OneForAll/GraphhopSimhash/CAM_sim/reports/cora_analog_500mhz.json)
+- [cora_digital_per_head_verify_500mhz.json](/home/qiumingzhi/Simhash-S/OneForAll/GraphhopSimhash/CAM_sim/reports/cora_digital_per_head_verify_500mhz.json)
+- [pubmed_analog_same_trace.json](/home/qiumingzhi/Simhash-S/OneForAll/GraphhopSimhash/CAM_sim/reports/pubmed_analog_same_trace.json)
+- [pubmed_digital_per_head_verify_500mhz.json](/home/qiumingzhi/Simhash-S/OneForAll/GraphhopSimhash/CAM_sim/reports/pubmed_digital_per_head_verify_500mhz.json)
+- [arxiv_digital_per_head_verify_500mhz.json](/home/qiumingzhi/Simhash-S/OneForAll/GraphhopSimhash/CAM_sim/reports/arxiv_digital_per_head_verify_500mhz.json)

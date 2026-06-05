@@ -298,8 +298,8 @@ search_cycles = ceil(search_time_ps / clock_period_ps)
 
 详细对比见：
 
-- [capacity_lru_512k_summary.md](/home/qiumingzhi/Simhash-S/OneForAll/GraphhopSimhash-main/CAM_sim/reports/capacity_lru_512k_summary.md)
-- [arxiv_digital_global_unbounded_vs_512k.md](/home/qiumingzhi/Simhash-S/OneForAll/GraphhopSimhash-main/CAM_sim/reports/arxiv_digital_global_unbounded_vs_512k.md)
+- [capacity_lru_512k_summary.md](/home/qiumingzhi/Simhash-S/OneForAll/GraphhopSimhash/CAM_sim/reports/capacity_lru_512k_summary.md)
+- [arxiv_digital_global_unbounded_vs_512k.md](/home/qiumingzhi/Simhash-S/OneForAll/GraphhopSimhash/CAM_sim/reports/arxiv_digital_global_unbounded_vs_512k.md)
 
 ### 为什么规模越大，HD-CAM 优势越明显
 

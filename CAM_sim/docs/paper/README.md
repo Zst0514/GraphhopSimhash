@@ -11,7 +11,7 @@
 ## 当前主文档
 
 - Survey 主文档：
-  [CAM_SURVEY.md](/home/qiumingzhi/Simhash-S/OneForAll/GraphhopSimhash-main/CAM_sim/docs/paper/survey/CAM_SURVEY.md)
+  [CAM_SURVEY.md](/home/qiumingzhi/Simhash-S/OneForAll/GraphhopSimhash/CAM_sim/docs/paper/survey/CAM_SURVEY.md)
 
 ## 子目录说明
 

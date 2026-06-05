@@ -7,32 +7,32 @@
 如果你是第一次进入这个项目，建议按下面顺序阅读：
 
 1. 项目入口：
-   [README.md](/home/qiumingzhi/Simhash-S/OneForAll/GraphhopSimhash-main/CAM_sim/README.md)
+   [README.md](/home/qiumingzhi/Simhash-S/OneForAll/GraphhopSimhash/CAM_sim/README.md)
 2. 核心硬件模型：
-   [HARDWARE_MODEL.md](/home/qiumingzhi/Simhash-S/OneForAll/GraphhopSimhash-main/CAM_sim/docs/HARDWARE_MODEL.md)
+   [HARDWARE_MODEL.md](/home/qiumingzhi/Simhash-S/OneForAll/GraphhopSimhash/CAM_sim/docs/HARDWARE_MODEL.md)
 3. 模拟 CAM 工作过程：
-   [analog_cam_8x16bit_hash_match_zh.md](/home/qiumingzhi/Simhash-S/OneForAll/GraphhopSimhash-main/CAM_sim/docs/analog_cam_8x16bit_hash_match_zh.md)
+   [analog_cam_8x16bit_hash_match_zh.md](/home/qiumingzhi/Simhash-S/OneForAll/GraphhopSimhash/CAM_sim/docs/analog_cam_8x16bit_hash_match_zh.md)
 4. 文档与工程化路线：
-   [PROJECT_ENGINEERING_PLAN_zh.md](/home/qiumingzhi/Simhash-S/OneForAll/GraphhopSimhash-main/CAM_sim/docs/PROJECT_ENGINEERING_PLAN_zh.md)
+   [PROJECT_ENGINEERING_PLAN_zh.md](/home/qiumingzhi/Simhash-S/OneForAll/GraphhopSimhash/CAM_sim/docs/PROJECT_ENGINEERING_PLAN_zh.md)
 
 ## 2. 文档分层
 
 当前 `docs` 推荐按“用途”而不是按“文件历史”来理解：
 
 - 项目总览与规范：
-  [README.md](/home/qiumingzhi/Simhash-S/OneForAll/GraphhopSimhash-main/CAM_sim/docs/README.md),
-  [PROJECT_ENGINEERING_PLAN_zh.md](/home/qiumingzhi/Simhash-S/OneForAll/GraphhopSimhash-main/CAM_sim/docs/PROJECT_ENGINEERING_PLAN_zh.md)
+  [README.md](/home/qiumingzhi/Simhash-S/OneForAll/GraphhopSimhash/CAM_sim/docs/README.md),
+  [PROJECT_ENGINEERING_PLAN_zh.md](/home/qiumingzhi/Simhash-S/OneForAll/GraphhopSimhash/CAM_sim/docs/PROJECT_ENGINEERING_PLAN_zh.md)
 - 设计与模型：
-  [HARDWARE_MODEL.md](/home/qiumingzhi/Simhash-S/OneForAll/GraphhopSimhash-main/CAM_sim/docs/HARDWARE_MODEL.md),
-  [analog_cam_8x16bit_hash_match_zh.md](/home/qiumingzhi/Simhash-S/OneForAll/GraphhopSimhash-main/CAM_sim/docs/analog_cam_8x16bit_hash_match_zh.md),
-  [CAM_SIMULATOR_NOTES.md](/home/qiumingzhi/Simhash-S/OneForAll/GraphhopSimhash-main/CAM_sim/docs/CAM_SIMULATOR_NOTES.md)
+  [HARDWARE_MODEL.md](/home/qiumingzhi/Simhash-S/OneForAll/GraphhopSimhash/CAM_sim/docs/HARDWARE_MODEL.md),
+  [analog_cam_8x16bit_hash_match_zh.md](/home/qiumingzhi/Simhash-S/OneForAll/GraphhopSimhash/CAM_sim/docs/analog_cam_8x16bit_hash_match_zh.md),
+  [CAM_SIMULATOR_NOTES.md](/home/qiumingzhi/Simhash-S/OneForAll/GraphhopSimhash/CAM_sim/docs/CAM_SIMULATOR_NOTES.md)
 - 结果与实验解释：
-  [8x16bit_latency_comparison_zh.md](/home/qiumingzhi/Simhash-S/OneForAll/GraphhopSimhash-main/CAM_sim/docs/8x16bit_latency_comparison_zh.md),
-  [28nm_cam_scaling_report_zh.md](/home/qiumingzhi/Simhash-S/OneForAll/GraphhopSimhash-main/CAM_sim/docs/28nm_cam_scaling_report_zh.md),
-  [results/README.md](/home/qiumingzhi/Simhash-S/OneForAll/GraphhopSimhash-main/CAM_sim/docs/results/README.md)
+  [8x16bit_latency_comparison_zh.md](/home/qiumingzhi/Simhash-S/OneForAll/GraphhopSimhash/CAM_sim/docs/8x16bit_latency_comparison_zh.md),
+  [28nm_cam_scaling_report_zh.md](/home/qiumingzhi/Simhash-S/OneForAll/GraphhopSimhash/CAM_sim/docs/28nm_cam_scaling_report_zh.md),
+  [results/README.md](/home/qiumingzhi/Simhash-S/OneForAll/GraphhopSimhash/CAM_sim/docs/results/README.md)
 - 论文与调研：
-  [paper/README.md](/home/qiumingzhi/Simhash-S/OneForAll/GraphhopSimhash-main/CAM_sim/docs/paper/README.md),
-  [paper/survey/CAM_SURVEY.md](/home/qiumingzhi/Simhash-S/OneForAll/GraphhopSimhash-main/CAM_sim/docs/paper/survey/CAM_SURVEY.md)
+  [paper/README.md](/home/qiumingzhi/Simhash-S/OneForAll/GraphhopSimhash/CAM_sim/docs/paper/README.md),
+  [paper/survey/CAM_SURVEY.md](/home/qiumingzhi/Simhash-S/OneForAll/GraphhopSimhash/CAM_sim/docs/paper/survey/CAM_SURVEY.md)
 
 ## 3. 各文档职责
 
@@ -71,8 +71,8 @@
 ## 6. 目录入口
 
 - 设计类入口：
-  [design/README.md](/home/qiumingzhi/Simhash-S/OneForAll/GraphhopSimhash-main/CAM_sim/docs/design/README.md)
+  [design/README.md](/home/qiumingzhi/Simhash-S/OneForAll/GraphhopSimhash/CAM_sim/docs/design/README.md)
 - 结果类入口：
-  [results/README.md](/home/qiumingzhi/Simhash-S/OneForAll/GraphhopSimhash-main/CAM_sim/docs/results/README.md)
+  [results/README.md](/home/qiumingzhi/Simhash-S/OneForAll/GraphhopSimhash/CAM_sim/docs/results/README.md)
 - 论文类入口：
-  [paper/README.md](/home/qiumingzhi/Simhash-S/OneForAll/GraphhopSimhash-main/CAM_sim/docs/paper/README.md)
+  [paper/README.md](/home/qiumingzhi/Simhash-S/OneForAll/GraphhopSimhash/CAM_sim/docs/paper/README.md)

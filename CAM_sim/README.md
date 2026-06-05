@@ -26,14 +26,14 @@ that the digital and CAM lookup frontends are compared on the same surface.
 If you want the documentation map instead of the build/run quick start, begin
 with:
 
-- [docs/README.md](/home/qiumingzhi/Simhash-S/OneForAll/GraphhopSimhash-main/CAM_sim/docs/README.md)
-- [docs/HARDWARE_MODEL.md](/home/qiumingzhi/Simhash-S/OneForAll/GraphhopSimhash-main/CAM_sim/docs/HARDWARE_MODEL.md)
-- [docs/PROJECT_ENGINEERING_PLAN_zh.md](/home/qiumingzhi/Simhash-S/OneForAll/GraphhopSimhash-main/CAM_sim/docs/PROJECT_ENGINEERING_PLAN_zh.md)
+- [docs/README.md](/home/qiumingzhi/Simhash-S/OneForAll/GraphhopSimhash/CAM_sim/docs/README.md)
+- [docs/HARDWARE_MODEL.md](/home/qiumingzhi/Simhash-S/OneForAll/GraphhopSimhash/CAM_sim/docs/HARDWARE_MODEL.md)
+- [docs/PROJECT_ENGINEERING_PLAN_zh.md](/home/qiumingzhi/Simhash-S/OneForAll/GraphhopSimhash/CAM_sim/docs/PROJECT_ENGINEERING_PLAN_zh.md)
 
 ## Build
 
 ```bash
-cd /home/qiumingzhi/Simhash-S/OneForAll/GraphhopSimhash-main
+cd /home/qiumingzhi/Simhash-S/OneForAll/GraphhopSimhash
 
 cmake -S CAM_sim -B CAM_sim/cmake-build-release -DCMAKE_BUILD_TYPE=Release
 cmake --build CAM_sim/cmake-build-release -j
@@ -46,7 +46,7 @@ Run from the repository root so `python -m CAM_sim.tools.export_graphhop_trace`
 can bootstrap the local GraphhopSimhash modules from this checkout:
 
 ```bash
-cd /home/qiumingzhi/Simhash-S/OneForAll/GraphhopSimhash-main
+cd /home/qiumingzhi/Simhash-S/OneForAll/GraphhopSimhash
 
 python -m CAM_sim.tools.export_graphhop_trace \
   --datasets pubmed \
@@ -62,7 +62,7 @@ python -m CAM_sim.tools.export_graphhop_trace \
 ## Run Both Simulators
 
 ```bash
-cd /home/qiumingzhi/Simhash-S/OneForAll/GraphhopSimhash-main/CAM_sim
+cd /home/qiumingzhi/Simhash-S/OneForAll/GraphhopSimhash/CAM_sim
 
 ./cmake-build-release/digital_logic_cpp/digital_hash_reuse \
   --trace traces/pubmed_8h16b_r2.trace \
@@ -99,7 +99,7 @@ timing proxy。它在 `500 MHz` 下对应 `1` 个搜索周期，而不是旧的�
 One-command smoke path:
 
 ```bash
-cd /home/qiumingzhi/Simhash-S/OneForAll/GraphhopSimhash-main
+cd /home/qiumingzhi/Simhash-S/OneForAll/GraphhopSimhash
 bash CAM_sim/tools/run_pubmed_CAM_sim.sh
 ```
 
