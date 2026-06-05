@@ -34,6 +34,16 @@ REFERENCE_TAG="${REFERENCE_TAG:-W4BFPA8_B128}"
 FORCE_DYNAMIC="${FORCE_DYNAMIC:-0}"
 FORCE_FULLSTACK="${FORCE_FULLSTACK:-0}"
 
+# The dynamic pool is consumed as the low-cost miss-node backend.  For
+# residual-gate calibration we keep the same visible precision-depth ladder as
+# the stable progressive-BFP policy table: BFPA8 reference, BFPA6 refinement,
+# and BFPA4-like base.  This avoids changing the front-end accept/reject
+# behavior merely because the base backend is dynamic.
+FRONTEND_REFINE_BIT="${FRONTEND_REFINE_BIT:-6}"
+FRONTEND_REFINE_TAG="${FRONTEND_REFINE_TAG:-W4BFPA${FRONTEND_REFINE_BIT}_B128}"
+FRONTEND_REFINE_RATIO="${FRONTEND_REFINE_RATIO:-0.25}"
+FRONTEND_BUDGET_PRIORITIES="${FRONTEND_BUDGET_PRIORITIES:-random degree tser}"
+
 cd "${OFA_DIR}"
 
 timestamp() {
@@ -148,6 +158,15 @@ EOF
     echo "[$(timestamp)] [ArrayTrace] metadata has no per-module trace; regenerate the pool with the updated generator to enable array simulation"
   fi
 
+  # PubMed's stable unified-policy point is deliberately conservative at the
+  # fuzzy bucket: support>=5 remains direct reuse, while support=3..4 is sent
+  # back to the encoder.  Keep this as the default for dynamic-BFP evaluation so
+  # the backend is measured after the front-end drop is controlled.
+  dataset_gate_threshold="${RESIDUAL_GATE_THRESHOLD:-}"
+  if [[ -z "${dataset_gate_threshold}" && "${dataset}" == "pubmed" ]]; then
+    dataset_gate_threshold="1.1"
+  fi
+
   FORCE="${FORCE_FULLSTACK}" \
   DATASET="${dataset}" \
   RUNS="${runs}" \
@@ -156,11 +175,13 @@ EOF
   HARD_SUPPORT="${HARD_SUPPORT:-5}" \
   SOFT_SUPPORT="${SOFT_SUPPORT:-3}" \
   REFERENCE_TAG="${REFERENCE_TAG}" \
+  RESIDUAL_GATE_THRESHOLD="${dataset_gate_threshold:-${RESIDUAL_GATE_THRESHOLD:-0.575}}" \
   BASE_BIT="${DYNAMIC_BASE_MANTISSA}" \
   BASE_TAG="${DYNAMIC_TAG}" \
-  REFINE_BIT="8" \
-  REFINE_RATIO="0.0" \
-  BUDGET_PRIORITIES="${BUDGET_PRIORITIES:-random}" \
+  REFINE_BIT="${FRONTEND_REFINE_BIT}" \
+  REFINE_TAG="${FRONTEND_REFINE_TAG}" \
+  REFINE_RATIO="${FRONTEND_REFINE_RATIO}" \
+  BUDGET_PRIORITIES="${BUDGET_PRIORITIES:-${FRONTEND_BUDGET_PRIORITIES}}" \
   FRONTEND_ID="h8_53_T${frontend_t}_dynbfp" \
   OUT_DIR="${out_dir}" \
   bash GraphhopSimhash/scripts/run_progressive_bfp_fullstack.sh

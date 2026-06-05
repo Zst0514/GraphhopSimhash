@@ -1929,14 +1929,14 @@ def build_precision_depth_policy_configs(args, bits):
     configs = [(f"FullP{ref_bit}", {"kind": "all_ref"})]
     for bit in sorted(bits, reverse=True):
         configs.append((f"AllP{bit}", {"kind": "all_depth", "bit": int(bit)}))
-    configs.extend(
-        [
-            ("Rand", {"kind": "budget", "priority": "random"}),
-            ("Deg", {"kind": "budget", "priority": "degree"}),
-            ("TSER", {"kind": "budget", "priority": "tser"}),
-            ("Uniq", {"kind": "budget", "priority": "low_unique"}),
-        ]
-    )
+    budget_name_by_priority = {
+        "random": "Rand",
+        "degree": "Deg",
+        "tser": "TSER",
+        "low_unique": "Uniq",
+    }
+    for priority in getattr(args, "precision_depth_budget_priorities", ["random", "degree", "tser", "low_unique"]):
+        configs.append((budget_name_by_priority[priority], {"kind": "budget", "priority": priority}))
     if bool(getattr(args, "precision_depth_include_predictor", False)):
         configs.append(("Pred", {"kind": "budget", "priority": "predictor"}))
     if bool(getattr(args, "precision_depth_include_oracle", False)):

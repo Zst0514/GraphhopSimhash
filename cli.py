@@ -804,6 +804,13 @@ def build_parser():
         ),
     )
     parser.add_argument(
+        "--precision_depth_budget_priorities",
+        nargs="+",
+        default=["random", "degree", "tser", "low_unique"],
+        choices=["random", "degree", "tser", "low_unique"],
+        help="Budget policy selectors included in precision-depth tables.",
+    )
+    parser.add_argument(
         "--precision_depth_include_predictor",
         action="store_true",
         help="Include the calibration-fitted predictor policy in precision-depth tables.",

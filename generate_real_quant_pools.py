@@ -212,14 +212,32 @@ def load_text_selection_edge_index(dataset):
     candidates = []
     if ds_key == "cora":
         candidates.append(os.path.join("data", "single_graph", "Cora", "cora.pt"))
+        candidates.append(os.path.join("cache_data", "cora", "ST", "processed", "geometric_data_processed.pt"))
     elif ds_key == "pubmed":
         candidates.append(os.path.join("data", "single_graph", "Pubmed", "pubmed.pt"))
+        candidates.append(os.path.join("cache_data", "Pubmed", "ST", "processed", "geometric_data_processed.pt"))
+        candidates.append(os.path.join("cache_data", "pubmed", "ST", "processed", "geometric_data_processed.pt"))
     elif ds_key == "arxiv":
+        candidates.append(os.path.join("cache_data", "arxiv", "ST", "processed", "geometric_data_processed.pt"))
         candidates.append(os.path.join("data", "ogbn_arxiv", "processed", "geometric_data_processed.pt"))
+        candidates.append(
+            os.path.join("data", "single_graph", "arxiv", "ogbn_arxiv", "processed", "geometric_data_processed.pt")
+        )
     for path in candidates:
         if os.path.exists(path):
             data = torch.load(path, map_location="cpu")
             edge_index = getattr(data, "edge_index", None)
+            if edge_index is None and isinstance(data, dict):
+                edge_index = data.get("edge_index")
+            if edge_index is None and isinstance(data, (tuple, list)):
+                for item in data:
+                    edge_index = getattr(item, "edge_index", None)
+                    if edge_index is not None:
+                        break
+                    if isinstance(item, dict):
+                        edge_index = item.get("edge_index")
+                        if edge_index is not None:
+                            break
             if edge_index is not None:
                 return edge_index.cpu()
     return None
