@@ -1,0 +1,23 @@
+{
+  "source": "CAMASim/EvaCAM placeholder",
+  "calibration": "proxy",
+  "notes": "Replace these numbers with CAMASim or EvaCAM-derived values when a calibrated backend is available.",
+  "clock_mhz": 500,
+  "cam_search_cycles": 3,
+  "cam_compare_energy_fj_per_bit": 0.35,
+  "cam_write_energy_pj": 0.30,
+  "cam_cell_area_um2": 0.18,
+  "vdd": 1.0,
+  "matchline_base_cap_f": 2.0e-15,
+  "matchline_cap_per_bit_f": 5.0e-16,
+  "mismatch_conductance_s": 4.0e-5,
+  "match_leak_conductance_s": 2.0e-7,
+  "precharge_time_ps": 40.0,
+  "eval_time_ps": 100.0,
+  "sense_time_ps": 20.0,
+  "comparator_vref": -1.0,
+  "device_sigma_rel": 0.0,
+  "sense_noise_sigma_v": 0.0,
+  "comparator_noise_sigma_v": 0.0,
+  "rng_seed": 12345
+}

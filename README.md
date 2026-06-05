@@ -149,6 +149,9 @@ GraphhopSimhash/
     ONNXim/
         integrated ONNXim simulator and Graph-Bit microbench hooks
 
+    CAM_sim/
+        CAM frontend hardware simulator, reports, and hardware-focused docs
+
     docs/
         organized documentation
 ```
@@ -157,6 +160,7 @@ Documentation entry:
 
 ```text
 docs/README.md
+CAM_sim/README.md
 ```
 
 ## Running Location

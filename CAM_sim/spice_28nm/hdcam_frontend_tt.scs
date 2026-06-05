@@ -1,0 +1,56 @@
+simulator lang=spectre
+global 0
+
+// 28nm model deck (1.8V top-level include, tt section)
+include "/opt/synopsys/TSMC28/iPDK_CRN28HPC+_v1.0_2p2a_20160226_all/CRN28HPCp/models/spectre/toplevel_1d8.scs" section=top_tt
+
+parameters VDD=1.2
+parameters VEVAL=0.8
+parameters VREF=0.8
+parameters ML_CAP=3.8f
+parameters W_MISMATCH=140n
+parameters W_MEVAL=140n
+parameters L_CORE=40n
+parameters TSTOP=1n
+
+// 最小 HD-CAM 放电路径：
+// - 先把 ML 预充到 VDD
+// - mismatch 控制支路打开
+// - Meval 用 VEVAL 限制放电电流
+// - crossing time 用来近似 d=2/3 边界的判决速度
+
+VDD_SRC (vdd 0) vsource dc=VDD
+VEEVAL (veval 0) vsource dc=VEVAL
+
+// 预充后拉低，模拟 evaluation 开始
+VPC (pc 0) vsource type=pulse val0=VDD val1=0 delay=50p rise=2p fall=2p width=500p period=1n
+
+// mismatch 使能，高表示出现 mismatch
+VMIS1 (mis1 0) vsource type=pulse val0=0 val1=VDD delay=50p rise=2p fall=2p width=500p period=1n
+VMIS2 (mis2 0) vsource type=pulse val0=0 val1=VDD delay=50p rise=2p fall=2p width=500p period=1n
+VMIS3 (mis3 0) vsource type=pulse val0=0 val1=VDD delay=50p rise=2p fall=2p width=500p period=1n
+
+// 简化的 matchline
+CML (ml 0) capacitor c=ML_CAP ic=VDD
+
+// 预充 PMOS
+MPRE (ml pc vdd vdd) pch_lvt_mac w=170n l=40n
+
+// 3 个 mismatch 支路并联，近似 d=3
+// 每个支路：ML -> Meval -> mismatch NMOS -> GND
+MME1 (ml veval n1 0) nch_lvt_mac w=W_MEVAL l=L_CORE
+MMI1 (n1 mis1 0 0) nch_lvt_mac w=W_MISMATCH l=L_CORE
+
+MME2 (ml veval n2 0) nch_lvt_mac w=W_MEVAL l=L_CORE
+MMI2 (n2 mis2 0 0) nch_lvt_mac w=W_MISMATCH l=L_CORE
+
+MME3 (ml veval n3 0) nch_lvt_mac w=W_MEVAL l=L_CORE
+MMI3 (n3 mis3 0 0) nch_lvt_mac w=W_MISMATCH l=L_CORE
+
+tran tran stop=TSTOP maxstep=1p
+
+// 可在 Spectre/Ocean 中读取：
+// - V(ml)
+// - 对不同 VEVAL 扫描后的 cross(V(ml)-VREF, -1)
+
+save ml veval mis1 mis2 mis3

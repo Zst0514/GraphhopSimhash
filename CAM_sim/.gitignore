@@ -1,0 +1,32 @@
+# Local build / report outputs
+build/
+cmake-build-*/
+reports/
+traces/*.trace
+*.decisions.csv
+
+# Local exported PDFs.
+# Keep the curated paper library versionable.
+*.pdf
+!docs/paper/*.pdf
+!docs/paper/**/*.pdf
+
+# Python caches
+__pycache__/
+*.py[cod]
+
+# SPICE run artifacts
+spice_28nm/runs/
+spice_28nm/scaling_study_runs/*.log
+spice_28nm/scaling_study_runs/*.raw
+spice_28nm/scaling_study_runs/*.scs
+
+# Design Compiler / synthesis generated artifacts
+dc_28nm/alib-52/
+dc_28nm/netlists/
+dc_28nm/reports/
+dc_28nm/*.log
+dc_28nm/*.mr
+dc_28nm/*.svf
+dc_28nm/*.pvl
+dc_28nm/*.syn

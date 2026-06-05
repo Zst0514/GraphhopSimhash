@@ -1,0 +1,98 @@
+{
+  "config": {
+    "eval_start_ps": 50.0,
+    "l_core_nm": 40.0,
+    "matchline_base_cap_ff": 0.6,
+    "matchline_cap_per_bit_ff": 0.2,
+    "maxstep_ps": 0.5,
+    "precharge_target_ratio": 0.9,
+    "rise_fall_ps": 2.0,
+    "sense_time_ps": 20.0,
+    "tstop_ps": 4000.0,
+    "vdd": 0.9,
+    "veval": 0.6,
+    "vref": 0.6,
+    "w_dis_nm": 140.0,
+    "w_meval_nm": 140.0,
+    "w_mismatch_nm": 140.0,
+    "w_pre_nm": 170.0,
+    "word_bits": [
+      16,
+      64
+    ]
+  },
+  "results": {
+    "exact_d1_16b": {
+      "case": "exact_d1",
+      "crossing_ps": 60.53920949869078,
+      "ml_cap_ff": 3.8000000000000003,
+      "warnings": 5,
+      "waveform_max_v": 0.909491122061613,
+      "waveform_min_v": -0.0109408841150616,
+      "word_bits": 16
+    },
+    "exact_d1_64b": {
+      "case": "exact_d1",
+      "crossing_ps": 81.21387612960731,
+      "ml_cap_ff": 13.4,
+      "warnings": 5,
+      "waveform_max_v": 0.902894278213476,
+      "waveform_min_v": -0.00334389169020687,
+      "word_bits": 64
+    },
+    "hdcam_d2_16b": {
+      "case": "hdcam_d2",
+      "crossing_ps": 69.04688676617232,
+      "ml_cap_ff": 3.8000000000000003,
+      "warnings": 5,
+      "waveform_max_v": 0.9134526728394,
+      "waveform_min_v": -0.00664743005878842,
+      "word_bits": 16
+    },
+    "hdcam_d2_64b": {
+      "case": "hdcam_d2",
+      "crossing_ps": 105.2089760876785,
+      "ml_cap_ff": 13.4,
+      "warnings": 5,
+      "waveform_max_v": 0.904135237752765,
+      "waveform_min_v": -0.00221709871248144,
+      "word_bits": 64
+    },
+    "hdcam_d3_16b": {
+      "case": "hdcam_d3",
+      "crossing_ps": 63.58924168807916,
+      "ml_cap_ff": 3.8000000000000003,
+      "warnings": 5,
+      "waveform_max_v": 0.913370103808529,
+      "waveform_min_v": -0.00970336885338453,
+      "word_bits": 16
+    },
+    "hdcam_d3_64b": {
+      "case": "hdcam_d3",
+      "crossing_ps": 87.69831151058195,
+      "ml_cap_ff": 13.4,
+      "warnings": 5,
+      "waveform_max_v": 0.904110538605667,
+      "waveform_min_v": -0.00321933409110577,
+      "word_bits": 64
+    },
+    "precharge90_16b": {
+      "case": "precharge90",
+      "crossing_ps": 30.78091366820998,
+      "ml_cap_ff": 3.8000000000000003,
+      "warnings": 5,
+      "waveform_max_v": 0.899999997165985,
+      "waveform_min_v": 0.000134226053117575,
+      "word_bits": 16
+    },
+    "precharge90_64b": {
+      "case": "precharge90",
+      "crossing_ps": 105.90719643487962,
+      "ml_cap_ff": 13.4,
+      "warnings": 5,
+      "waveform_max_v": 0.89999999697641,
+      "waveform_min_v": 0.000134226053117575,
+      "word_bits": 64
+    }
+  }
+}
