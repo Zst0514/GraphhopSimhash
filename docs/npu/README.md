@@ -4,13 +4,16 @@
 
 ## Mainline
 
-- [GRAPH_BIT_NPU_DESIGN.md](GRAPH_BIT_NPU_DESIGN.md)  
+- [GRAPH_BIT_NPU_DESIGN.md](GRAPH_BIT_NPU_DESIGN.md)
   当前 NPU 主设计入口：TSER/graph-risk-guided BFPA4/BFPA6 encoder path，以及它和 SimHash / residual reuse 的端到端关系。
 
-- [PROGRESSIVE_BFP_ARRAY_DESIGN_AND_EXPERIMENTS.md](PROGRESSIVE_BFP_ARRAY_DESIGN_AND_EXPERIMENTS.md)  
+- [BFP_TECHNICAL_BRIEF.md](BFP_TECHNICAL_BRIEF.md)
+  BFP 格式、Transformer activation scale 选择、graph-aware dynamic BFPA4-to-BFPA6 refinement 和 NPU 通路说明。
+
+- [PROGRESSIVE_BFP_ARRAY_DESIGN_AND_EXPERIMENTS.md](PROGRESSIVE_BFP_ARRAY_DESIGN_AND_EXPERIMENTS.md)
   BFP 阵列本身的设计、PE/dataflow/service-window 机制，以及需要补齐的 array-level 实验路线。
 
-- [GRAPH_AWARE_DYNAMIC_BFP_REFINEMENT_NPU.md](GRAPH_AWARE_DYNAMIC_BFP_REFINEMENT_NPU.md)  
+- [GRAPH_AWARE_DYNAMIC_BFP_REFINEMENT_NPU.md](GRAPH_AWARE_DYNAMIC_BFP_REFINEMENT_NPU.md)
   当前后端 NPU 主实现：BFPA4 base always compute，按 `graph risk × activation stress` 在 activation block 内动态追加 BFPA6 refinement。
 
 ## Archived Explorations

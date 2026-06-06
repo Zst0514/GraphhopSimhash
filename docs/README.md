@@ -34,6 +34,9 @@ Graph-aware LLM encoder execution for text-attributed graph inference.
 - [npu/GRAPH_BIT_NPU_DESIGN.md](npu/GRAPH_BIT_NPU_DESIGN.md)
   当前后端主设计：BFPA4 低成本底座，高风险节点提升到 BFPA6/BFPA8。
 
+- [npu/BFP_TECHNICAL_BRIEF.md](npu/BFP_TECHNICAL_BRIEF.md)
+  BFP 格式、Transformer activation scale 选择、graph-aware dynamic refinement 和 NPU 通路说明。
+
 - [npu/GRAPH_AWARE_DYNAMIC_BFP_REFINEMENT_NPU.md](npu/GRAPH_AWARE_DYNAMIC_BFP_REFINEMENT_NPU.md)
   Graph risk × activation stress 的 dynamic BFPA4-to-BFPA6 refinement NPU 实现。
 
