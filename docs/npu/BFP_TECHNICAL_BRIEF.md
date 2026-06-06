@@ -127,7 +127,122 @@ B128:
     128 activation values share one exponent
 ```
 
-## 4. 为什么 BFP 适合 Miss-Node Encoder
+## 4. 相对普通 W4A8 / W4A4 定点表示的区别
+
+这里的 `W4A8` / `W4A4` 指普通定点 activation quantization：
+
+```text
+W4A8:
+    W = 4-bit integer weight
+    A = 8-bit integer activation
+
+W4A4:
+    W = 4-bit integer weight
+    A = 4-bit integer activation
+```
+
+普通定点 activation 通常对一个 group / tensor 使用 scale：
+
+```text
+a_int = round(a_fp / scale)
+a_fp  ~= a_int * scale
+```
+
+BFP activation 则是：
+
+```text
+a_fp ~= mantissa_int * 2^{E_block}
+```
+
+两者核心差异是：
+
+```text
+定点:
+    用 scale 表示动态范围。
+
+BFP:
+    用 shared exponent 表示 block 动态范围。
+```
+
+### 4.1 BFP 相对 W4A8 的优势
+
+W4A8 精度稳，但 activation 侧仍然是 8-bit 计算和存储。BFP 可以把 activation mantissa 降到 6-bit 或 4-bit：
+
+```text
+W4A8:
+    A mantissa/effective integer width = 8
+
+W4BFPA4:
+    A mantissa width = 4
+
+W4BFPA6:
+    A mantissa width = 6
+```
+
+优势：
+
+```text
+1. activation-side MAC 位宽更低。
+2. activation RF / SRAM / buffer 读写位宽更低。
+3. PE 内乘法和累加活动更少。
+4. shared exponent 保留 block 动态范围，比普通 A4 更稳。
+```
+
+因此，BFP 的目标不是比 W4A8 更准，而是在接近可接受精度时降低 activation-side 计算和片上数据活动。
+
+### 4.2 BFP 相对 W4A4 的优势
+
+普通 W4A4 的 activation 只有 4-bit 定点数。它的问题是：
+
+```text
+如果 group 内动态范围大，
+一个 scale 很难同时照顾大值和小值。
+```
+
+BFP 的 shared exponent 能更自然地保留 block 级动态范围：
+
+```text
+block exponent:
+    负责表达整体数量级。
+
+4-bit mantissa:
+    负责表达 block 内相对值。
+```
+
+所以在同样 4-bit activation mantissa 下，`BFPA4` 往往比普通 `A4` 更稳。它不是“普通 A4 变好了”，而是换了一种 activation 数值格式。
+
+### 4.3 BFP 的劣势
+
+BFP 的主要代价来自 shared exponent 和 block 管理：
+
+```text
+1. 每个 block 需要 exponent selection。
+2. 每个 block 需要存储 / 搬运 shared exponent。
+3. PE 输入前需要按 exponent 做 shift / align。
+4. block 内 outlier 会拉高 exponent，牺牲小值 mantissa 精度。
+```
+
+和普通定点相比，BFP 控制逻辑更复杂：
+
+```text
+普通 W4A4:
+    scale path 简单，整数 MAC 直接。
+
+W4BFPA4:
+    需要 exponent selector、mantissa alignment、block metadata。
+```
+
+因此 BFP 适合的前提是：
+
+```text
+dynamic range 保留带来的精度收益
+    >
+block exponent / shift / metadata 带来的额外开销
+```
+
+当前实验中，BFPA4 在 Cora/PubMed/Arxiv 上明显比 BFPA3 稳，并且比普通 A4 更能保留动态范围；这也是后端选择 BFPA4 作为 base path 的原因。
+
+## 5. 为什么 BFP 适合 Miss-Node Encoder
 
 在当前系统里，SimHash / CAM / Residual-Gate 已经把部分节点从 full encoder 路径中移走：
 
@@ -153,7 +268,7 @@ BFPA4 base compute
 optional BFPA6 refinement
 ```
 
-## 5. 图场景带来的新信息
+## 6. 图场景带来的新信息
 
 普通 Transformer accelerator 只看到一批 token rows。它可以看到 activation block 的数值分布，但不知道这些 token rows 对图任务的重要性。
 
@@ -183,7 +298,7 @@ reuse route:
 
 这不是单纯把 BFP 搬到 Transformer 上，而是把图任务风险引入 BFP refinement 决策。
 
-## 6. Activation Stress
+## 7. Activation Stress
 
 BFP 的数值风险来自 shared exponent。为了定位哪些 block 容易受 shared exponent 影响，当前实现定义 activation stress：
 
@@ -215,7 +330,7 @@ stress 只说明这个 block 数值上危险；
 graph risk 说明这个 block 所属节点在图任务上是否重要。
 ```
 
-## 7. Graph-Aware Dynamic BFP Refinement
+## 8. Graph-Aware Dynamic BFP Refinement
 
 当前主线不是离线固定某些节点永远 BFPA4 或 BFPA6，而是在 block 执行时做动态判断：
 
@@ -248,7 +363,7 @@ final:
 
 因此不需要两套完整阵列。阵列默认跑 BFPA4；只有被选中的 block 才进入 refinement lane。
 
-## 8. NPU 通路
+## 9. NPU 通路
 
 整体路径：
 
@@ -292,7 +407,7 @@ Dynamic BFP encoder 内部：
 8. Merge partial sums.
 ```
 
-## 9. 设计取舍
+## 10. 设计取舍
 
 ### BFPA4 Only
 
@@ -329,7 +444,7 @@ Dynamic BFP encoder 内部：
     需要 output merge / partial-sum accumulation 控制。
 ```
 
-## 10. 当前实现映射
+## 11. 当前实现映射
 
 当前代码生成的 dynamic pool 使用：
 
