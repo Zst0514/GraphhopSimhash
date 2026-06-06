@@ -444,53 +444,103 @@ Dynamic BFP encoder 内部：
     需要 output merge / partial-sum accumulation 控制。
 ```
 
-## 11. 当前实现映射
+## 11. 当前实验结果
 
-当前代码生成的 dynamic pool 使用：
+当前主要结果来自：
 
 ```text
-base:
-    BFPA4
-
-refine:
-    BFPA6
-
-block:
-    rowwise 1 x 128
-
-priority:
-    graph risk * activation stress
+docs/results/FINAL_BFP_VALIDATION_RESULT.md
 ```
 
-典型 tag：
+### 11.1 BFPA safety boundary
+
+该实验只比较 encoder target pool，不接入 reuse / residual 前端。reference 为 `W4BFPA8_B128`。
+
+| Dataset | Runs | BFPA6 Drop | BFPA5 Drop | BFPA4 Drop | BFPA3 Drop |
+|---|---:|---:|---:|---:|---:|
+| Cora | 5 | 0.09% | 0.35% | 0.99% | 23.13% |
+| PubMed | 3 | 0.02% | 0.25% | 1.16% | 27.43% |
+| Arxiv | 1 | 0.03% | 0.13% | 0.04% | 35.31% |
+
+结论：
 
 ```text
-W4GraphBFPA4to6_B128_deg_t0.20
+BFPA6 / BFPA5:
+    基本接近 BFPA8。
+
+BFPA4:
+    Cora/PubMed 有约 1% 级别掉点，Arxiv 几乎无损。
+
+BFPA3:
+    三个数据集均明显崩塌，不作为默认路径。
 ```
 
-含义：
+### 11.2 BFPA4 -> BFPA6 refinement
+
+该实验固定：
 
 ```text
-W4:
-    AWQ 4-bit weight
-
-GraphBFPA4to6:
-    graph-aware BFPA4 base with optional BFPA6 refinement
-
-B128:
-    128 activation values share one exponent
-
-deg:
-    graph risk currently uses degree / propagation risk
-
-t0.20:
-    refinement threshold
+base   = BFPA4
+refine = BFPA6
 ```
 
-对应脚本：
+在不同 refinement ratio 下比较 `Random / Stress / Degree / TSER / Graph×Stress` 等 selector。
+
+| Dataset | BFPA4 Drop | BFPA6 Drop | Representative Best |
+|---|---:|---:|---|
+| Cora | 0.99% | 0.09% | 25% Degree: 0.59% |
+| PubMed | 1.16% | 0.02% | 25% TSER: 0.55% |
+| Arxiv | 0.06% | 0.03% | BFPA4 already safe |
+
+结论：
 
 ```text
-GraphhopSimhash/scripts/generate_graph_aware_bfp_dynamic_pool.py
-GraphhopSimhash/scripts/simulate_dynamic_bfp_array_trace.py
-GraphhopSimhash/scripts/run_dynamic_bfp_fullstack.sh
+Cora / PubMed:
+    BFPA4 有可恢复的精度损失；
+    对部分 block 追加 BFPA6 能降低 drop。
+
+PubMed:
+    TSER selector 最稳定，说明图语义风险对 refinement 选择有价值。
+
+Arxiv:
+    BFPA4 已经足够安全，dynamic refinement 的收益很小。
+```
+
+### 11.3 Full-stack dynamic BFP
+
+该实验接入完整前端：
+
+```text
+SimHash + LRU/CAM
+  -> TSER score gate
+  -> direct reuse / residual-gate reuse / miss
+  -> miss nodes run BFPA encoder
+```
+
+| Dataset | Runs | Reuse | Miss | FullP8 Drop | AllP4 Drop | Dynamic Drop |
+|---|---:|---:|---:|---:|---:|---:|
+| Cora | 5 | 51.6% | 48.4% | 2.22% | 2.72% | 2.57% |
+| PubMed | 3 | 41.9% | 58.1% | 1.86% | 2.42% | 2.31% |
+| Arxiv | 1 | 44.9% | 55.1% | 2.29% | 2.36% | 2.34% |
+
+其中：
+
+```text
+FullP8:
+    miss nodes 使用 BFPA8 reference path。
+
+AllP4:
+    miss nodes 全部使用 BFPA4。
+
+Dynamic:
+    miss nodes 使用 graph-aware BFPA4->BFPA6 refinement。
+```
+
+整体结论：
+
+```text
+1. 前端 reuse/residual 决定有多少节点绕过 encoder。
+2. BFPA4 是低成本 miss-node encoder base path。
+3. Dynamic BFPA4->BFPA6 refinement 在 Cora/PubMed 上能回收部分 BFPA4 精度损失。
+4. Arxiv 上 BFPA4 本身接近 FullP8，dynamic path 自然退化为低成本 BFPA4 为主。
 ```
