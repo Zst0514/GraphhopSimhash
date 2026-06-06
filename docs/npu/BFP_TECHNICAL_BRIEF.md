@@ -604,7 +604,7 @@ threshold = 0.20:
 
 ### 10.2.2 Array trace
 
-array trace 统计的是 dynamic BFP pool 中真实被 refine 的 activation blocks，以及由此得到的 mantissa-bit activity。它不是 GPU wall-clock，也不是 RTL cycle-accurate full-system simulation。
+array trace 统计的是 dynamic BFP pool 中真实被 refine 的 activation blocks.
 
 | Dataset | Refined Blocks | Effective Bits | Dynamic/BFPA4 | Dynamic/BFPA6 | Dynamic/BFPA8 |
 |---|---:|---:|---:|---:|---:|
