@@ -17,60 +17,54 @@ Graph-aware LLM encoder execution for text-attributed graph inference.
 
 ## Core Algorithm
 
-- [SCORE_DEFINITIONS.md](core/SCORE_DEFINITIONS.md)  
+- [SCORE_DEFINITIONS.md](core/SCORE_DEFINITIONS.md)
   TSER / Degree / graph context / low-unique 分数定义。TSER 是前端 reuse 和后端 BFP refinement 的共享风险信号。
 
-- [CAM设计.md](core/CAM设计.md)  
+- [CAM设计.md](core/CAM设计.md)
   Multi-head SimHash、LRU/HD-CAM、support 聚合和 direct / residual / compute 三段式复用。
 
-- [RESIDUAL_CORRECTED_REUSE.md](core/RESIDUAL_CORRECTED_REUSE.md)  
+- [RESIDUAL_CORRECTED_REUSE.md](core/RESIDUAL_CORRECTED_REUSE.md)
   residual adapter / accept gate 的实现、训练目标、参数和结果。
 
-- [AWQ_W4A8_W4A4_GENERATION.md](core/AWQ_W4A8_W4A4_GENERATION.md)  
+- [AWQ_W4A8_W4A4_GENERATION.md](core/AWQ_W4A8_W4A4_GENERATION.md)
   AWQ / real quant embedding pool 生成方式。
 
 ## NPU
 
-- [npu/GRAPH_BIT_NPU_DESIGN.md](npu/GRAPH_BIT_NPU_DESIGN.md)  
+- [npu/GRAPH_BIT_NPU_DESIGN.md](npu/GRAPH_BIT_NPU_DESIGN.md)
   当前后端主设计：BFPA4 低成本底座，高风险节点提升到 BFPA6/BFPA8。
 
-- [npu/BFP_ACTIVATION_FORMAT.md](npu/BFP_ACTIVATION_FORMAT.md)  
-  BFP activation 格式、block size 和相对普通 A4/A8 的差异。
+- [npu/GRAPH_AWARE_DYNAMIC_BFP_REFINEMENT_NPU.md](npu/GRAPH_AWARE_DYNAMIC_BFP_REFINEMENT_NPU.md)
+  Graph risk × activation stress 的 dynamic BFPA4-to-BFPA6 refinement NPU 实现。
 
-- [npu/GRAPH_BIT_SYSTOLIC_FLASH_DATAFLOW.md](npu/GRAPH_BIT_SYSTOLIC_FLASH_DATAFLOW.md)  
-  W-stationary systolic array 和类 FlashAttention 的 IO-aware W tile 数据流。
-
-- [npu/LLAMA_ROOFLINE_PROFILE.md](npu/LLAMA_ROOFLINE_PROFILE.md)  
-  LLaMA projection / FFN GEMM 的 roofline profile。
+- [npu/PROGRESSIVE_BFP_ARRAY_DESIGN_AND_EXPERIMENTS.md](npu/PROGRESSIVE_BFP_ARRAY_DESIGN_AND_EXPERIMENTS.md)
+  BFP 阵列、PE 数据通路、service-window 和 array-level 实验设计。
 
 ## Results
 
-- [results/GRAPH_BFP_PROGRESSIVE_REFINEMENT_RESULT.md](results/GRAPH_BFP_PROGRESSIVE_REFINEMENT_RESULT.md)  
-  Cora/PubMed LLaMA-7B BFPA4/BFPA6/BFPA8 progressive refinement 主结果。
+- [results/FINAL_BFP_VALIDATION_RESULT.md](results/FINAL_BFP_VALIDATION_RESULT.md)
+  BFPA safety boundary、graph-aware refinement 和 full-stack dynamic BFP 收束结果。
 
-- [results/RESIDUAL_GATE_GRAPHBIT_NPU_PROGRESS.md](results/RESIDUAL_GATE_GRAPHBIT_NPU_PROGRESS.md)  
-  Residual-Gate 和 BFP NPU 技术进展说明。
+- [results/UNIFIED_FRONTEND_POLICY_RESULT.md](results/UNIFIED_FRONTEND_POLICY_RESULT.md)
+  Cora/PubMed/Arxiv 的统一前端 policy register。
 
-- [results/SHARED_ONLINE_RESIDUAL_REUSE_RESULT.md](results/SHARED_ONLINE_RESIDUAL_REUSE_RESULT.md)  
-  Cora/PubMed 共享在线 residual reuse 配置。
-
-- [results/ST_LLAMA_T31_SHARED_RETRIEVAL_RESULT.md](results/ST_LLAMA_T31_SHARED_RETRIEVAL_RESULT.md)  
-  ST/LLaMA T31 shared retrieval 的历史对照和 target 对齐说明。
+- [results/GRAPH_BIT_MAIN_RESULTS.md](results/GRAPH_BIT_MAIN_RESULTS.md)
+  当前端到端主结果入口。
 
 ## Survey
 
-- [survey/LLM_ACCELERATOR_SURVEY.md](survey/LLM_ACCELERATOR_SURVEY.md)  
+- [survey/LLM_ACCELERATOR_SURVEY.md](survey/LLM_ACCELERATOR_SURVEY.md)
   Encoder / 通用 Transformer / NPU 加速器综述。
 
-- [survey/LLM_DECODER_ACCELERATOR_SURVEY.md](survey/LLM_DECODER_ACCELERATOR_SURVEY.md)  
+- [survey/LLM_DECODER_ACCELERATOR_SURVEY.md](survey/LLM_DECODER_ACCELERATOR_SURVEY.md)
   Decoder / serving / KV-cache 加速器综述。
 
 ## Tools
 
-- [ONNXIM_PROJECT_GUIDE.md](../ONNXim/ONNXIM_PROJECT_GUIDE.md)  
+- [ONNXIM_PROJECT_GUIDE.md](../ONNXim/ONNXIM_PROJECT_GUIDE.md)
   ONNXim 项目功能、模块和仿真流程说明。
 
-- [量化+哈希命令.md](tools/量化+哈希命令.md)  
+- [量化+哈希命令.md](tools/量化+哈希命令.md)
   常用量化与哈希实验命令。
 
 ## Archive
@@ -88,8 +82,8 @@ old Graph-Bit trace replay
 
 ## Planning
 
-- [PROJECT_ROADMAP.md](PROJECT_ROADMAP.md)  
+- [PROJECT_ROADMAP.md](PROJECT_ROADMAP.md)
   当前论文逻辑、实验路线和文档组织。
 
-- [PROJECT_TODO.md](PROJECT_TODO.md)  
+- [PROJECT_TODO.md](PROJECT_TODO.md)
   当前缺口和下一步实验。

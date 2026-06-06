@@ -1,31 +1,17 @@
 # Results Documentation
 
-当前结果文档只保留与论文主线直接相关的内容。
+当前目录只保留与论文主线直接相关的结果入口。阶段性 sweep、历史 target 对齐、旧 dynamic/full-stack 拆分结果已移到 `docs/archive/results/`。
 
 ## Main Results
 
-- [GRAPH_BFP_PROGRESSIVE_REFINEMENT_RESULT.md](GRAPH_BFP_PROGRESSIVE_REFINEMENT_RESULT.md)  
-  Cora/PubMed LLaMA-7B BFPA4/BFPA6/BFPA8 progressive refinement 主表。
+- [FINAL_BFP_VALIDATION_RESULT.md](FINAL_BFP_VALIDATION_RESULT.md)
+  当前后端 BFP 主线的收束结果：BFPA safety boundary、graph-aware refinement、full-stack dynamic BFP。
 
-- [UNIFIED_FRONTEND_POLICY_RESULT.md](UNIFIED_FRONTEND_POLICY_RESULT.md)  
+- [UNIFIED_FRONTEND_POLICY_RESULT.md](UNIFIED_FRONTEND_POLICY_RESULT.md)
   固定在线控制流下的 dataset-level `T` policy register 收敛结果，包含 Cora/PubMed/Arxiv 当前主线参数。
 
-- [DYNAMIC_BFP_FULLSTACK_RESULT.md](DYNAMIC_BFP_FULLSTACK_RESULT.md)  
-  当前最终 full-stack 入口：SimHash/residual 前端 + graph-aware dynamic BFPA4/BFPA6 miss-node encoder。
-
-- [GRAPH_BIT_MAIN_RESULTS.md](GRAPH_BIT_MAIN_RESULTS.md)  
+- [GRAPH_BIT_MAIN_RESULTS.md](GRAPH_BIT_MAIN_RESULTS.md)
   当前端到端主结果入口：front-end reuse、residual-gate、BFP miss-node path。
-
-- [RESIDUAL_GATE_GRAPHBIT_NPU_PROGRESS.md](RESIDUAL_GATE_GRAPHBIT_NPU_PROGRESS.md)  
-  技术进展说明：Residual-Gate 和 BFP NPU 当前状态。
-
-## Front-End Results
-
-- [SHARED_ONLINE_RESIDUAL_REUSE_RESULT.md](SHARED_ONLINE_RESIDUAL_REUSE_RESULT.md)  
-  共享在线 residual reuse 配置和 ST Cora/PubMed 结果。
-
-- [ST_LLAMA_T31_SHARED_RETRIEVAL_RESULT.md](ST_LLAMA_T31_SHARED_RETRIEVAL_RESULT.md)  
-  ST/LLaMA T31 shared retrieval 历史结果和 target 对齐说明。
 
 ## Archived Results
 
@@ -35,4 +21,8 @@
 docs/archive/results/GRAPH_BIT_TILE_BOUND_NUMERIC_VALIDATION.md
 docs/archive/results/GRAPH_BIT_TILE_SCORE_V2_VALIDATION.md
 docs/archive/results/GRAPH_BIT_VALIDATION_SUMMARY.md
+docs/archive/results/GRAPH_BFP_PROGRESSIVE_REFINEMENT_RESULT.md
+docs/archive/results/DYNAMIC_BFP_FULLSTACK_RESULT.md
+docs/archive/results/SHARED_ONLINE_RESIDUAL_REUSE_RESULT.md
+docs/archive/results/ST_LLAMA_T31_SHARED_RETRIEVAL_RESULT.md
 ```

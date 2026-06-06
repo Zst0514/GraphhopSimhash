@@ -260,7 +260,7 @@ BFPA4 和 BFPA6 共享同一份 W4 tile，不需要加载另一套权重。
 结果文档：
 
 ```text
-docs/results/BFP_ACTIVATION_STRESS_TRACE_RESULT.md
+docs/archive/results/BFP_ACTIVATION_STRESS_TRACE_RESULT.md
 ```
 
 ### 6.1 Signal Validation

@@ -275,7 +275,7 @@ gate_accept_threshold = 0.575
 | Cora | 46.5% | 0.93% |
 | PubMed | 42.3% | 1.96% |
 
-See `docs/results/SHARED_ONLINE_RESIDUAL_REUSE_RESULT.md`.
+See `docs/archive/results/SHARED_ONLINE_RESIDUAL_REUSE_RESULT.md`.
 
 For Cora/LLaMA, the learned-gate front-end has now been adapted to W4A8 LLaMA embeddings:
 

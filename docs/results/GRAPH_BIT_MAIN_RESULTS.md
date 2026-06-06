@@ -93,10 +93,10 @@ Recommended result:
 | Cora | 30% BFPA6 + 70% BFPA4 | TSER | 0.319 | 0.49% |
 | PubMed | 30% BFPA6 + 70% BFPA4 | Degree | 0.319 | 0.54% |
 
-Detailed table:
+Historical detailed sweep:
 
 ```text
-docs/results/GRAPH_BFP_PROGRESSIVE_REFINEMENT_RESULT.md
+docs/archive/results/GRAPH_BFP_PROGRESSIVE_REFINEMENT_RESULT.md
 ```
 
 ---

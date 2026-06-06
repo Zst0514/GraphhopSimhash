@@ -733,7 +733,7 @@ h8_64_T40 maxDrop = 2.70%
 远端 `origin/main` 新增了一套 residual MLP + learned accept gate，实现文档见：
 
 ```text
-docs/results/SHARED_ONLINE_RESIDUAL_REUSE_RESULT.md
+docs/archive/results/SHARED_ONLINE_RESIDUAL_REUSE_RESULT.md
 ```
 
 这组实验的关键变化是：在线控制流仍然共享，但 residual 路径内部多了一个 learned accept/reject gate。

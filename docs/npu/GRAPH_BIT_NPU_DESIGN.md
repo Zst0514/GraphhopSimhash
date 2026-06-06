@@ -173,7 +173,7 @@ PubMed:
 更完整结果见：
 
 ```text
-docs/results/GRAPH_BFP_PROGRESSIVE_REFINEMENT_RESULT.md
+docs/archive/results/GRAPH_BFP_PROGRESSIVE_REFINEMENT_RESULT.md
 ```
 
 ---
@@ -281,9 +281,8 @@ graph task risk controls both reuse safety and miss-node encoder precision.
 docs/core/SCORE_DEFINITIONS.md
 docs/core/CAM设计.md
 docs/core/RESIDUAL_CORRECTED_REUSE.md
-docs/results/GRAPH_BFP_PROGRESSIVE_REFINEMENT_RESULT.md
-docs/npu/PROGRESSIVE_BFP_ENCODER_INTERFACE.md
-docs/npu/BFP_ACTIVATION_FORMAT.md
-docs/npu/GRAPH_BIT_SYSTOLIC_FLASH_DATAFLOW.md
-docs/npu/LLAMA_ROOFLINE_PROFILE.md
+docs/results/FINAL_BFP_VALIDATION_RESULT.md
+docs/results/UNIFIED_FRONTEND_POLICY_RESULT.md
+docs/npu/GRAPH_AWARE_DYNAMIC_BFP_REFINEMENT_NPU.md
+docs/npu/PROGRESSIVE_BFP_ARRAY_DESIGN_AND_EXPERIMENTS.md
 ```

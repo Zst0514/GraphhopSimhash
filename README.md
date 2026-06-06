@@ -62,8 +62,8 @@ Detailed results and commands are in:
 
 ```text
 docs/results/GRAPH_BIT_MAIN_RESULTS.md
-docs/results/SHARED_ONLINE_RESIDUAL_REUSE_RESULT.md
-docs/results/ST_LLAMA_T31_SHARED_RETRIEVAL_RESULT.md
+docs/results/UNIFIED_FRONTEND_POLICY_RESULT.md
+docs/results/FINAL_BFP_VALIDATION_RESULT.md
 ```
 
 ## Graph-Bit NPU
@@ -106,10 +106,8 @@ Main NPU docs:
 
 ```text
 docs/npu/GRAPH_BIT_NPU_DESIGN.md
-docs/npu/GRAPH_BIT_SYSTOLIC_FLASH_DATAFLOW.md
-docs/npu/GRAPH_BIT_EARLY_STOP_IMPLEMENTATION.md
-docs/npu/GRAPH_BIT_FULLSTACK_REPRODUCTION_GUIDE.md
-docs/npu/LLAMA_ROOFLINE_PROFILE.md
+docs/npu/GRAPH_AWARE_DYNAMIC_BFP_REFINEMENT_NPU.md
+docs/npu/PROGRESSIVE_BFP_ARRAY_DESIGN_AND_EXPERIMENTS.md
 ```
 
 ## Repository Layout
@@ -243,8 +241,8 @@ python -m GraphhopSimhash \
 Full command variants are kept in:
 
 ```text
-docs/npu/GRAPH_BIT_FULLSTACK_REPRODUCTION_GUIDE.md
-docs/results/SHARED_ONLINE_RESIDUAL_REUSE_RESULT.md
+docs/results/UNIFIED_FRONTEND_POLICY_RESULT.md
+docs/results/FINAL_BFP_VALIDATION_RESULT.md
 docs/tools/量化+哈希命令.md
 ```
 

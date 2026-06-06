@@ -11,8 +11,8 @@ docs/core/SCORE_DEFINITIONS.md
 docs/core/CAM设计.md
 docs/core/RESIDUAL_CORRECTED_REUSE.md
 docs/npu/GRAPH_BIT_NPU_DESIGN.md
-docs/npu/BFP_ACTIVATION_FORMAT.md
-docs/results/GRAPH_BFP_PROGRESSIVE_REFINEMENT_RESULT.md
+docs/archive/npu/BFP_ACTIVATION_FORMAT.md
+docs/archive/results/GRAPH_BFP_PROGRESSIVE_REFINEMENT_RESULT.md
 docs/results/GRAPH_BIT_MAIN_RESULTS.md
 ```
 

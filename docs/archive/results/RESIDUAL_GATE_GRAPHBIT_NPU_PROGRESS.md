@@ -128,7 +128,7 @@ remaining nodes -> BFPA4
 更完整 sweep 见：
 
 ```text
-docs/results/GRAPH_BFP_PROGRESSIVE_REFINEMENT_RESULT.md
+docs/archive/results/GRAPH_BFP_PROGRESSIVE_REFINEMENT_RESULT.md
 ```
 
 ---

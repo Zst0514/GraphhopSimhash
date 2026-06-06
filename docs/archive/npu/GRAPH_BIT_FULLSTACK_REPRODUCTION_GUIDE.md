@@ -21,7 +21,7 @@ docs/archive/npu/GRAPH_BIT_EARLY_STOP_IMPLEMENTATION.md
 
 ## 0. 固定 T31 前端的 nodewise bound sweep
 
-`docs/results/ST_LLAMA_T31_SHARED_RETRIEVAL_RESULT.md` 记录了当前 T31 共享检索骨架。Graph-Bit 的 bound policy sweep 应固定这套在线前端，只改变 miss nodes 进入 NPU 后的逐节点 bound 参数。
+`docs/archive/results/ST_LLAMA_T31_SHARED_RETRIEVAL_RESULT.md` 记录了当前 T31 共享检索骨架。Graph-Bit 的 bound policy sweep 应固定这套在线前端，只改变 miss nodes 进入 NPU 后的逐节点 bound 参数。
 
 固定前端：
 
