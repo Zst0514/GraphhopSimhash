@@ -12,6 +12,7 @@ Usage:
 Optional environment variables:
   REMOTE=origin          Git remote to push to.
   BRANCH=<branch-name>   Branch to push. Defaults to current branch.
+  SKIP_REBASE=1          Skip fetch + pull --rebase. Use only when intentional.
 
 Examples:
   ./push.sh "docs: update graphbit notes"
@@ -87,11 +88,32 @@ git status --short
 
 git add -A
 
+if git diff --cached --name-only | grep -Ei '^CAM_sim/.*\.pdf$' >/dev/null; then
+  echo "[Error] Refusing to commit PDF files under CAM_sim/." >&2
+  echo "Remove them first, or keep PDFs outside the git-tracked CAM_sim tree." >&2
+  git diff --cached --name-only | grep -Ei '^CAM_sim/.*\.pdf$' >&2
+  exit 1
+fi
+
 if git diff --cached --quiet; then
   echo "[Git] No staged changes. Pushing existing local commits, if any."
 else
+  echo "[Git] diff --check"
+  git diff --check --cached
   echo "[Git] commit: ${COMMIT_MSG}"
   git commit -m "${COMMIT_MSG}"
+fi
+
+if [[ "${SKIP_REBASE:-0}" != "1" ]]; then
+  echo "[Git] fetch ${REMOTE} ${BRANCH}"
+  git fetch "${REMOTE}" "${BRANCH}"
+
+  if git show-ref --verify --quiet "refs/remotes/${REMOTE}/${BRANCH}"; then
+    echo "[Git] pull --rebase --autostash ${REMOTE} ${BRANCH}"
+    git pull --rebase --autostash "${REMOTE}" "${BRANCH}"
+  else
+    echo "[Git] No remote tracking ref ${REMOTE}/${BRANCH}; first push may create it."
+  fi
 fi
 
 echo "[Git] push ${REMOTE} ${BRANCH}"
