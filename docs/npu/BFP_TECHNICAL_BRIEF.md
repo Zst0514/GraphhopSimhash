@@ -320,11 +320,10 @@ final:
 
 因此不需要两套完整阵列。阵列默认跑 BFPA4；只有被选中的 block 才进入 refinement lane。
 
-### 7.1 不是保存 BFPA4 embedding
+### 7.1 GEMM tile partial sum层面追加低位贡献
 
-`execute extra BFPA6 planes` 不是先生成 BFPA4 embedding，再决定是否重新生成 BFPA6 embedding。那样会重复运行 encoder，也需要保存大量中间 embedding。
 
-正确实现是在同一个 GEMM tile 的 partial sum 层面追加低位贡献。
+具体实现是：在同一个 GEMM tile 的 partial sum 层面追加低位贡献。
 
 把 BFPA6 activation mantissa 拆成：
 
@@ -358,7 +357,7 @@ if priority >= threshold:
 write output tile
 ```
 
-因此需要保存的是 tile-level `psum buffer`，不是 node-level BFPA4 embedding。`psum buffer` 是 GEMM 的正常组成部分；dynamic refinement 只是让它支持可选追加低 2-bit mantissa plane 的贡献。
+因此需要保存的是 tile-level `psum buffer`，dynamic refinement 只是让它支持可选追加低 2-bit mantissa plane 的贡献。
 
 ### 7.2 对执行周期的影响
 
