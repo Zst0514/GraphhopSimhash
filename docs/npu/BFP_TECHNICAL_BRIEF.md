@@ -162,6 +162,20 @@ a_int = round(a_fp / scale)
 a_fp  ~= a_int * scale
 ```
 
+4-bit 定点 activation 的可表示值是一组固定间隔的网格：
+
+```text
+..., -2*scale, -1*scale, 0, 1*scale, 2*scale, ...
+```
+
+如果 group 内最大值很大，为了避免溢出，scale 必须变大：
+
+```text
+scale >= max_abs / 7      # signed 4-bit 大致只能表示 -8..7
+```
+
+scale 一旦变大，网格间隔也变大，小值会被舍入到 0 或少数几个粗粒度刻度。
+
 当 group 内同时有 outlier 和小值时：
 
 ```text
@@ -169,7 +183,19 @@ a_fp  ~= a_int * scale
 小值需要更小 scale 才不被压扁。
 ```
 
-同一个定点 scale 很难同时照顾二者。因此普通 A4 成本低，但动态范围损失明显。
+举例：
+
+```text
+group = [128, 1]
+
+为了表示 128:
+    scale ~= 128 / 7 = 18.3
+
+那么 1 会被量化为:
+    round(1 / 18.3) = 0
+```
+
+此时普通 A4 保住了大值，但小值直接消失。同一个定点 scale 很难同时照顾大值和小值，因此普通 A4 成本低，但动态范围损失明显。
 
 ### 4.3 为什么 W4BFPA4 是合适的 base path
 
@@ -182,6 +208,14 @@ shared exponent:
 4-bit mantissa:
     表达 block 内相对数值。
 ```
+
+BFP 的 shared exponent 相当于先把整个 block 移到合适的数量级，再用 mantissa 表示相对大小。它不是用一个线性 scale 直接覆盖完整动态范围，而是用指数项表达数量级：
+
+```text
+a_fp ~= mantissa * 2^{E_block}
+```
+
+因此当 block 内数值跨越较大数量级时，BFP 至少能显式记录这个 block 的 exponent；普通 A4 则只能把所有数挤到一个固定 scale 网格里。
 
 所以 `W4BFPA4` 的定位是：
 
