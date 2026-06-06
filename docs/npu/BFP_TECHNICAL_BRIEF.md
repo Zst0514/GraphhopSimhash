@@ -538,33 +538,95 @@ docs/results/FINAL_BFP_VALIDATION_RESULT.md
 ```
 
 
-### 10.2 BFPA4 -> BFPA6 refinement
+### 10.2 Graph×Stress block-level threshold policy
 
-该实验固定：
+当前 dynamic BFP 主机制不是 top-ratio node selection，而是 block-level threshold policy：
 
 ```text
-base   = BFPA4
-refine = BFPA6
+for each activation block:
+    priority = graph_risk(node) * activation_stress(block)
+
+    if priority >= threshold:
+        BFPA4 -> BFPA6 refinement
+    else:
+        keep BFPA4
 ```
 
-在不同 refinement ratio 下比较 `Random / Stress / Degree / TSER / Graph×Stress` 等 selector。
+其中：
 
-| Dataset | BFPA4 Drop | BFPA6 Drop | Representative Best |
-|---|---:|---:|---|
-| Cora | 0.99% | 0.09% | 25% Degree: 0.59% |
-| PubMed | 1.16% | 0.02% | 25% TSER: 0.55% |
-| Arxiv | 0.06% | 0.03% | BFPA4 already safe |
+```text
+graph_risk(node):
+    节点在图任务中的传播风险。
+
+activation_stress(block):
+    当前 activation block 的 shared-exponent 数值压力。
+
+threshold:
+    控制 block 是否追加 BFPA6 refinement。
+```
+
+当前默认 dynamic pool 使用：
+
+```text
+base      = BFPA4
+refine    = BFPA6
+block     = rowwise 1 x 128
+priority  = graph_risk * activation_stress
+threshold = 0.20
+```
+
+对应 tag：
+
+```text
+W4GraphBFPA4to6_B128_deg_t0.20
+```
+
+### 10.2.1 Cora threshold check
+
+Cora 上的 threshold 对比：
+
+| Policy | Refined Blocks | Baseline Acc | Dynamic Acc | Dynamic Drop |
+|---|---:|---:|---:|---:|
+| threshold = 0.35 | 3.82% | 0.7007 | 0.6928 | 0.79% |
+| threshold = 0.20 | 20.79% | 0.7007 | 0.6983 | 0.24% |
 
 结论：
 
 ```text
-Cora / PubMed:
-    BFPA4 有可恢复的精度损失；
-    对部分 block 追加 BFPA6 能降低 drop。
+threshold = 0.35:
+    refine block 太少，精度恢复有限。
 
-PubMed:
-    TSER selector 最稳定，说明图语义风险对 refinement 选择有价值。
+threshold = 0.20:
+    refine 约 20.8% activation blocks，
+    dynamic drop 降到 0.24%，
+    平均 mantissa bits 约 4.416。
+```
 
-Arxiv:
-    BFPA4 已经足够安全，dynamic refinement 的收益很小。
+### 10.2.2 Array trace
+
+array trace 统计的是 dynamic BFP pool 中真实被 refine 的 activation blocks，以及由此得到的 mantissa-bit activity。它不是 GPU wall-clock，也不是 RTL cycle-accurate full-system simulation。
+
+| Dataset | Refined Blocks | Effective Bits | Dynamic/BFPA4 | Dynamic/BFPA6 | Dynamic/BFPA8 |
+|---|---:|---:|---:|---:|---:|
+| Cora | 20.79% | 4.416 | 1.102x | 0.735x | 0.551x |
+| PubMed | 13.88% | 4.278 | 1.070x | 0.713x | 0.535x |
+| Arxiv | 21.46% | 4.429 | 1.105x | 0.737x | 0.553x |
+
+含义：
+
+```text
+Refined Blocks:
+    被 threshold 选中、从 BFPA4 追加到 BFPA6 的 block 比例。
+
+Effective Bits:
+    平均实际执行 mantissa bits，约等于 4 + 2 * refined_ratio。
+
+Dynamic/BFPA4:
+    相对全 BFPA4 的 array mantissa-plane activity。
+
+Dynamic/BFPA6:
+    相对全 BFPA6 的 array mantissa-plane activity。
+
+Dynamic/BFPA8:
+    相对全 BFPA8 的 array mantissa-plane activity。
 ```
