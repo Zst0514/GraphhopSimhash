@@ -403,8 +403,6 @@ avg_bits = 4 + 2 * r
 avg_bits = 4 + 2 * 0.2 = 4.4
 ```
 
-这意味着 dynamic path 不是在 BFPA4 和 BFPA6 之间频繁切换两套阵列，而是在同一条 BFP datapath 上对少量 block 多发射两个 mantissa-plane cycles。
-
 ### 7.3 控制与调度代价
 
 该机制的额外硬件代价包括：
@@ -539,28 +537,6 @@ Graph-aware BFPA4-to-BFPA6 refinement:
 docs/results/FINAL_BFP_VALIDATION_RESULT.md
 ```
 
-### 10.1 BFPA safety boundary
-
-该实验只比较 encoder target pool，不接入 reuse / residual 前端。reference 为 `W4BFPA8_B128`。
-
-| Dataset | Runs | BFPA6 Drop | BFPA5 Drop | BFPA4 Drop | BFPA3 Drop |
-|---|---:|---:|---:|---:|---:|
-| Cora | 5 | 0.09% | 0.35% | 0.99% | 23.13% |
-| PubMed | 3 | 0.02% | 0.25% | 1.16% | 27.43% |
-| Arxiv | 1 | 0.03% | 0.13% | 0.04% | 35.31% |
-
-结论：
-
-```text
-BFPA6 / BFPA5:
-    基本接近 BFPA8。
-
-BFPA4:
-    Cora/PubMed 有约 1% 级别掉点，Arxiv 几乎无损。
-
-BFPA3:
-    三个数据集均明显崩塌，不作为默认路径。
-```
 
 ### 10.2 BFPA4 -> BFPA6 refinement
 
