@@ -581,28 +581,55 @@ threshold = 0.20
 W4GraphBFPA4to6_B128_deg_t0.20
 ```
 
-### 10.2.1 Cora threshold check
+### 10.2.1 No-refinement BFPA4 baseline
 
-Cora 上的 threshold 对比：
+先看不做 refinement 时，`BFPA4` 相对 `BFPA8` reference 的 encoder-only 精度损失：
 
-| Policy | Refined Blocks | Baseline Acc | Dynamic Acc | Dynamic Drop |
-|---|---:|---:|---:|---:|
-| threshold = 0.35 | 3.82% | 0.7007 | 0.6928 | 0.79% |
-| threshold = 0.20 | 20.79% | 0.7007 | 0.6983 | 0.24% |
+| Dataset | BFPA8 Acc | BFPA4 Acc | BFPA4 Drop |
+|---|---:|---:|---:|
+| Cora | 0.7106 | 0.7008 | 0.99% |
+| PubMed | 0.7521 | 0.7405 | 1.16% |
+| Arxiv | 0.6892 | 0.6888 | 0.04% |
+
+含义：
+
+```text
+BFPA4 是 no-refinement base path。
+Cora / PubMed 上 BFPA4 有约 1% 级别 drop，
+因此有必要用少量 BFPA6 refinement 回收精度。
+Arxiv 上 BFPA4 已经接近 BFPA8，refinement 空间较小。
+```
+
+### 10.2.2 Threshold check
+
+已归档的 block-level threshold 结果如下：
+
+| Dataset | Policy | Refined Blocks | Reference Acc | Dynamic Acc | Dynamic Drop |
+|---|---|---:|---:|---:|---:|
+| Cora | threshold = 0.35 | 3.82% | 0.7007 | 0.6928 | 0.79% |
+| Cora | threshold = 0.20 | 20.79% | 0.7007 | 0.6983 | 0.24% |
+| PubMed | threshold = 0.20 | 13.88% | 0.7521 | 0.7290 | 2.31% |
 
 结论：
 
 ```text
-threshold = 0.35:
+Cora threshold = 0.35:
     refine block 太少，精度恢复有限。
 
-threshold = 0.20:
+Cora threshold = 0.20:
     refine 约 20.8% activation blocks，
     dynamic drop 降到 0.24%，
     平均 mantissa bits 约 4.416。
+
+PubMed threshold = 0.20:
+    refine 约 13.9% activation blocks；
+    这里的 2.31% 是 full-stack drop，
+    包含 SimHash / residual 前端误差和 dynamic BFP 后端误差。
 ```
 
-### 10.2.2 Array trace
+PubMed 的 no-refinement full-stack `AllP4` drop 是 `2.42%`，因此 `threshold=0.20` dynamic path 在当前 full-stack 设置下把 drop 降到 `2.31%`。
+
+### 10.2.3 Array trace
 
 array trace 统计的是 dynamic BFP pool 中真实被 refine 的 activation blocks.
 
