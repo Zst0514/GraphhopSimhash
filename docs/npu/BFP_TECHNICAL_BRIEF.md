@@ -122,6 +122,27 @@ B128:
     128 activation values share one exponent
 ```
 
+当前 `B128` 下的 mantissa bit sanity check 如下。该表只比较 encoder target pool 本身，不叠加 SimHash / residual 前端；reference 是 `W4BFPA8_B128`。
+
+| Dataset | Runs | BFPA5 Drop | BFPA4 Drop | BFPA3 Drop |
+|---|---:|---:|---:|---:|
+| Cora | 5 | 0.35% | 0.99% | 23.13% |
+| PubMed | 3 | 0.25% | 1.16% | 27.43% |
+| Arxiv | 1 | 0.13% | 0.04% | 35.31% |
+
+这组结果说明：
+
+```text
+BFPA5:
+    仍很稳。
+
+BFPA4:
+    Cora/PubMed 有可见但可控掉点，Arxiv 几乎无损。
+
+BFPA3:
+    三个数据集都明显崩塌，不适合作为默认路径。
+```
+
 ## 4. 为什么选择 W4BFPA 而不是普通 W4A8 / W4A4
 
 后端 miss-node encoder 的目标是在前端 reuse/residual 之后，用更低成本计算剩余必须进入 LLaMA encoder 的节点。
