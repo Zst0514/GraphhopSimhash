@@ -124,15 +124,18 @@ B128:
 
 当前 `B128` 下的 mantissa bit sanity check 如下。该表只比较 encoder target pool 本身，不叠加 SimHash / residual 前端；reference 是 `W4BFPA8_B128`。
 
-| Dataset | Runs | BFPA5 Drop | BFPA4 Drop | BFPA3 Drop |
-|---|---:|---:|---:|---:|
-| Cora | 5 | 0.35% | 0.99% | 23.13% |
-| PubMed | 3 | 0.25% | 1.16% | 27.43% |
-| Arxiv | 1 | 0.13% | 0.04% | 35.31% |
+| Dataset | Runs | BFPA6 Drop | BFPA5 Drop | BFPA4 Drop | BFPA3 Drop |
+|---|---:|---:|---:|---:|---:|
+| Cora | 5 | 0.09% | 0.35% | 0.99% | 23.13% |
+| PubMed | 3 | 0.02% | 0.25% | 1.16% | 27.43% |
+| Arxiv | 1 | 0.03% | 0.13% | 0.04% | 35.31% |
 
 这组结果说明：
 
 ```text
+BFPA6:
+    基本接近 BFPA8。
+
 BFPA5:
     仍很稳。
 
