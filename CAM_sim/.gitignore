@@ -5,11 +5,8 @@ reports/
 traces/*.trace
 *.decisions.csv
 
-# Local exported PDFs.
-# Keep the curated paper library versionable.
+# Local exported PDFs / paper copies.
 *.pdf
-!docs/paper/*.pdf
-!docs/paper/**/*.pdf
 
 # Python caches
 __pycache__/
