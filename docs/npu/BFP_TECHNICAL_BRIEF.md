@@ -166,7 +166,7 @@ W4BFPA4:
 
 ### 4.1 为什么不直接用 W4A8
 
-W4A8 是保守 baseline。它通常精度稳，但 activation 侧仍按 8-bit 计算和搬运：
+W4A8 是保守 baseline。它通常精度稳，但 activation 侧仍按 8-bit 计算：
 
 ```text
 1. activation-side MAC 位宽仍高。
