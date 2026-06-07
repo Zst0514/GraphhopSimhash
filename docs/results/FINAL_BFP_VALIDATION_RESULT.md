@@ -158,23 +158,23 @@ output/dynamic_bfp_fullstack/{dataset}_T*_W4GraphBFPA4to6_B128_deg_t0.20_runs*/
 
 | Dataset | Runs | FullP8 Acc | BFPA6 Drop | BFPA5 Drop | BFPA4 Drop | BFPA3 Drop |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| Cora | 5 | 0.7106 | 0.09% | 0.35% | 0.99% | 23.13% |
-| PubMed | 3 | 0.7522 | 0.02% | 0.25% | 1.16% | 27.43% |
-| Arxiv | 1 | 0.6896 | 0.03% | 0.13% | 0.04% | 35.31% |
+| Cora | 10 | 0.7141 | 0.08% | 0.24% | 0.97% | 25.03% |
+| PubMed | 10 | 0.7494 | 0.04% | 0.23% | 1.17% | 27.06% |
+| Arxiv | 10 | 0.6688 | 0.09% | 0.02% | 0.29% | 21.35% |
 
 结论：
 
 ```text
 BFPA6 基本贴近 BFPA8；
 BFPA5 仍很稳；
-BFPA4 在 Cora/PubMed 上有可见但可控掉点，在 Arxiv 上几乎无损；
+BFPA4 在三个数据集上均处于可控掉点范围，其中 Cora/PubMed 约 1%，Arxiv 约 0.3%；
 BFPA3 在三个数据集上都明显崩塌，不适合作为默认路径。
 ```
 
 对应日志：
 
 ```text
-output/final_bfp_validation/boundary/{dataset}/bfpa8_vs_p{6,5,4,3}_runs*.log
+output/final_bfp_validation_runs10/boundary/{dataset}/bfpa8_vs_p{6,5,4,3}_runs10.log
 ```
 
 ## 6. Refinement Necessity Summary
