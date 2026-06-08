@@ -2,6 +2,12 @@
 
 本文档说明 `BFPA4 base + optional BFPA6 refinement` 在硬件阵列内部如何执行。重点是 block-level `refine_flag`、partial-sum 追加、refinement queue 和两阶段调度。
 
+![Dynamic BFPA4-to-BFPA6 block refinement execution](../figures/dynamic_bfp_block_refinement_execution.svg)
+
+The following PE-level execution figure expands the bit dispatcher, issue bitmap, systolic-array cycles, shift-accumulate unit, RefineQueue, and psum update path:
+
+![Dynamic BFP PE bit dispatch](../figures/dynamic_bfp_pe_bit_dispatch.svg)
+
 ## 1. 目标
 
 后端 miss-node encoder 不直接使用统一 W4A8，也不把所有节点固定成同一低位宽。当前主线采用：
@@ -81,13 +87,15 @@ activation_stress:
 
 ## 3. Mantissa Split
 
-BFPA6 mantissa 可以拆成 base 4-bit 和 extra 2-bit：
+BFPA6 mantissa 可以拆成 high-4 base 和 low-2 refinement。这里采用对齐表示，使 BFPA4 是 BFPA6 的高 4 位近似：
 
 ```text
-A6_mantissa = [m5 m4 m3 m2 m1 m0]
+A6_mantissa = q6 = [b5 b4 b3 b2 b1 b0]
 
-A4_base     = [      m3 m2 m1 m0]
-A2_extra    = [m5 m4            ]
+A4_base     = q4 = [b5 b4 b3 b2] = q6 >> 2
+A2_extra    = q2 = [b1 b0]       = q6 & 0b11
+
+q6 = (q4 << 2) + q2
 ```
 
 GEMM 可以写成：
@@ -95,8 +103,8 @@ GEMM 可以写成：
 ```text
 Y = A * W
 
-Y4      = A4_base  * W4
-DeltaY  = A2_extra * W4
+Y4      = (q4 * W4) << 2
+DeltaY  = q2 * W4
 
 Y_dyn =
     Y4                 if refine_flag = 0
@@ -259,10 +267,10 @@ PE 不需要切换成另一套 6-bit 阵列。它只需要支持两类 mantissa-
 
 ```text
 base issue:
-    issue m[3:0] cycles
+    issue high-4 mantissa cycles
 
 refine issue:
-    issue m[5:4] cycles for selected blocks
+    issue low-2 mantissa cycles for selected blocks
 ```
 
 简化 PE 数据流：
@@ -283,10 +291,10 @@ A2_extra ----------+  only if refine_flag = 1
 
 ```text
 BFPA4:
-    4 mantissa-bit work units
+    4 high mantissa-bit work units
 
 BFPA6 refined block:
-    4 base work units + 2 extra work units
+    4 high-bit base work units + 2 low-bit refinement work units
 ```
 
 所以每个 refined block 的额外计算量相对 BFPA4 block 为：
@@ -537,7 +545,7 @@ Dynamic BFPA4-to-BFPA6 refinement 的具体实现是：
 1. 每个 activation block 产生 refine_flag。
 2. 阵列连续执行 BFPA4 base。
 3. selected blocks 被写入 RefineQueue。
-4. refinement phase 对 selected blocks 追加 m[5:4] x W4。
+4. refinement phase 对 selected blocks 追加 low-2 mantissa x W4。
 5. extra contribution 加回 tile-level psum buffer。
 6. 最终输出 tile，不保存或重写整层 embedding。
 ```

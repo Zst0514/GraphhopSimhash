@@ -1,0 +1,177 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="980" viewBox="0 0 1600 980">
+  <defs>
+    <marker id="arrow" markerWidth="10" markerHeight="10" refX="9" refY="3" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L0,6 L9,3 z" fill="#263238"/>
+    </marker>
+    <style>
+      .title { font: 700 30px Arial, sans-serif; fill: #111827; }
+      .subtitle { font: 500 16px Arial, sans-serif; fill: #475467; }
+      .section { font: 700 18px Arial, sans-serif; fill: #111827; }
+      .label { font: 700 15px Arial, sans-serif; fill: #111827; }
+      .txt { font: 500 13px Arial, sans-serif; fill: #344054; }
+      .tiny { font: 500 12px Arial, sans-serif; fill: #475467; }
+      .mono { font: 600 13px "DejaVu Sans Mono", Consolas, monospace; fill: #1f2937; }
+      .box { fill: #ffffff; stroke: #98a2b3; stroke-width: 1.6; rx: 10; }
+      .blue { fill: #eff8ff; stroke: #2e90fa; stroke-width: 1.8; rx: 10; }
+      .green { fill: #ecfdf3; stroke: #12b76a; stroke-width: 1.8; rx: 10; }
+      .orange { fill: #fff6ed; stroke: #f79009; stroke-width: 1.8; rx: 10; }
+      .purple { fill: #f4f3ff; stroke: #7a5af8; stroke-width: 1.8; rx: 10; }
+      .red { fill: #fff1f3; stroke: #f04438; stroke-width: 1.8; rx: 10; }
+      .gray { fill: #f8fafc; stroke: #cbd5e1; stroke-width: 1.4; rx: 8; }
+      .dark { fill: #344054; stroke: #344054; stroke-width: 1; rx: 8; }
+      .arrow { stroke: #263238; stroke-width: 2; fill: none; marker-end: url(#arrow); }
+      .dash { stroke: #7a5af8; stroke-width: 2; fill: none; stroke-dasharray: 7 6; marker-end: url(#arrow); }
+      .line { stroke: #98a2b3; stroke-width: 1.3; fill: none; }
+      .cycle { fill: #eef4ff; stroke: #6172f3; stroke-width: 1.3; rx: 6; }
+      .cycle2 { fill: #fff6ed; stroke: #f79009; stroke-width: 1.3; rx: 6; }
+      .skip { fill: #f2f4f7; stroke: #d0d5dd; stroke-width: 1.2; rx: 6; }
+    </style>
+  </defs>
+
+  <rect width="1600" height="980" fill="#ffffff"/>
+
+  <text x="48" y="52" class="title">Dynamic BFPA4-to-BFPA6 Block Refinement: Exact Execution Schedule</text>
+  <text x="48" y="80" class="subtitle">The array always computes BFPA4 base. Selected blocks enqueue an extra low-2 mantissa update that is accumulated into the same psum tile.</text>
+
+  <!-- Mantissa definition -->
+  <rect x="48" y="112" width="484" height="150" class="blue"/>
+  <text x="70" y="144" class="section">1. Aligned BFP mantissa split</text>
+  <text x="70" y="174" class="mono">q6 = [b5 b4 b3 b2 b1 b0]</text>
+  <text x="70" y="202" class="mono">q4 = [b5 b4 b3 b2] = q6 &gt;&gt; 2</text>
+  <text x="70" y="230" class="mono">q2 = [b1 b0]       = q6 &amp; 0b11</text>
+  <text x="70" y="252" class="txt">BFPA4 uses high-4 bits; BFPA6 adds low-2 refinement bits.</text>
+
+  <rect x="568" y="112" width="492" height="150" class="green"/>
+  <text x="590" y="144" class="section">2. Numeric decomposition</text>
+  <text x="590" y="174" class="mono">q6 = (q4 &lt;&lt; 2) + q2</text>
+  <text x="590" y="202" class="mono">A6 @ W4 = ((q4 @ W4) &lt;&lt; 2) + (q2 @ W4)</text>
+  <text x="590" y="230" class="txt">The shift / BFP exponent is applied consistently at output scaling.</text>
+  <text x="590" y="252" class="txt">No second full array is required.</text>
+
+  <rect x="1098" y="112" width="454" height="150" class="orange"/>
+  <text x="1120" y="144" class="section">3. Block-level decision</text>
+  <text x="1120" y="174" class="mono">priority = graph_risk(node) * activation_stress(block)</text>
+  <text x="1120" y="202" class="mono">refine_flag = priority &gt;= threshold</text>
+  <text x="1120" y="230" class="txt">The flag is stored per activation block, not per full node embedding.</text>
+
+  <!-- Example input blocks -->
+  <text x="48" y="315" class="section">Example tile window: four activation blocks under the same W4 tile</text>
+
+  <rect x="48" y="342" width="330" height="218" class="box"/>
+  <text x="70" y="374" class="label">Block metadata stream</text>
+  <line x1="70" y1="392" x2="354" y2="392" class="line"/>
+
+  <rect x="70" y="412" width="64" height="52" class="purple"/>
+  <text x="88" y="434" class="label">B0</text>
+  <text x="80" y="454" class="tiny">flag=1</text>
+  <rect x="144" y="412" width="64" height="52" class="gray"/>
+  <text x="162" y="434" class="label">B1</text>
+  <text x="154" y="454" class="tiny">flag=0</text>
+  <rect x="218" y="412" width="64" height="52" class="purple"/>
+  <text x="236" y="434" class="label">B2</text>
+  <text x="228" y="454" class="tiny">flag=1</text>
+  <rect x="292" y="412" width="64" height="52" class="gray"/>
+  <text x="310" y="434" class="label">B3</text>
+  <text x="302" y="454" class="tiny">flag=0</text>
+
+  <text x="70" y="500" class="txt">Each block carries:</text>
+  <text x="88" y="525" class="mono">{exponent, stress, graph_risk, refine_flag}</text>
+
+  <!-- W tile -->
+  <rect x="48" y="604" width="330" height="110" class="green"/>
+  <text x="70" y="636" class="label">W4 tile SRAM / RF</text>
+  <text x="70" y="664" class="txt">Loaded once for this tile window</text>
+  <text x="70" y="690" class="txt">Reused by base and refinement phases</text>
+
+  <!-- Base phase -->
+  <rect x="448" y="322" width="554" height="250" class="blue"/>
+  <text x="472" y="356" class="section">Phase 1: BFPA4 base phase, continuous issue</text>
+  <text x="472" y="384" class="txt">All blocks execute high-4 mantissa work. No branch in the main base path.</text>
+
+  <rect x="476" y="420" width="98" height="54" class="cycle"/>
+  <text x="498" y="442" class="label">B0</text>
+  <text x="492" y="462" class="tiny">q4 @ W4</text>
+  <rect x="590" y="420" width="98" height="54" class="cycle"/>
+  <text x="612" y="442" class="label">B1</text>
+  <text x="606" y="462" class="tiny">q4 @ W4</text>
+  <rect x="704" y="420" width="98" height="54" class="cycle"/>
+  <text x="726" y="442" class="label">B2</text>
+  <text x="720" y="462" class="tiny">q4 @ W4</text>
+  <rect x="818" y="420" width="98" height="54" class="cycle"/>
+  <text x="840" y="442" class="label">B3</text>
+  <text x="834" y="462" class="tiny">q4 @ W4</text>
+
+  <text x="472" y="516" class="mono">psum[B_i] = (q4[B_i] @ W4) &lt;&lt; 2</text>
+  <text x="472" y="544" class="txt">If flag=1, push block address into RefineQueue while base phase continues.</text>
+
+  <!-- Refine queue -->
+  <rect x="1062" y="322" width="246" height="250" class="purple"/>
+  <text x="1086" y="356" class="section">RefineQueue</text>
+  <text x="1086" y="384" class="txt">Only selected blocks enter queue.</text>
+  <line x1="1086" y1="402" x2="1282" y2="402" class="line"/>
+  <rect x="1090" y="424" width="190" height="46" class="box"/>
+  <text x="1108" y="452" class="mono">B0: psum_addr0, q2 ptr</text>
+  <rect x="1090" y="486" width="190" height="46" class="box"/>
+  <text x="1108" y="514" class="mono">B2: psum_addr2, q2 ptr</text>
+
+  <!-- Psum buffer -->
+  <rect x="1348" y="322" width="204" height="250" class="orange"/>
+  <text x="1370" y="356" class="section">Psum buffer</text>
+  <text x="1370" y="384" class="txt">Tile-level output psum</text>
+  <line x1="1370" y1="402" x2="1532" y2="402" class="line"/>
+  <text x="1370" y="436" class="mono">psum[B0]</text>
+  <text x="1370" y="466" class="mono">psum[B1]</text>
+  <text x="1370" y="496" class="mono">psum[B2]</text>
+  <text x="1370" y="526" class="mono">psum[B3]</text>
+
+  <!-- Refine phase -->
+  <rect x="448" y="646" width="860" height="206" class="red"/>
+  <text x="472" y="680" class="section">Phase 2: BFPA6 refinement phase, queue-driven issue</text>
+  <text x="472" y="708" class="txt">Only queued blocks execute low-2 mantissa work. Non-selected blocks do not occupy refinement cycles.</text>
+
+  <rect x="476" y="744" width="118" height="54" class="cycle2"/>
+  <text x="506" y="766" class="label">B0</text>
+  <text x="492" y="786" class="tiny">q2 @ W4</text>
+
+  <rect x="618" y="744" width="118" height="54" class="cycle2"/>
+  <text x="648" y="766" class="label">B2</text>
+  <text x="634" y="786" class="tiny">q2 @ W4</text>
+
+  <rect x="760" y="744" width="146" height="54" class="skip"/>
+  <text x="786" y="766" class="label">B1, B3</text>
+  <text x="784" y="786" class="tiny">not queued, skipped</text>
+
+  <text x="472" y="832" class="mono">psum[B0] += q2[B0] @ W4</text>
+  <text x="750" y="832" class="mono">psum[B2] += q2[B2] @ W4</text>
+
+  <!-- Output -->
+  <rect x="1348" y="646" width="204" height="206" class="green"/>
+  <text x="1370" y="680" class="section">Output tile</text>
+  <text x="1370" y="710" class="txt">After optional updates:</text>
+  <line x1="1370" y1="728" x2="1532" y2="728" class="line"/>
+  <text x="1370" y="760" class="mono">B0: BFPA6</text>
+  <text x="1370" y="790" class="mono">B1: BFPA4</text>
+  <text x="1370" y="820" class="mono">B2: BFPA6</text>
+  <text x="1370" y="850" class="mono">B3: BFPA4</text>
+
+  <!-- Arrows -->
+  <path d="M378 450 C410 450 420 448 448 448" class="arrow"/>
+  <path d="M378 660 C410 660 420 650 448 650" class="arrow"/>
+  <path d="M1002 448 C1026 448 1038 448 1062 448" class="dash"/>
+  <path d="M1002 448 C1160 448 1200 430 1348 430" class="arrow"/>
+  <path d="M1002 448 C1160 448 1200 492 1348 492" class="arrow"/>
+  <path d="M1185 572 C1185 612 860 620 618 744" class="dash"/>
+  <path d="M736 772 C984 772 1102 748 1348 748" class="arrow"/>
+  <path d="M594 772 C972 772 1108 735 1348 735" class="arrow"/>
+
+  <path d="M1552 448 C1572 448 1572 748 1552 748" class="arrow"/>
+
+  <!-- Cost notes -->
+  <rect x="48" y="768" width="330" height="122" class="gray"/>
+  <text x="70" y="800" class="section">Cost example</text>
+  <text x="70" y="830" class="mono">refined ratio r = 2 / 4 = 50%</text>
+  <text x="70" y="858" class="mono">avg mantissa bits = 4 + 2r = 5</text>
+  <text x="70" y="884" class="txt">In real Cora trace: r=20.79%, avg bits=4.416.</text>
+
+  <text x="48" y="938" class="tiny">Figure: Precise execution schedule for dynamic BFPA4-to-BFPA6 block refinement. BFPA4 base uses high-4 mantissa bits; BFPA6 refinement adds queued low-2 bits into the same tile psum.</text>
+</svg>

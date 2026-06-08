@@ -333,10 +333,10 @@ for each activation block:
 
 ```text
 BFPA4:
-    compute mantissa bits m[3:0]
+    compute high-4 mantissa bits
 
 BFPA6 refinement:
-    additionally compute mantissa bits m[5:4]
+    additionally compute low-2 mantissa bits
 
 final:
     BFPA6 result = BFPA4 partial sum + extra 2-bit correction partial sum
@@ -415,7 +415,7 @@ avg_bits = 4 + 2 * 0.2 = 4.4
    graph_risk(node) * stress(block) 与 threshold 比较。
 
 3. refinement issue control:
-   对 selected block 额外发射 m[5:4] mantissa-plane cycles。
+   对 selected block 额外发射 low-2 mantissa-plane cycles。
 
 4. psum merge:
    低 2-bit contribution 加到已有 partial sum。

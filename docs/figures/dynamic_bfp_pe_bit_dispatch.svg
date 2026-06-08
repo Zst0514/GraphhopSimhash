@@ -1,0 +1,226 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1700" height="980" viewBox="0 0 1700 980">
+  <defs>
+    <marker id="arrow" markerWidth="10" markerHeight="10" refX="9" refY="3" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L0,6 L9,3 z" fill="#111827"/>
+    </marker>
+    <marker id="arrowBlue" markerWidth="10" markerHeight="10" refX="9" refY="3" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L0,6 L9,3 z" fill="#1d4ed8"/>
+    </marker>
+    <marker id="arrowOrange" markerWidth="10" markerHeight="10" refX="9" refY="3" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L0,6 L9,3 z" fill="#c2410c"/>
+    </marker>
+    <style>
+      .title { font: 700 30px Arial, sans-serif; fill: #111827; }
+      .subtitle { font: 500 16px Arial, sans-serif; fill: #475467; }
+      .label { font: 700 16px Arial, sans-serif; fill: #111827; }
+      .section { font: 700 18px Arial, sans-serif; fill: #111827; }
+      .txt { font: 500 13px Arial, sans-serif; fill: #344054; }
+      .tiny { font: 500 12px Arial, sans-serif; fill: #475467; }
+      .mono { font: 600 13px "DejaVu Sans Mono", Consolas, monospace; fill: #111827; }
+      .monoSmall { font: 600 11px "DejaVu Sans Mono", Consolas, monospace; fill: #111827; }
+      .box { fill: #ffffff; stroke: #111827; stroke-width: 2; rx: 8; }
+      .dashBox { fill: #ffffff; stroke: #1f2937; stroke-width: 2; stroke-dasharray: 8 6; rx: 8; }
+      .ctrl { fill: #fed7aa; stroke: #1e3a8a; stroke-width: 3; rx: 8; }
+      .dispatch { fill: #bfdbfe; stroke: #1e3a8a; stroke-width: 3; rx: 8; }
+      .xcell { fill: #fff7ed; stroke: #111827; stroke-width: 2; }
+      .wcell { fill: #ecfdf3; stroke: #111827; stroke-width: 2; }
+      .cycleBox { fill: #f8fafc; stroke: #1e3a8a; stroke-width: 3; stroke-dasharray: 8 6; rx: 8; }
+      .sa { fill: #fed7aa; stroke: #1e3a8a; stroke-width: 3; }
+      .pe { fill: #fca5a5; stroke: #111827; stroke-width: 2; rx: 5; }
+      .out { fill: #e5e7eb; stroke: #111827; stroke-width: 2; rx: 6; }
+      .su { fill: #d1d5db; stroke: #111827; stroke-width: 2; rx: 6; }
+      .psum { fill: #ede9fe; stroke: #6d28d9; stroke-width: 2; rx: 8; }
+      .queue { fill: #f5f3ff; stroke: #7c3aed; stroke-width: 2; rx: 8; }
+      .baseLine { stroke: #1d4ed8; stroke-width: 3; fill: none; marker-end: url(#arrowBlue); }
+      .refLine { stroke: #c2410c; stroke-width: 3; fill: none; marker-end: url(#arrowOrange); stroke-dasharray: 7 5; }
+      .arrow { stroke: #111827; stroke-width: 2.2; fill: none; marker-end: url(#arrow); }
+      .thin { stroke: #64748b; stroke-width: 1.2; fill: none; }
+      .grid { stroke: #111827; stroke-width: 1.5; fill: none; }
+      .bit0 { fill: #fef3c7; stroke: #111827; stroke-width: 1.5; }
+      .bit1 { fill: #dcfce7; stroke: #111827; stroke-width: 1.5; }
+      .bit2 { fill: #fee2e2; stroke: #111827; stroke-width: 1.5; }
+      .bit3 { fill: #dbeafe; stroke: #111827; stroke-width: 1.5; }
+    </style>
+  </defs>
+
+  <rect width="1700" height="980" fill="#ffffff"/>
+  <text x="48" y="48" class="title">Graph-Aware Dynamic BFP PE: Bit Dispatch and Progressive Refinement</text>
+  <text x="48" y="76" class="subtitle">BFPA4 base executes high-4 mantissa planes for every block; selected blocks enqueue low-2 planes and update the same psum tile.</text>
+
+  <!-- Input X block -->
+  <text x="84" y="155" class="section">X BFP activation block</text>
+  <text x="80" y="188" class="mono">q6 mantissa per value</text>
+  <rect x="80" y="210" width="84" height="58" class="xcell"/>
+  <text x="96" y="236" class="label">45</text>
+  <text x="96" y="256" class="tiny">101101</text>
+  <rect x="164" y="210" width="84" height="58" class="xcell"/>
+  <text x="180" y="236" class="label">41</text>
+  <text x="180" y="256" class="tiny">101001</text>
+  <rect x="80" y="268" width="84" height="58" class="xcell"/>
+  <text x="96" y="294" class="label">26</text>
+  <text x="96" y="314" class="tiny">011010</text>
+  <rect x="164" y="268" width="84" height="58" class="xcell"/>
+  <text x="180" y="294" class="label">12</text>
+  <text x="180" y="314" class="tiny">001100</text>
+
+  <rect x="80" y="355" width="168" height="92" class="dashBox"/>
+  <text x="98" y="383" class="mono">q4 = q6 &gt;&gt; 2</text>
+  <text x="98" y="409" class="mono">q2 = q6 &amp; 3</text>
+  <text x="98" y="433" class="tiny">BFPA4 base + optional extra2</text>
+
+  <!-- Input W block -->
+  <text x="84" y="526" class="section">W tile, fixed W4</text>
+  <rect x="80" y="548" width="84" height="58" class="wcell"/>
+  <text x="96" y="574" class="label">3</text>
+  <text x="96" y="594" class="tiny">0011</text>
+  <rect x="164" y="548" width="84" height="58" class="wcell"/>
+  <text x="180" y="574" class="label">-2</text>
+  <text x="180" y="594" class="tiny">1110</text>
+  <rect x="80" y="606" width="84" height="58" class="wcell"/>
+  <text x="96" y="632" class="label">1</text>
+  <text x="96" y="652" class="tiny">0001</text>
+  <rect x="164" y="606" width="84" height="58" class="wcell"/>
+  <text x="180" y="632" class="label">2</text>
+  <text x="180" y="652" class="tiny">0010</text>
+
+  <!-- Controller and dispatcher -->
+  <rect x="310" y="245" width="70" height="300" class="ctrl"/>
+  <text x="356" y="395" class="label" transform="rotate(-90 356 395)">Controller</text>
+
+  <rect x="430" y="270" width="190" height="118" class="dispatch"/>
+  <text x="465" y="310" class="label">Bit Dispatcher</text>
+  <text x="456" y="338" class="txt">select q4 high planes</text>
+  <text x="456" y="362" class="txt">or queued q2 low planes</text>
+
+  <rect x="430" y="445" width="190" height="124" class="queue"/>
+  <text x="462" y="480" class="label">RefineQueue</text>
+  <text x="452" y="510" class="monoSmall">entry = {block, psum, q2 ptr}</text>
+  <text x="452" y="535" class="monoSmall">push only if flag=1</text>
+
+  <!-- Score flag block -->
+  <rect x="430" y="615" width="190" height="118" class="box"/>
+  <text x="452" y="650" class="label">Refine flag</text>
+  <text x="452" y="680" class="monoSmall">priority = graph_risk</text>
+  <text x="452" y="703" class="monoSmall">         x act_stress</text>
+  <text x="452" y="726" class="monoSmall">flag = priority >= T</text>
+
+  <!-- Main array/cycles -->
+  <rect x="690" y="135" width="780" height="560" class="dashBox"/>
+  <text x="720" y="168" class="section">BFP mantissa-plane serial systolic array</text>
+  <text x="720" y="194" class="txt">Same W4 tile, same PE array. Only issue schedule changes.</text>
+
+  <!-- Base cycles -->
+  <g id="baseCycles">
+    <rect x="725" y="230" width="160" height="210" class="cycleBox"/>
+    <text x="746" y="260" class="label">cycle t1</text>
+    <text x="746" y="284" class="tiny">base high bit b5</text>
+    <rect x="756" y="314" width="98" height="78" class="sa"/>
+    <rect x="772" y="330" width="24" height="24" class="pe"/>
+    <rect x="814" y="330" width="24" height="24" class="pe"/>
+    <rect x="772" y="362" width="24" height="24" class="pe"/>
+    <rect x="814" y="362" width="24" height="24" class="pe"/>
+
+    <rect x="910" y="230" width="160" height="210" class="cycleBox"/>
+    <text x="931" y="260" class="label">cycle t2</text>
+    <text x="931" y="284" class="tiny">base high bit b4</text>
+    <rect x="941" y="314" width="98" height="78" class="sa"/>
+    <rect x="957" y="330" width="24" height="24" class="pe"/>
+    <rect x="999" y="330" width="24" height="24" class="pe"/>
+    <rect x="957" y="362" width="24" height="24" class="pe"/>
+    <rect x="999" y="362" width="24" height="24" class="pe"/>
+
+    <rect x="1095" y="230" width="160" height="210" class="cycleBox"/>
+    <text x="1116" y="260" class="label">cycle t3</text>
+    <text x="1116" y="284" class="tiny">base high bit b3</text>
+    <rect x="1126" y="314" width="98" height="78" class="sa"/>
+    <rect x="1142" y="330" width="24" height="24" class="pe"/>
+    <rect x="1184" y="330" width="24" height="24" class="pe"/>
+    <rect x="1142" y="362" width="24" height="24" class="pe"/>
+    <rect x="1184" y="362" width="24" height="24" class="pe"/>
+
+    <rect x="1280" y="230" width="160" height="210" class="cycleBox"/>
+    <text x="1301" y="260" class="label">cycle t4</text>
+    <text x="1301" y="284" class="tiny">base high bit b2</text>
+    <rect x="1311" y="314" width="98" height="78" class="sa"/>
+    <rect x="1327" y="330" width="24" height="24" class="pe"/>
+    <rect x="1369" y="330" width="24" height="24" class="pe"/>
+    <rect x="1327" y="362" width="24" height="24" class="pe"/>
+    <rect x="1369" y="362" width="24" height="24" class="pe"/>
+  </g>
+
+  <!-- Refine cycles -->
+  <rect x="805" y="485" width="210" height="150" class="cycleBox"/>
+  <text x="831" y="516" class="label">optional cycle t5</text>
+  <text x="831" y="540" class="tiny">queued low bit b1</text>
+  <rect x="850" y="562" width="118" height="48" class="sa"/>
+  <rect x="872" y="574" width="24" height="24" class="pe"/>
+  <rect x="920" y="574" width="24" height="24" class="pe"/>
+
+  <rect x="1050" y="485" width="210" height="150" class="cycleBox"/>
+  <text x="1076" y="516" class="label">optional cycle t6</text>
+  <text x="1076" y="540" class="tiny">queued low bit b0</text>
+  <rect x="1095" y="562" width="118" height="48" class="sa"/>
+  <rect x="1117" y="574" width="24" height="24" class="pe"/>
+  <rect x="1165" y="574" width="24" height="24" class="pe"/>
+
+  <rect x="1288" y="485" width="150" height="150" class="box"/>
+  <text x="1316" y="518" class="label">Skip path</text>
+  <text x="1306" y="548" class="txt">flag=0 blocks</text>
+  <text x="1306" y="572" class="txt">do not issue</text>
+  <text x="1306" y="596" class="txt">t5/t6 cycles</text>
+
+  <!-- Right side shift accumulate and psum -->
+  <rect x="1510" y="205" width="150" height="170" class="su"/>
+  <text x="1528" y="238" class="label">Shift-</text>
+  <text x="1528" y="260" class="label">Accumulate</text>
+  <text x="1528" y="282" class="label">Unit</text>
+  <line x1="1534" y1="302" x2="1638" y2="302" class="thin"/>
+  <text x="1528" y="328" class="monoSmall">base &lt;&lt; 2</text>
+  <text x="1528" y="352" class="monoSmall">+ extra2</text>
+
+  <rect x="1510" y="430" width="150" height="170" class="psum"/>
+  <text x="1534" y="462" class="label">Psum Buffer</text>
+  <line x1="1534" y1="482" x2="1638" y2="482" class="thin"/>
+  <text x="1528" y="510" class="monoSmall">psum = base</text>
+  <text x="1528" y="536" class="monoSmall">if queued:</text>
+  <text x="1528" y="562" class="monoSmall">psum += extra</text>
+
+  <rect x="1510" y="660" width="150" height="110" class="out"/>
+  <text x="1542" y="694" class="label">Output</text>
+  <text x="1530" y="724" class="monoSmall">BFPA4 or</text>
+  <text x="1530" y="748" class="monoSmall">BFPA6 tile</text>
+
+  <!-- Bitmap masks -->
+  <text x="720" y="742" class="section">Issue bitmap per block</text>
+  <rect x="720" y="770" width="300" height="90" class="dashBox"/>
+  <text x="742" y="800" class="monoSmall">base high-4:  B0 B1 B2 B3 = 1 1 1 1</text>
+  <text x="742" y="828" class="monoSmall">refine low-2: B0 B1 B2 B3 = 1 0 1 0</text>
+  <text x="742" y="852" class="tiny">The bitmap gates only low-2 refinement cycles.</text>
+
+  <rect x="1075" y="770" width="370" height="90" class="dashBox"/>
+  <text x="1096" y="800" class="monoSmall">q4 base contribution:   (q4 @ W4) &lt;&lt; 2</text>
+  <text x="1096" y="828" class="monoSmall">q2 refine contribution:  q2 @ W4</text>
+  <text x="1096" y="852" class="monoSmall">dynamic result:          base + flag * refine</text>
+
+  <!-- Arrows -->
+  <path d="M248 295 C292 295 292 330 310 330" class="arrow"/>
+  <path d="M248 610 C292 610 300 515 430 515" class="arrow"/>
+  <path d="M380 395 C410 395 410 330 430 330" class="arrow"/>
+  <path d="M525 388 L525 445" class="arrow"/>
+  <path d="M620 330 C650 330 665 330 690 330" class="baseLine"/>
+  <path d="M620 515 C682 515 710 562 805 562" class="refLine"/>
+  <path d="M1015 562 L1050 562" class="refLine"/>
+  <path d="M1440 335 C1472 335 1482 290 1510 290" class="baseLine"/>
+  <path d="M1260 562 C1376 562 1420 536 1510 536" class="refLine"/>
+  <path d="M1585 375 L1585 430" class="arrow"/>
+  <path d="M1585 600 L1585 660" class="arrow"/>
+  <path d="M525 733 C650 760 650 808 720 808" class="arrow"/>
+
+  <!-- Notes -->
+  <rect x="80" y="780" width="530" height="118" class="box"/>
+  <text x="104" y="814" class="section">Execution meaning</text>
+  <text x="104" y="844" class="txt">BFPA4 is not a separate low-quality embedding stored first. It is the base psum inside each GEMM tile.</text>
+  <text x="104" y="870" class="txt">BFPA6 refinement adds the queued low-2 mantissa contribution before the output tile is committed.</text>
+
+  <text x="48" y="940" class="tiny">Figure: Hardware-oriented PE flow for graph-aware dynamic BFP refinement. The drawing shows the bit dispatcher, issue bitmap, systolic array cycles, shift-accumulate unit, RefineQueue, and psum update path.</text>
+</svg>
