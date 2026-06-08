@@ -359,9 +359,154 @@ refinement issue 可能造成调度不连续。
 
 两阶段执行和 RefineQueue 的目的就是把这种不连续性从主 base path 中隔离出去。
 
-## 11. Implementation Choices
+## 11. Queue and Buffer Sizing
 
-### 11.1 Block-level refinement
+`RefineQueue` 和 `psum buffer` 都按 tile 级别配置，不按全图节点配置。因此它们的容量开销主要由 tile shape 和 refined block ratio 决定。
+
+### 11.1 RefineQueue size
+
+`RefineQueue` 不应保存完整 activation 或 embedding，只保存 selected block 的索引和地址信息：
+
+```text
+RefineQueue entry:
+    block_id / local row id
+    psum_addr
+    exponent
+    A_extra2 pointer
+    flags
+```
+
+一个 entry 可以粗略估算为：
+
+```text
+block_id / local row id: 10-16 bit
+psum_addr:              12-20 bit
+exponent:                8 bit
+flags:                   few bits
+
+total:
+    about 64 bit / entry
+```
+
+如果一个 tile window 中有 256 个 activation blocks，refine ratio 为 20%：
+
+```text
+selected entries ~= 256 * 20% = 51
+queue storage    ~= 51 * 64 bit = 3264 bit ~= 0.4 KB
+```
+
+即使配置 128-entry queue：
+
+```text
+128 * 64 bit = 8192 bit = 1 KB
+```
+
+因此 `RefineQueue` 本身不是主要 SRAM 压力。关键约束是 queue 只存 pointer / address，不复制完整 activation block。
+
+### 11.2 Extra2 staging buffer
+
+如果 `A_extra2` 不只是用 pointer 回读，而是在本地暂存，则每个 block 需要：
+
+```text
+block_size = 128 values
+extra bits = 2 bit / value
+
+extra2 payload = 128 * 2 bit = 256 bit = 32 B / block
+```
+
+如果最多暂存 64 个 selected blocks：
+
+```text
+64 * 32 B = 2 KB
+```
+
+如果采用 pointer-based design，`extra2 staging buffer` 可以进一步减小，代价是 refinement phase 需要从局部 activation buffer 重新读取 extra2 bits。
+
+### 11.3 Psum buffer size
+
+`psum buffer` 是 tiled GEMM 本来就需要的 output partial-sum storage，不是 dynamic refinement 独有的结构。假设 output tile 为：
+
+```text
+M_tile x N_tile
+```
+
+例如：
+
+```text
+M_tile = 16 token rows
+N_tile = 128 output channels
+```
+
+若 psum 使用 16-bit：
+
+```text
+16 * 128 * 16 bit = 32768 bit = 4 KB
+```
+
+若 psum 使用 32-bit：
+
+```text
+16 * 128 * 32 bit = 65536 bit = 8 KB
+```
+
+如果 `M_tile = 32`：
+
+```text
+32 * 128 * 16 bit = 8 KB
+32 * 128 * 32 bit = 16 KB
+```
+
+因此推荐第一版使用：
+
+```text
+block size:       128 values
+M_tile:           16 or 32 token rows
+N_tile:           128 output channels
+RefineQueue:      64 or 128 entries
+psum buffer:      8-16 KB per array tile
+extra2 staging:   0-4 KB depending on pointer vs copy design
+```
+
+### 11.4 Overflow handling
+
+容量过大的风险主要来自：
+
+```text
+1. M_tile / N_tile 过大，导致 psum buffer 变大。
+2. refine ratio 过高，导致 queue 长时间接近满。
+3. queue 复制完整 activation，而不是保存 pointer / address。
+```
+
+硬件可以使用简单 backpressure 和 fallback：
+
+```text
+if RefineQueue almost full:
+    temporarily execute selected block inline
+    or reduce accepted refinement blocks in the current tile window
+```
+
+其中 inline execution 的含义是当前 block 在 base phase 后立即追加 extra2，而不是进入 queue。这样可以保证 correctness，不会因为 queue 满而丢失 refinement。
+
+### 11.5 Storage takeaway
+
+典型配置下，额外存储量级为：
+
+```text
+RefineQueue + metadata:
+    about 1-2 KB
+
+extra2 staging:
+    about 0-4 KB
+
+psum buffer:
+    reused from tiled GEMM output accumulation, about 8-16 KB per array tile
+```
+
+所以 dynamic BFPA4-to-BFPA6 refinement 的新增存储主要是 KB 级 queue / metadata。更大的 `psum buffer` 属于 GEMM tile 本身必需的 partial-sum storage，dynamic refinement 只是复用它进行 optional update。
+
+## 12. Implementation Choices
+
+### 12.1 Block-level refinement
 
 ```text
 granularity:
@@ -389,7 +534,7 @@ effect:
 2. psum buffer 需要支持 optional update。
 ```
 
-### 11.2 Node-level refinement
+### 12.2 Node-level refinement
 
 ```text
 granularity:
@@ -404,7 +549,7 @@ effect:
 
 优点是控制简单；缺点是会 refine 很多低 stress blocks，计算浪费更大。当前主线优先采用 block-level refinement。
 
-## 12. End-to-End Placement
+## 13. End-to-End Placement
 
 Dynamic BFP refinement 只处理 miss nodes：
 
@@ -429,7 +574,7 @@ dynamic BFP:
     降低剩余 miss-node encoder 的执行成本。
 ```
 
-## 13. Summary
+## 14. Summary
 
 Dynamic BFPA4-to-BFPA6 refinement 的具体实现是：
 
