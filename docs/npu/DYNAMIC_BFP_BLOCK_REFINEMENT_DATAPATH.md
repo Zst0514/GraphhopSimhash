@@ -504,52 +504,7 @@ psum buffer:
 
 所以 dynamic BFPA4-to-BFPA6 refinement 的新增存储主要是 KB 级 queue / metadata。更大的 `psum buffer` 属于 GEMM tile 本身必需的 partial-sum storage，dynamic refinement 只是复用它进行 optional update。
 
-## 12. Implementation Choices
-
-### 12.1 Block-level refinement
-
-```text
-granularity:
-    activation block
-
-decision:
-    graph_risk(node) * activation_stress(block)
-
-effect:
-    selected block BFPA4 -> BFPA6
-```
-
-优点：
-
-```text
-1. 只 refine 真正高风险 block。
-2. 比 node-level 全 A6 更省。
-3. 能体现 graph risk 和 BFP stress 的联合控制。
-```
-
-代价：
-
-```text
-1. block-level flag 和 queue。
-2. psum buffer 需要支持 optional update。
-```
-
-### 12.2 Node-level refinement
-
-```text
-granularity:
-    node
-
-decision:
-    graph_risk(node)
-
-effect:
-    selected node 全部 blocks BFPA4 -> BFPA6
-```
-
-优点是控制简单；缺点是会 refine 很多低 stress blocks，计算浪费更大。当前主线优先采用 block-level refinement。
-
-## 13. End-to-End Placement
+## 12. End-to-End Placement
 
 Dynamic BFP refinement 只处理 miss nodes：
 
