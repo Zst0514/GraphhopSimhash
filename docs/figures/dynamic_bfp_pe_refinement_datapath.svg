@@ -1,0 +1,183 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1700" height="980" viewBox="0 0 1700 980">
+  <defs>
+    <marker id="arrow" markerWidth="10" markerHeight="10" refX="9" refY="3" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L0,6 L9,3 z" fill="#111827"/>
+    </marker>
+    <marker id="blueArrow" markerWidth="10" markerHeight="10" refX="9" refY="3" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L0,6 L9,3 z" fill="#1d4ed8"/>
+    </marker>
+    <marker id="orangeArrow" markerWidth="10" markerHeight="10" refX="9" refY="3" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L0,6 L9,3 z" fill="#c2410c"/>
+    </marker>
+    <style>
+      .title { font: 700 30px Arial, sans-serif; fill: #111827; }
+      .subtitle { font: 500 16px Arial, sans-serif; fill: #475467; }
+      .section { font: 700 18px Arial, sans-serif; fill: #111827; }
+      .label { font: 700 15px Arial, sans-serif; fill: #111827; }
+      .txt { font: 500 13px Arial, sans-serif; fill: #344054; }
+      .tiny { font: 500 12px Arial, sans-serif; fill: #475467; }
+      .mono { font: 600 13px "DejaVu Sans Mono", Consolas, monospace; fill: #111827; }
+      .smallMono { font: 600 11px "DejaVu Sans Mono", Consolas, monospace; fill: #111827; }
+      .chip { fill: #f8fafc; stroke: #111827; stroke-width: 2.2; rx: 8; }
+      .block { fill: #ffffff; stroke: #111827; stroke-width: 1.8; rx: 7; }
+      .dash { fill: #ffffff; stroke: #1f2937; stroke-width: 1.8; stroke-dasharray: 7 5; rx: 7; }
+      .fp { fill: #ecfeff; stroke: #0891b2; stroke-width: 1.6; rx: 6; }
+      .exp { fill: #d9e6a3; stroke: #111827; stroke-width: 1.4; }
+      .man { fill: #c7e4e1; stroke: #111827; stroke-width: 1.4; }
+      .sign { fill: #5b1f23; stroke: #111827; stroke-width: 1.2; }
+      .int { fill: #e5e7eb; stroke: #111827; stroke-width: 1.5; rx: 4; }
+      .orange { fill: #facc15; stroke: #111827; stroke-width: 1.5; rx: 4; }
+      .pink { fill: #e9c5dc; stroke: #111827; stroke-width: 1.5; rx: 4; }
+      .green { fill: #d9e6a3; stroke: #111827; stroke-width: 1.5; rx: 4; }
+      .blue { fill: #dbeafe; stroke: #1d4ed8; stroke-width: 1.8; rx: 7; }
+      .purple { fill: #ede9fe; stroke: #7c3aed; stroke-width: 1.8; rx: 7; }
+      .pe { fill: #fee2e2; stroke: #111827; stroke-width: 1.6; rx: 5; }
+      .queue { fill: #f5f3ff; stroke: #7c3aed; stroke-width: 1.8; rx: 7; }
+      .psum { fill: #f4f3ff; stroke: #6941c6; stroke-width: 1.8; rx: 7; }
+      .arrow { stroke: #111827; stroke-width: 2; fill: none; marker-end: url(#arrow); }
+      .blueLine { stroke: #1d4ed8; stroke-width: 2.4; fill: none; marker-end: url(#blueArrow); }
+      .orangeLine { stroke: #c2410c; stroke-width: 2.4; fill: none; marker-end: url(#orangeArrow); stroke-dasharray: 8 5; }
+      .thin { stroke: #64748b; stroke-width: 1.2; fill: none; }
+    </style>
+  </defs>
+
+  <rect width="1700" height="980" fill="#ffffff"/>
+  <text x="48" y="50" class="title">Dynamic BFP Refinement PE: BFPA4 Base + Optional BFPA6 Correction</text>
+  <text x="48" y="78" class="subtitle">The PE prealigns BFP activations to a shared exponent, executes BFPA4 integer mantissa MACs, and optionally adds low-2 correction for selected blocks.</text>
+
+  <!-- format legend -->
+  <rect x="48" y="112" width="510" height="126" class="dash"/>
+  <text x="70" y="144" class="section">BFP activation format</text>
+  <rect x="74" y="168" width="22" height="22" class="sign"/>
+  <text x="102" y="185" class="tiny">sign</text>
+  <rect x="152" y="168" width="140" height="22" class="exp"/>
+  <text x="300" y="185" class="tiny">shared exponent E_block</text>
+  <rect x="74" y="202" width="292" height="22" class="man"/>
+  <text x="374" y="219" class="tiny">mantissa q6 = b5 b4 b3 b2 b1 b0</text>
+
+  <rect x="600" y="112" width="456" height="126" class="dash"/>
+  <text x="622" y="144" class="section">Progressive mantissa split</text>
+  <text x="622" y="174" class="mono">q4 = q6 &gt;&gt; 2        high-4 base</text>
+  <text x="622" y="202" class="mono">q2 = q6 &amp; 0b11      low-2 correction</text>
+  <text x="622" y="226" class="mono">q6 = (q4 &lt;&lt; 2) + q2</text>
+
+  <rect x="1098" y="112" width="552" height="126" class="dash"/>
+  <text x="1120" y="144" class="section">Graph-aware block decision</text>
+  <text x="1120" y="174" class="mono">priority = graph_risk(node) * activation_stress(block)</text>
+  <text x="1120" y="202" class="mono">refine_flag = priority >= threshold</text>
+  <text x="1120" y="226" class="txt">Only selected blocks use low-2 correction; all blocks use BFPA4 base.</text>
+
+  <!-- main PE panels -->
+  <text x="54" y="292" class="section">Input preprocessing and BFP prealignment</text>
+  <rect x="48" y="316" width="404" height="540" class="chip"/>
+
+  <!-- FP inputs -->
+  <text x="72" y="354" class="label">input activation block, FP</text>
+  <rect x="72" y="374" width="306" height="86" class="fp"/>
+  <text x="92" y="406" class="mono">x_fp = sign, exp_i, mantissa_i</text>
+  <text x="92" y="434" class="txt">scan block to select shared exponent</text>
+
+  <rect x="72" y="496" width="306" height="112" class="block"/>
+  <text x="94" y="528" class="label">BFP prealigner</text>
+  <rect x="96" y="552" width="64" height="28" class="int"/>
+  <text x="113" y="572" class="tiny">max</text>
+  <rect x="180" y="552" width="64" height="28" class="int"/>
+  <text x="196" y="572" class="tiny">diff</text>
+  <rect x="264" y="552" width="88" height="28" class="orange"/>
+  <text x="286" y="572" class="tiny">align</text>
+  <text x="96" y="596" class="tiny">E_block = max(exp_i); shift mantissas to common exponent.</text>
+
+  <rect x="72" y="646" width="306" height="136" class="block"/>
+  <text x="94" y="678" class="label">Mantissa slicer</text>
+  <text x="96" y="708" class="mono">q4 = high-4 mantissa</text>
+  <text x="96" y="736" class="mono">q2 = low-2 mantissa</text>
+  <text x="96" y="764" class="tiny">q2 is kept by pointer / small staging buffer only when refine_flag=1.</text>
+
+  <rect x="72" y="806" width="306" height="32" class="green"/>
+  <text x="92" y="827" class="label">output: q4, q2 pointer, E_block, refine_flag</text>
+
+  <!-- weight path -->
+  <text x="510" y="292" class="section">Weight and integer MAC datapath</text>
+  <rect x="500" y="316" width="498" height="540" class="chip"/>
+
+  <rect x="530" y="350" width="196" height="86" class="block"/>
+  <text x="552" y="382" class="label">W4 tile buffer</text>
+  <text x="552" y="412" class="mono">W_int4, W_scale</text>
+
+  <rect x="760" y="350" width="196" height="86" class="block"/>
+  <text x="782" y="382" class="label">W4 decode</text>
+  <rect x="790" y="402" width="60" height="24" class="int"/>
+  <text x="806" y="419" class="tiny">sign</text>
+  <rect x="870" y="402" width="60" height="24" class="int"/>
+  <text x="888" y="419" class="tiny">mag</text>
+
+  <rect x="530" y="486" width="426" height="186" class="blue"/>
+  <text x="552" y="520" class="section">BFPA4 base MAC</text>
+  <text x="552" y="550" class="mono">base_int = q4 @ W_int4</text>
+  <text x="552" y="578" class="mono">base_aligned = base_int &lt;&lt; 2</text>
+  <rect x="570" y="604" width="92" height="34" class="pe"/>
+  <text x="598" y="626" class="tiny">mul</text>
+  <rect x="690" y="604" width="92" height="34" class="pink"/>
+  <text x="720" y="626" class="tiny">add</text>
+  <rect x="810" y="604" width="92" height="34" class="orange"/>
+  <text x="828" y="626" class="tiny">shift</text>
+  <text x="552" y="656" class="txt">All blocks execute this path.</text>
+
+  <rect x="530" y="710" width="426" height="110" class="purple"/>
+  <text x="552" y="744" class="section">Optional BFPA6 correction MAC</text>
+  <text x="552" y="774" class="mono">delta_int = q2 @ W_int4</text>
+  <text x="552" y="802" class="txt">Only queued blocks execute this path.</text>
+
+  <!-- queue and psum -->
+  <text x="1054" y="292" class="section">Refinement control and psum accumulation</text>
+  <rect x="1046" y="316" width="604" height="540" class="chip"/>
+
+  <rect x="1076" y="350" width="230" height="154" class="queue"/>
+  <text x="1100" y="384" class="section">RefineQueue</text>
+  <text x="1100" y="414" class="mono">entry:</text>
+  <text x="1120" y="440" class="smallMono">{block_id, psum_addr,</text>
+  <text x="1120" y="462" class="smallMono"> E_block, q2_ptr}</text>
+  <text x="1100" y="488" class="txt">No full activation copy.</text>
+
+  <rect x="1348" y="350" width="256" height="154" class="psum"/>
+  <text x="1372" y="384" class="section">Tile psum buffer</text>
+  <text x="1372" y="414" class="mono">psum = base_aligned</text>
+  <text x="1372" y="442" class="mono">if queued:</text>
+  <text x="1394" y="468" class="mono">psum += delta_int</text>
+  <text x="1372" y="492" class="txt">Stores tile partial sums, not embeddings.</text>
+
+  <rect x="1076" y="550" width="528" height="118" class="block"/>
+  <text x="1100" y="584" class="section">Shift-accumulate and scaling</text>
+  <rect x="1110" y="608" width="82" height="30" class="orange"/>
+  <text x="1130" y="628" class="tiny">align</text>
+  <rect x="1220" y="608" width="82" height="30" class="pink"/>
+  <text x="1246" y="628" class="tiny">add</text>
+  <rect x="1330" y="608" width="100" height="30" class="green"/>
+  <text x="1348" y="628" class="tiny">norm/rnd</text>
+  <text x="1100" y="656" class="mono">y_fp ~= psum * 2^{E_block} * W_scale</text>
+
+  <rect x="1076" y="714" width="528" height="92" class="block"/>
+  <text x="1100" y="746" class="section">Output tile</text>
+  <text x="1100" y="776" class="mono">flag=0: BFPA4 result</text>
+  <text x="1350" y="776" class="mono">flag=1: BFPA6-refined result</text>
+
+  <!-- arrows -->
+  <path d="M378 418 C426 418 446 522 500 522" class="arrow"/>
+  <path d="M378 718 C430 718 466 548 530 548" class="arrow"/>
+  <path d="M726 393 L760 393" class="arrow"/>
+  <path d="M858 436 C858 458 766 468 742 486" class="arrow"/>
+  <path d="M956 578 C1018 578 1022 426 1076 426" class="arrow"/>
+  <path d="M956 578 C1042 578 1250 424 1348 424" class="arrow"/>
+  <path d="M746 820 C910 850 1012 748 1076 748" class="arrow"/>
+  <path d="M1192 504 C1192 532 810 682 742 710" class="arrow"/>
+  <path d="M956 765 C1120 780 1240 460 1348 460" class="arrow"/>
+  <path d="M1476 504 L1476 550" class="arrow"/>
+  <path d="M1330 668 L1330 714" class="arrow"/>
+
+  <!-- bottom schedule -->
+  <rect x="48" y="888" width="1602" height="58" class="dash"/>
+  <text x="70" y="922" class="section">Execution schedule:</text>
+  <text x="250" y="922" class="mono">Phase 1: all blocks run q4 @ W4 base</text>
+  <text x="650" y="922" class="mono">Phase 2: queued blocks run q2 @ W4 correction</text>
+  <text x="1130" y="922" class="mono">Commit: normalize / round output tile</text>
+</svg>

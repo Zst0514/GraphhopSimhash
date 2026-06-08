@@ -4,9 +4,9 @@
 
 ![Dynamic BFPA4-to-BFPA6 block refinement execution](../figures/dynamic_bfp_block_refinement_execution.svg)
 
-The following PE-level execution figure expands the bit dispatcher, issue bitmap, systolic-array cycles, shift-accumulate unit, RefineQueue, and psum update path:
+The following PE-level execution figure expands the BFP prealigner, mantissa slicer, W4 integer MAC datapath, RefineQueue, shift-accumulate unit, and psum update path:
 
-![Dynamic BFP PE bit dispatch](../figures/dynamic_bfp_pe_bit_dispatch.svg)
+![Dynamic BFP PE refinement datapath](../figures/dynamic_bfp_pe_refinement_datapath.svg)
 
 ## 1. 目标
 
@@ -111,7 +111,7 @@ Y_dyn =
     Y4 + DeltaY        if refine_flag = 1
 ```
 
-所以 dynamic BFPA4-to-BFPA6 不需要两套完整阵列。阵列始终执行 W4 x mantissa 的乘加，只是 selected blocks 会额外发射 2-bit mantissa-plane cycles。
+所以 dynamic BFPA4-to-BFPA6 不需要两套完整阵列。阵列始终执行 `W4 x mantissa` 的整数乘加；区别只是 selected blocks 会追加一次低 2 位 mantissa correction pass。
 
 ## 4. Naive Per-Block Branching
 
@@ -263,14 +263,14 @@ output:
 
 ## 8. PE Datapath
 
-PE 不需要切换成另一套 6-bit 阵列。它只需要支持两类 mantissa-plane issue：
+PE 不需要切换成另一套 6-bit 阵列。它只需要支持两类整数 mantissa MAC pass：
 
 ```text
-base issue:
-    issue high-4 mantissa cycles
+base pass:
+    high-4 mantissa x W4
 
-refine issue:
-    issue low-2 mantissa cycles for selected blocks
+refine pass:
+    low-2 mantissa x W4, only for selected blocks
 ```
 
 简化 PE 数据流：
@@ -291,10 +291,10 @@ A2_extra ----------+  only if refine_flag = 1
 
 ```text
 BFPA4:
-    4 high mantissa-bit work units
+    high-4 mantissa MAC
 
 BFPA6 refined block:
-    4 high-bit base work units + 2 low-bit refinement work units
+    high-4 base MAC + low-2 correction MAC
 ```
 
 所以每个 refined block 的额外计算量相对 BFPA4 block 为：
