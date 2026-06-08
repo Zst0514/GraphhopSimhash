@@ -456,7 +456,7 @@ N_tile = 128 output channels
 32 * 128 * 32 bit = 16 KB
 ```
 
-因此推荐第一版使用：
+因此第一版暂且使用：
 
 ```text
 block size:       128 values
