@@ -10,6 +10,9 @@
 - [BFP_TECHNICAL_BRIEF.md](BFP_TECHNICAL_BRIEF.md)
   BFP 格式、Transformer activation scale 选择、graph-aware dynamic BFPA4-to-BFPA6 refinement 和 NPU 通路说明。
 
+- [DYNAMIC_BFP_BLOCK_REFINEMENT_DATAPATH.md](DYNAMIC_BFP_BLOCK_REFINEMENT_DATAPATH.md)
+  Dynamic BFPA4-to-BFPA6 在阵列内部的具体执行方式：block-level flag、两阶段执行、refinement queue、psum update 和开销模型。
+
 - [PROGRESSIVE_BFP_ARRAY_DESIGN_AND_EXPERIMENTS.md](PROGRESSIVE_BFP_ARRAY_DESIGN_AND_EXPERIMENTS.md)
   BFP 阵列本身的设计、PE/dataflow/service-window 机制，以及需要补齐的 array-level 实验路线。
 
