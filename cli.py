@@ -9,7 +9,7 @@ def build_parser():
         description="Compact paper-style runner for graph hash reuse experiments."
     )
 
-    parser.add_argument("--datasets", nargs="+", default=["cora"], choices=["cora", "pubmed", "arxiv"])
+    parser.add_argument("--datasets", nargs="+", default=["cora"], choices=["cora", "pubmed", "arxiv", "wikics"])
     parser.add_argument("--runs", type=int, default=1)
     parser.add_argument(
         "--experiment_suite",

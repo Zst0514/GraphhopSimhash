@@ -13,6 +13,19 @@ from task_constructor import UnifiedTaskConstructor  # noqa: E402
 from utils import SentenceEncoder  # noqa: E402
 
 
+def normalize_node_masks(data):
+    for name in ("train_mask", "val_mask", "test_mask"):
+        if hasattr(data, name):
+            mask = getattr(data, name)
+            if isinstance(mask, torch.Tensor) and mask.dim() > 1:
+                setattr(data, name, mask[:, 0].contiguous())
+    if hasattr(data, "train_masks") and not hasattr(data, "train_mask"):
+        data.train_mask = data.train_masks[0]
+        data.val_mask = data.val_masks[0]
+        data.test_mask = data.test_masks[0]
+    return data
+
+
 def ensure_arxiv_masks(data, ds_key, device):
     if hasattr(data, "train_mask") or ds_key.lower() != "arxiv":
         return False
@@ -90,10 +103,7 @@ def load_data_pipeline(ds_key, params, device):
         if ensure_arxiv_masks(data, ds_key, device):
             torch.save(data.cpu(), st_data_path)
 
-        if hasattr(data, "train_masks") and not hasattr(data, "train_mask"):
-            data.train_mask = data.train_masks[0]
-            data.val_mask = data.val_masks[0]
-            data.test_mask = data.test_masks[0]
+        normalize_node_masks(data)
         return data.to(device), encoder
 
     task_config = load_yaml(os.path.join("configs", "task_config.yaml"))
@@ -114,10 +124,7 @@ def load_data_pipeline(ds_key, params, device):
         dataset_name = DATASET_CONFIGS[ds_key]["data_dir"]
         data = tasks.dataset[dataset_name].data if dataset_name in tasks.dataset else list(tasks.dataset.values())[0].data
 
-    if hasattr(data, "train_masks") and not hasattr(data, "train_mask"):
-        data.train_mask = data.train_masks[0]
-        data.val_mask = data.val_masks[0]
-        data.test_mask = data.test_masks[0]
+    normalize_node_masks(data)
 
     ensure_arxiv_masks(data, ds_key, device)
 
@@ -168,6 +175,29 @@ def load_raw_texts(ds_key):
         titleabs = titleabs.fillna("")
         text = "feature node. paper title and abstract: " + titleabs["title"] + ". " + titleabs["abstract"]
         return text.values.tolist()
+    if ds_key == "wikics":
+        import functools
+        import json
+
+        path = os.path.join("data", "single_graph", "wikics", "metadata.json")
+        if not os.path.exists(path):
+            raise FileNotFoundError(f"{path} missing")
+        with open(path, "r", encoding="utf-8") as f:
+            raw_data = json.load(f)
+        texts = []
+        for node in raw_data["nodes"]:
+            content = functools.reduce(lambda x, y: x + " " + y, node["tokens"])
+            texts.append(
+                (
+                    "feature node. wikipedia entry name: "
+                    + node["title"]
+                    + ". entry content: "
+                    + content
+                )
+                .lower()
+                .strip()
+            )
+        return texts
     raise ValueError(f"Dataset {ds_key} not supported for raw text loading.")
 
 
