@@ -8,7 +8,8 @@
 namespace ghhw {
 
 constexpr const char kTraceMagicText[] = "GHSIMTRACE";
-constexpr uint32_t kTraceVersion = 1;
+constexpr uint32_t kTraceVersion = 2;
+constexpr uint32_t kMinTraceVersion = 1;
 constexpr uint32_t kDefaultHeads = 8;
 constexpr uint32_t kDefaultHashBits = 16;
 constexpr uint32_t kDefaultRadius = 2;
@@ -28,6 +29,10 @@ struct TraceRecord {
     uint32_t node_id = 0;
     std::array<uint16_t, kDefaultHeads> head_hashes{};
     uint16_t sensitivity_q = 0;
+    uint8_t propagation_q = 0;
+    uint8_t graph_context_q = 0;
+    uint8_t low_unique_q = 0;
+    uint8_t rarity_q = 0;
     uint8_t degree_bucket = 0;
     uint8_t reserved = 0;
 };

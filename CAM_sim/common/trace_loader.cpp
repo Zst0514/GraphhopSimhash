@@ -63,7 +63,7 @@ TraceData load_trace_file(const std::string& path) {
     data.header.default_radius = read_u32(in);
     data.header.support_threshold = read_u32(in);
 
-    if (data.header.version != kTraceVersion) {
+    if (data.header.version < kMinTraceVersion || data.header.version > kTraceVersion) {
         throw std::runtime_error("unsupported trace version: " + std::to_string(data.header.version));
     }
     if (data.header.num_heads != kDefaultHeads) {
@@ -81,8 +81,17 @@ TraceData load_trace_file(const std::string& path) {
             rec.head_hashes[head] = read_u16(in);
         }
         rec.sensitivity_q = read_u16(in);
-        rec.degree_bucket = read_u8(in);
-        rec.reserved = read_u8(in);
+        if (data.header.version >= 2) {
+            rec.propagation_q = read_u8(in);
+            rec.graph_context_q = read_u8(in);
+            rec.low_unique_q = read_u8(in);
+            rec.rarity_q = read_u8(in);
+            rec.degree_bucket = read_u8(in);
+            rec.reserved = read_u8(in);
+        } else {
+            rec.degree_bucket = read_u8(in);
+            rec.reserved = read_u8(in);
+        }
         data.records.push_back(rec);
     }
 

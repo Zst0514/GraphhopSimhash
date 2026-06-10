@@ -12,21 +12,40 @@ import types
 from pathlib import Path
 
 import torch
+import torch.nn.functional as F
+
+PACKAGE_ROOT = Path(__file__).resolve().parents[2]
+ONEFORALL_ROOT = PACKAGE_ROOT.parent
+
+
+def _resolve_user_path(path: str, original_cwd: Path) -> str:
+    raw = Path(path).expanduser()
+    if raw.is_absolute():
+        return str(raw)
+    if str(raw).startswith("CAM_sim/"):
+        return str(PACKAGE_ROOT / raw)
+    return str(original_cwd / raw)
+
+
+def _ensure_project_cwd() -> None:
+    os.chdir(ONEFORALL_ROOT)
+
 
 try:
     from ...cli import build_parser, validate_args
     from ...data import load_run_state
+    from ...features import _compute_neighbor_mean
     from ...runner import build_route_bundle, make_run_args, train_baseline_model
+    from ...scoring import build_node_risk_scores
+    from .unified_frontend_support import compute_tser_scores
 except ImportError:
-    REPO_ROOT = Path(__file__).resolve().parents[2]
-    ONEFORALL_ROOT = REPO_ROOT.parent
     PACKAGE_ALIAS = "_graphhopsimhash_repo"
-    init_py = REPO_ROOT / "__init__.py"
+    init_py = PACKAGE_ROOT / "__init__.py"
 
     cleaned_sys_path = []
     for entry in sys.path:
         entry_path = Path(entry or os.getcwd()).resolve()
-        if entry_path == REPO_ROOT:
+        if entry_path == PACKAGE_ROOT:
             continue
         cleaned_sys_path.append(entry)
     sys.path[:] = cleaned_sys_path
@@ -46,10 +65,10 @@ except ImportError:
     spec = importlib.util.spec_from_file_location(
         PACKAGE_ALIAS,
         init_py,
-        submodule_search_locations=[str(REPO_ROOT)],
+        submodule_search_locations=[str(PACKAGE_ROOT)],
     )
     if spec is None or spec.loader is None:
-        raise ImportError(f"unable to create package alias for repo root: {REPO_ROOT}")
+        raise ImportError(f"unable to create package alias for repo root: {PACKAGE_ROOT}")
     if PACKAGE_ALIAS not in sys.modules:
         module = importlib.util.module_from_spec(spec)
         sys.modules[PACKAGE_ALIAS] = module
@@ -58,16 +77,22 @@ except ImportError:
     cli_mod = importlib.import_module(f"{PACKAGE_ALIAS}.cli")
     data_mod = importlib.import_module(f"{PACKAGE_ALIAS}.data")
     runner_mod = importlib.import_module(f"{PACKAGE_ALIAS}.runner")
+    features_mod = importlib.import_module(f"{PACKAGE_ALIAS}.features")
+    scoring_mod = importlib.import_module(f"{PACKAGE_ALIAS}.scoring")
+    support_mod = importlib.import_module(f"{PACKAGE_ALIAS}.CAM_sim.tools.unified_frontend_support")
     build_parser = cli_mod.build_parser
     validate_args = cli_mod.validate_args
     load_run_state = data_mod.load_run_state
     build_route_bundle = runner_mod.build_route_bundle
     make_run_args = runner_mod.make_run_args
     train_baseline_model = runner_mod.train_baseline_model
+    _compute_neighbor_mean = features_mod._compute_neighbor_mean
+    build_node_risk_scores = scoring_mod.build_node_risk_scores
+    compute_tser_scores = support_mod.compute_tser_scores
 
 
 MAGIC = b"GHSIMTRACE"
-TRACE_VERSION = 1
+TRACE_VERSION = 2
 NUM_HEADS = 8
 HASH_BITS = 16
 
@@ -94,10 +119,15 @@ def _degree_buckets(edge_index: torch.Tensor, num_nodes: int, device: torch.devi
     return buckets.cpu()
 
 
-def _write_trace(path: str, hashes_by_head, degree_bucket, radius: int, support_threshold: int) -> None:
+def _write_trace(path: str, hashes_by_head, score_bundle, degree_bucket, radius: int, support_threshold: int) -> None:
     num_nodes = int(hashes_by_head[0].numel())
     output_path = Path(path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
+    sensitivity_q = score_bundle["sensitivity_q"].to(device="cpu", dtype=torch.int64)
+    propagation_q = score_bundle["propagation_q"].to(device="cpu", dtype=torch.int64)
+    graph_context_q = score_bundle["graph_context_q"].to(device="cpu", dtype=torch.int64)
+    low_unique_q = score_bundle["low_degree_unique_q"].to(device="cpu", dtype=torch.int64)
+    rarity_q = score_bundle["rarity_q"].to(device="cpu", dtype=torch.int64)
 
     with output_path.open("wb") as out:
         out.write(struct.pack(
@@ -113,21 +143,28 @@ def _write_trace(path: str, hashes_by_head, degree_bucket, radius: int, support_
         for node_id in range(num_nodes):
             head_values = [int(head_hashes[node_id].item()) for head_hashes in hashes_by_head]
             out.write(struct.pack(
-                "<I8HHBB",
+                "<I8HHBBBBBB",
                 int(node_id),
                 *head_values,
-                0,  # optional sensitivity_q, reserved for future score-gate metadata
+                int(sensitivity_q[node_id].item()),
+                int(propagation_q[node_id].item()),
+                int(graph_context_q[node_id].item()),
+                int(low_unique_q[node_id].item()),
+                int(rarity_q[node_id].item()),
                 int(degree_bucket[node_id].item()),
                 0,
             ))
 
 
 def main() -> None:
+    original_cwd = Path.cwd()
     parser = build_parser()
     parser.description = "Export 8-head 16-bit GraphhopSimhash hashes for C++ hardware simulators."
     parser.add_argument("--output", required=True, help="Output .trace path")
     args = parser.parse_args()
     validate_args(parser, args)
+    args.output = _resolve_user_path(args.output, original_cwd)
+    _ensure_project_cwd()
 
     if len(args.datasets) != 1:
         parser.error("hardware trace exporter expects exactly one dataset")
@@ -179,14 +216,49 @@ def main() -> None:
         )
 
     degree_bucket = _degree_buckets(data.edge_index, int(data.num_nodes), device)
+    if route_bundle["hash_route_matrices"] is None or route_bundle["hash_route_matrices"][0] is None:
+        raise ValueError("trace exporter requires a concrete first hash matrix for TSER sensitivity")
+    hash_features = route_bundle["hash_features"].to(device=device, dtype=torch.float32)
+    score_bundle = compute_tser_scores(
+        build_node_risk_scores=build_node_risk_scores,
+        compute_neighbor_mean=_compute_neighbor_mean,
+        verify_features=verify_features.to(device=device, dtype=torch.float32),
+        hash_features=hash_features,
+        hash_matrix=route_bundle["hash_route_matrices"][0].to(device=device),
+        edge_index=data.edge_index.to(device),
+        rarity_bits=int(args.score_rarity_bits),
+        rarity_seed=int(args.score_rarity_seed),
+        propagation_weight=int(args.score_propagation_weight),
+        graph_context_weight=int(args.score_graph_context_weight),
+        low_unique_weight=int(args.score_low_unique_weight),
+    )
+    sensitivity_q = score_bundle["sensitivity_q"].to(device="cpu", dtype=torch.int64)
+    if int(sensitivity_q.max().item()) > 65535:
+        raise ValueError("sensitivity_q overflowed trace field; expected weighted TSER score <= 65535")
+    for key in ("propagation_q", "graph_context_q", "low_degree_unique_q", "rarity_q"):
+        values = score_bundle[key].to(device="cpu", dtype=torch.int64)
+        if int(values.min().item()) < 0 or int(values.max().item()) > 255:
+            raise ValueError(f"{key} overflowed trace field; expected uint8")
     support_threshold = int(args.route_min_support_hits[0] if args.route_min_support_hits else 3)
-    _write_trace(args.output, hashes_by_head, degree_bucket, int(args.radius), support_threshold)
+    _write_trace(args.output, hashes_by_head, score_bundle, degree_bucket, int(args.radius), support_threshold)
 
     size_bytes = os.path.getsize(args.output)
+    sensitivity_stats = (
+        int(sensitivity_q.min().item()),
+        float(sensitivity_q.float().mean().item()),
+        int(sensitivity_q.max().item()),
+    )
     print(
         f"[TraceExport] wrote {args.output} | nodes={int(data.num_nodes)} "
         f"| heads={NUM_HEADS} | bits={HASH_BITS} | radius={int(args.radius)} "
         f"| support_threshold={support_threshold} | bytes={size_bytes}"
+    )
+    print(
+        "[TraceExport] "
+        f"TSER weights={int(args.score_propagation_weight)}/"
+        f"{int(args.score_graph_context_weight)}/"
+        f"{int(args.score_low_unique_weight)} "
+        f"| sensitivity_q min/mean/max={sensitivity_stats[0]}/{sensitivity_stats[1]:.2f}/{sensitivity_stats[2]}"
     )
 
 

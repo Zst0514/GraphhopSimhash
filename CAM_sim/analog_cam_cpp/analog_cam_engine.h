@@ -12,6 +12,7 @@
 #include "../common/metrics.h"
 #include "../common/progress.h"
 #include "../common/trace_format.h"
+#include "../common/unified_frontend_policy.h"
 
 namespace ghhw {
 
@@ -26,6 +27,22 @@ struct AnalogCamConfig {
     int cam_search_cycles = 1;
     int candidate_select_cycles = 1;
     int cache_write_cycles = 1;
+    int direct_support_threshold = 5;
+    int score_gate_enabled = 0;
+    int score_reuse_threshold = 45;
+    int score_hub_threshold = 12;
+    int score_rare_threshold = 10;
+    int score_protect_hub_exact = 0;
+    int score_protect_hub_fuzzy = 1;
+    int score_forbid_rare_fuzzy = 1;
+    int score_support_discount = 1;
+    int score_rare_min_dist = 2;
+    int score_rare_min_route_hits = 2;
+    int score_rare_min_base_hits = 2;
+    int score_pair_confidence_discount = 1;
+    int score_pair_confidence_max_dist = 1;
+    int score_pair_confidence_min_route_hits = 2;
+    int score_pair_confidence_min_base_hits = 2;
     double cam_compare_energy_fj_per_bit = 0.35;
     double candidate_cam_probe_energy_pj = 0.20;
     double cam_write_energy_pj = 0.30;
@@ -151,6 +168,7 @@ private:
     double row_matchline_voltage(const CamEntry& row, int dist, uint32_t word_bits) const;
     double comparator_vref_for_word_bits(uint32_t word_bits) const;
     bool row_threshold_hit(const CamEntry& row, uint16_t query_hash, uint32_t word_bits, int* dist_out);
+    UnifiedFrontendConfig frontend_policy_config() const;
 };
 
 AnalogCamConfig analog_cam_config_from_file(const std::string& path);

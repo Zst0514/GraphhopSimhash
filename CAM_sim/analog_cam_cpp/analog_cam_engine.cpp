@@ -23,6 +23,26 @@ AnalogCamConfig analog_cam_config_from_file(const std::string& path) {
     out.cam_search_cycles = config_int(cfg, "cam_search_cycles", out.cam_search_cycles);
     out.candidate_select_cycles = config_int(cfg, "candidate_select_cycles", out.candidate_select_cycles);
     out.cache_write_cycles = config_int(cfg, "cache_write_cycles", out.cache_write_cycles);
+    out.direct_support_threshold = config_int(cfg, "direct_support_threshold", out.direct_support_threshold);
+    out.score_gate_enabled = config_int(cfg, "score_gate_enabled", out.score_gate_enabled);
+    out.score_reuse_threshold = config_int(cfg, "score_reuse_threshold", out.score_reuse_threshold);
+    out.score_hub_threshold = config_int(cfg, "score_hub_threshold", out.score_hub_threshold);
+    out.score_rare_threshold = config_int(cfg, "score_rare_threshold", out.score_rare_threshold);
+    out.score_protect_hub_exact = config_int(cfg, "score_protect_hub_exact", out.score_protect_hub_exact);
+    out.score_protect_hub_fuzzy = config_int(cfg, "score_protect_hub_fuzzy", out.score_protect_hub_fuzzy);
+    out.score_forbid_rare_fuzzy = config_int(cfg, "score_forbid_rare_fuzzy", out.score_forbid_rare_fuzzy);
+    out.score_support_discount = config_int(cfg, "score_support_discount", out.score_support_discount);
+    out.score_rare_min_dist = config_int(cfg, "score_rare_min_dist", out.score_rare_min_dist);
+    out.score_rare_min_route_hits = config_int(cfg, "score_rare_min_route_hits", out.score_rare_min_route_hits);
+    out.score_rare_min_base_hits = config_int(cfg, "score_rare_min_base_hits", out.score_rare_min_base_hits);
+    out.score_pair_confidence_discount =
+        config_int(cfg, "score_pair_confidence_discount", out.score_pair_confidence_discount);
+    out.score_pair_confidence_max_dist =
+        config_int(cfg, "score_pair_confidence_max_dist", out.score_pair_confidence_max_dist);
+    out.score_pair_confidence_min_route_hits =
+        config_int(cfg, "score_pair_confidence_min_route_hits", out.score_pair_confidence_min_route_hits);
+    out.score_pair_confidence_min_base_hits =
+        config_int(cfg, "score_pair_confidence_min_base_hits", out.score_pair_confidence_min_base_hits);
     out.cam_compare_energy_fj_per_bit = config_number(cfg, "cam_compare_energy_fj_per_bit", out.cam_compare_energy_fj_per_bit);
     out.candidate_cam_probe_energy_pj = config_number(cfg, "candidate_cam_probe_energy_pj", out.candidate_cam_probe_energy_pj);
     out.cam_write_energy_pj = config_number(cfg, "cam_write_energy_pj", out.cam_write_energy_pj);
@@ -60,6 +80,31 @@ AnalogCamHashReuseEngine::AnalogCamHashReuseEngine(AnalogCamConfig config) : con
     }
     if (config_.memo_k <= 0 || config_.candidate_cam_entries <= 0 || config_.subarray_rows <= 0) {
         throw std::invalid_argument("memo_k, candidate_cam_entries and subarray_rows must be positive");
+    }
+    if (config_.direct_support_threshold < config_.support_threshold
+        || config_.direct_support_threshold > static_cast<int>(kDefaultHeads)) {
+        throw std::invalid_argument("direct_support_threshold must be in support_threshold..8");
+    }
+    if (config_.score_gate_enabled != 0 && config_.score_gate_enabled != 1) {
+        throw std::invalid_argument("score_gate_enabled must be 0 or 1");
+    }
+    if ((config_.score_protect_hub_exact != 0 && config_.score_protect_hub_exact != 1)
+        || (config_.score_protect_hub_fuzzy != 0 && config_.score_protect_hub_fuzzy != 1)
+        || (config_.score_forbid_rare_fuzzy != 0 && config_.score_forbid_rare_fuzzy != 1)
+        || (config_.score_support_discount != 0 && config_.score_support_discount != 1)) {
+        throw std::invalid_argument("score-gate boolean flags must be 0 or 1");
+    }
+    if (config_.score_reuse_threshold < 0
+        || config_.score_hub_threshold < 0
+        || config_.score_rare_threshold < 0
+        || config_.score_rare_min_dist < 1
+        || config_.score_rare_min_route_hits < 1
+        || config_.score_rare_min_base_hits < 1
+        || config_.score_pair_confidence_discount < 0
+        || config_.score_pair_confidence_max_dist < 0
+        || config_.score_pair_confidence_min_route_hits <= 0
+        || config_.score_pair_confidence_min_base_hits <= 0) {
+        throw std::invalid_argument("score-gate thresholds must be non-negative and support floors positive");
     }
     if (config_.clock_mhz <= 0.0 || config_.vdd <= 0.0) {
         throw std::invalid_argument("clock_mhz and vdd must be positive");
@@ -108,6 +153,27 @@ AnalogCamHashReuseEngine::AnalogCamHashReuseEngine(AnalogCamConfig config) : con
     for (auto& head_buckets : buckets_) {
         head_buckets.resize(65536);
     }
+}
+
+UnifiedFrontendConfig AnalogCamHashReuseEngine::frontend_policy_config() const {
+    UnifiedFrontendConfig cfg;
+    cfg.score_gate_enabled = config_.score_gate_enabled != 0;
+    cfg.score_reuse_threshold = config_.score_reuse_threshold;
+    cfg.score_hub_threshold = config_.score_hub_threshold;
+    cfg.score_rare_threshold = config_.score_rare_threshold;
+    cfg.score_protect_hub_exact = config_.score_protect_hub_exact != 0;
+    cfg.score_protect_hub_fuzzy = config_.score_protect_hub_fuzzy != 0;
+    cfg.score_forbid_rare_fuzzy = config_.score_forbid_rare_fuzzy != 0;
+    cfg.score_support_discount = config_.score_support_discount != 0;
+    cfg.score_rare_min_dist = config_.score_rare_min_dist;
+    cfg.score_rare_min_route_hits = config_.score_rare_min_route_hits;
+    cfg.score_rare_min_base_hits = config_.score_rare_min_base_hits;
+    cfg.score_pair_confidence_discount = config_.score_pair_confidence_discount;
+    cfg.score_pair_confidence_max_dist = config_.score_pair_confidence_max_dist;
+    cfg.score_pair_confidence_min_route_hits = config_.score_pair_confidence_min_route_hits;
+    cfg.score_pair_confidence_min_base_hits = config_.score_pair_confidence_min_base_hits;
+    cfg.direct_support_threshold = config_.direct_support_threshold;
+    return cfg;
 }
 
 uint64_t AnalogCamHashReuseEngine::active_rows_for_head(uint32_t head) const {
@@ -451,6 +517,9 @@ Decision AnalogCamHashReuseEngine::select_candidate(
         decision.hit = true;
         decision.source_id = best->node_id;
         decision.support = best->support;
+        decision.route_hit_count = best->support;
+        decision.base_route_hit_count = best->support > 0 ? 1 : 0;
+        decision.winning_base_table_hit_count = best->support;
         decision.min_dist = best->min_dist;
         decision.kind = kind;
     }
@@ -526,6 +595,7 @@ AnalogCamResult AnalogCamHashReuseEngine::run(const TraceData& trace, ProgressBa
 
     uint64_t max_active_rows_seen = 0;
     uint64_t processed = 0;
+    const UnifiedFrontendConfig policy_cfg = frontend_policy_config();
     for (const TraceRecord& rec : trace.records) {
         const uint64_t active_rows = active_rows_all_heads();
         max_active_rows_seen = std::max(max_active_rows_seen, active_rows);
@@ -539,15 +609,21 @@ AnalogCamResult AnalogCamHashReuseEngine::run(const TraceData& trace, ProgressBa
         }
         const uint64_t search_cycles = search_cycles_for_active_rows(max_head_rows);
 
-        std::unordered_map<uint32_t, Candidate> candidates;
-        candidates.reserve(256);
+        std::unordered_map<uint32_t, Candidate> exact_candidates;
+        std::unordered_map<uint32_t, Candidate> fuzzy_candidates;
+        exact_candidates.reserve(128);
+        fuzzy_candidates.reserve(256);
         for (uint32_t head = 0; head < kDefaultHeads; ++head) {
             if (use_global_lru_) {
                 for (const auto& kv : active_nodes_) {
                     const CamEntry& row = cam_rows_[head][kv.second.cam_indices[head]];
                     int dist = 0;
                     if (row_threshold_hit(row, rec.head_hashes[head], trace.header.hash_bits, &dist)) {
-                        add_candidate(candidates, row, dist, stats);
+                        if (dist == 0) {
+                            add_candidate(exact_candidates, row, dist, stats);
+                        } else {
+                            add_candidate(fuzzy_candidates, row, dist, stats);
+                        }
                     }
                 }
             } else {
@@ -557,7 +633,11 @@ AnalogCamResult AnalogCamHashReuseEngine::run(const TraceData& trace, ProgressBa
                     }
                     int dist = 0;
                     if (row_threshold_hit(row, rec.head_hashes[head], trace.header.hash_bits, &dist)) {
-                        add_candidate(candidates, row, dist, stats);
+                        if (dist == 0) {
+                            add_candidate(exact_candidates, row, dist, stats);
+                        } else {
+                            add_candidate(fuzzy_candidates, row, dist, stats);
+                        }
                     }
                 }
             }
@@ -571,10 +651,60 @@ AnalogCamResult AnalogCamHashReuseEngine::run(const TraceData& trace, ProgressBa
              * config_.cam_compare_energy_fj_per_bit)
             / 1000.0;
 
-        Decision decision = select_candidate(candidates, rec.node_id, "fuzzy");
-        if (decision.hit && decision.min_dist == 0) {
-            decision.kind = "exact";
+        uint64_t score_checks_for_query = 0;
+        uint64_t score_rejects_for_query = 0;
+        uint64_t score_risk_rejects_for_query = 0;
+        uint64_t score_hub_rejects_for_query = 0;
+        uint64_t score_rare_rejects_for_query = 0;
+        auto apply_route_policy = [&](Decision& candidate) {
+            candidate.candidate_found = candidate.hit;
+            candidate.sensitivity_q = rec.sensitivity_q;
+            candidate.propagation_q = rec.propagation_q;
+            candidate.graph_context_q = rec.graph_context_q;
+            candidate.low_unique_q = rec.low_unique_q;
+            candidate.rarity_q = rec.rarity_q;
+            const UnifiedFrontendDecision route = apply_unified_frontend_policy(
+                rec.sensitivity_q,
+                rec.propagation_q,
+                rec.low_unique_q,
+                candidate.route_hit_count,
+                candidate.base_route_hit_count,
+                candidate.min_dist,
+                policy_cfg
+            );
+            candidate.score_gate_checked = candidate.candidate_found && (config_.score_gate_enabled != 0);
+            candidate.score_gate_allow = candidate.candidate_found && route.accepted;
+            candidate.score_error_q = route.score_error_q;
+            candidate.score_risk = route.score_risk;
+            candidate.score_reason = route.score_reason;
+            candidate.route = route.route;
+            if (candidate.score_gate_checked) {
+                score_checks_for_query += 1;
+                if (!route.accepted) {
+                    score_rejects_for_query += 1;
+                    if (route.score_reason == "risk") {
+                        score_risk_rejects_for_query += 1;
+                    } else if (route.score_reason == "hub_protect") {
+                        score_hub_rejects_for_query += 1;
+                    } else if (route.score_reason == "rare_leaf") {
+                        score_rare_rejects_for_query += 1;
+                    }
+                }
+            }
+            return route;
+        };
+
+        Decision decision = select_candidate(exact_candidates, rec.node_id, "exact");
+        UnifiedFrontendDecision route_decision = apply_route_policy(decision);
+        if (!decision.candidate_found || !route_decision.accepted) {
+            Decision fuzzy_decision = select_candidate(fuzzy_candidates, rec.node_id, "fuzzy");
+            if (fuzzy_decision.hit) {
+                UnifiedFrontendDecision fuzzy_route_decision = apply_route_policy(fuzzy_decision);
+                decision = fuzzy_decision;
+                route_decision = fuzzy_route_decision;
+            }
         }
+        decision.hit = route_decision.accepted;
         if (decision.hit) {
             touch_node(decision.source_id);
         }
@@ -584,8 +714,18 @@ AnalogCamResult AnalogCamHashReuseEngine::run(const TraceData& trace, ProgressBa
         decision.verified_rows = 0;
 
         stats.cycles += static_cast<uint64_t>(config_.candidate_select_cycles);
+        stats.score_checked += score_checks_for_query;
+        stats.score_reject += score_rejects_for_query;
+        stats.score_reject_risk += score_risk_rejects_for_query;
+        stats.score_reject_hub_protect += score_hub_rejects_for_query;
+        stats.score_reject_rare_leaf += score_rare_rejects_for_query;
         if (decision.hit) {
             stats.reuse += 1;
+            if (decision.route == "direct") {
+                stats.direct_reuse += 1;
+            } else if (decision.route == "residual") {
+                stats.residual_route += 1;
+            }
             if (decision.kind == "exact") {
                 stats.exact_reuse += 1;
             } else {

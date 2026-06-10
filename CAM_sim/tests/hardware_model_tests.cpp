@@ -8,9 +8,10 @@
 
 namespace {
 
-ghhw::TraceRecord make_record(uint32_t node_id, std::initializer_list<uint16_t> hashes) {
+ghhw::TraceRecord make_record(uint32_t node_id, std::initializer_list<uint16_t> hashes, uint16_t sensitivity_q = 1) {
     ghhw::TraceRecord rec;
     rec.node_id = node_id;
+    rec.sensitivity_q = sensitivity_q;
     size_t idx = 0;
     for (uint16_t value : hashes) {
         if (idx < ghhw::kDefaultHeads) {
@@ -73,6 +74,23 @@ ghhw::TraceData make_global_unbounded_trace() {
     trace.records.push_back(make_record(30, {0x1111, 0x2222, 0x3003, 0x4003, 0x5003, 0x6003, 0x7003, 0x8003}));
     trace.records.push_back(make_record(40, {0x1111, 0x2222, 0x3004, 0x4004, 0x5004, 0x6004, 0x7004, 0x8004}));
     trace.records.push_back(make_record(50, {0xaaaa, 0xbbbb, 0xcccc, 0xdddd, 0xeeee, 0xf111, 0xf222, 0xf333}));
+    trace.header.num_nodes = static_cast<uint32_t>(trace.records.size());
+    return trace;
+}
+
+ghhw::TraceData make_unified_frontend_trace() {
+    ghhw::TraceData trace;
+    trace.header.magic = ghhw::kTraceMagicText;
+    trace.header.version = ghhw::kTraceVersion;
+    trace.header.num_heads = ghhw::kDefaultHeads;
+    trace.header.hash_bits = ghhw::kDefaultHashBits;
+    trace.header.default_radius = 2;
+    trace.header.support_threshold = 3;
+
+    trace.records.push_back(make_record(0, {0, 0, 0, 0, 0, 0x1111, 0x2222, 0x3333}, 1));
+    trace.records.push_back(make_record(1, {0, 0, 0, 0, 0, 0xaaaa, 0xbbbb, 0xcccc}, 1));
+    trace.records.push_back(make_record(2, {0, 0, 0, 0x4444, 0x5555, 0x6666, 0x7777, 0x8888}, 1));
+    trace.records.push_back(make_record(3, {0, 0, 0, 0x9999, 0xaaaa, 0xbbbb, 0xcccc, 0xdddd}, 20));
     trace.header.num_nodes = static_cast<uint32_t>(trace.records.size());
     return trace;
 }
@@ -213,6 +231,55 @@ void check_global_unbounded_removes_bucket_limit() {
     assert(analog_unbounded_result.stats.capacity_limit_nodes == 0);
 }
 
+void check_unified_frontend_policy() {
+    const ghhw::TraceData trace = make_unified_frontend_trace();
+
+    ghhw::DigitalConfig digital_cfg;
+    digital_cfg.support_threshold = 3;
+    digital_cfg.direct_support_threshold = 5;
+    digital_cfg.radius = 2;
+    digital_cfg.score_gate_enabled = 1;
+    digital_cfg.score_reuse_threshold = 10;
+    ghhw::DigitalHashReuseEngine digital(digital_cfg);
+    ghhw::DigitalResult digital_result = digital.run(trace);
+
+    ghhw::AnalogCamConfig analog_cfg;
+    analog_cfg.support_threshold = 3;
+    analog_cfg.direct_support_threshold = 5;
+    analog_cfg.radius = 2;
+    analog_cfg.score_gate_enabled = 1;
+    analog_cfg.score_reuse_threshold = 10;
+    ghhw::AnalogCamHashReuseEngine analog(analog_cfg);
+    ghhw::AnalogCamResult analog_result = analog.run(trace);
+
+    assert(digital_result.decisions.size() == analog_result.decisions.size());
+    for (size_t idx = 0; idx < digital_result.decisions.size(); ++idx) {
+        const auto& d = digital_result.decisions[idx];
+        const auto& a = analog_result.decisions[idx];
+        assert(d.hit == a.hit);
+        assert(d.route == a.route);
+        assert(d.support == a.support);
+        assert(d.min_dist == a.min_dist);
+        assert(d.score_reason == a.score_reason);
+    }
+
+    assert(digital_result.decisions[0].route == "compute");
+    assert(!digital_result.decisions[0].hit);
+    assert(digital_result.decisions[1].route == "direct");
+    assert(digital_result.decisions[1].hit);
+    assert(digital_result.decisions[1].support == 5);
+    assert(digital_result.decisions[2].route == "residual");
+    assert(digital_result.decisions[2].hit);
+    assert(digital_result.decisions[2].support == 3);
+    assert(digital_result.decisions[3].route == "compute");
+    assert(!digital_result.decisions[3].hit);
+    assert(digital_result.decisions[3].candidate_found);
+    assert(digital_result.decisions[3].score_reason == "risk");
+    assert(digital_result.stats.direct_reuse == 1);
+    assert(digital_result.stats.residual_route == 1);
+    assert(digital_result.stats.score_reject == 1);
+}
+
 }  // namespace
 
 int main() {
@@ -220,6 +287,7 @@ int main() {
     check_engines_align();
     check_global_lru_capacity();
     check_global_unbounded_removes_bucket_limit();
+    check_unified_frontend_policy();
     std::cout << "hardware_model_tests passed\n";
     return 0;
 }

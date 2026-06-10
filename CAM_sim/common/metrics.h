@@ -14,10 +14,25 @@ struct ConfigText {
 struct Decision {
     uint32_t node_id = 0;
     bool hit = false;
+    bool candidate_found = false;
     uint32_t source_id = 0;
     int support = 0;
+    int route_hit_count = 0;
+    int base_route_hit_count = 0;
+    int winning_base_table_hit_count = 0;
     int min_dist = -1;
     std::string kind = "miss";
+    std::string route = "compute";
+    uint16_t sensitivity_q = 0;
+    uint8_t propagation_q = 0;
+    uint8_t graph_context_q = 0;
+    uint8_t low_unique_q = 0;
+    uint8_t rarity_q = 0;
+    bool score_gate_checked = false;
+    bool score_gate_allow = false;
+    int score_error_q = 0;
+    int score_risk = 0;
+    std::string score_reason = "none";
     uint64_t active_rows = 0;
     uint64_t search_cycles = 0;
     uint64_t verify_cycles = 0;
@@ -35,7 +50,14 @@ struct SimulationStats {
     uint64_t reuse = 0;
     uint64_t exact_reuse = 0;
     uint64_t fuzzy_reuse = 0;
+    uint64_t direct_reuse = 0;
+    uint64_t residual_route = 0;
     uint64_t computed = 0;
+    uint64_t score_checked = 0;
+    uint64_t score_reject = 0;
+    uint64_t score_reject_risk = 0;
+    uint64_t score_reject_hub_protect = 0;
+    uint64_t score_reject_rare_leaf = 0;
     uint64_t candidate_inserts = 0;
     uint64_t candidate_overflows = 0;
     uint64_t sram_probes = 0;
@@ -55,6 +77,14 @@ struct SimulationStats {
 
     double reuse_rate() const {
         return total_queries == 0 ? 0.0 : static_cast<double>(reuse) / static_cast<double>(total_queries);
+    }
+
+    double direct_reuse_rate() const {
+        return total_queries == 0 ? 0.0 : static_cast<double>(direct_reuse) / static_cast<double>(total_queries);
+    }
+
+    double residual_route_rate() const {
+        return total_queries == 0 ? 0.0 : static_cast<double>(residual_route) / static_cast<double>(total_queries);
     }
 
     double cycles_per_query() const {

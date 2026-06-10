@@ -26,6 +26,26 @@ DigitalConfig digital_config_from_file(const std::string& path) {
     out.verify_cycles = config_int(cfg, "verify_cycles", out.verify_cycles);
     out.candidate_select_cycles = config_int(cfg, "candidate_select_cycles", out.candidate_select_cycles);
     out.cache_write_cycles = config_int(cfg, "cache_write_cycles", out.cache_write_cycles);
+    out.direct_support_threshold = config_int(cfg, "direct_support_threshold", out.direct_support_threshold);
+    out.score_gate_enabled = config_int(cfg, "score_gate_enabled", out.score_gate_enabled);
+    out.score_reuse_threshold = config_int(cfg, "score_reuse_threshold", out.score_reuse_threshold);
+    out.score_hub_threshold = config_int(cfg, "score_hub_threshold", out.score_hub_threshold);
+    out.score_rare_threshold = config_int(cfg, "score_rare_threshold", out.score_rare_threshold);
+    out.score_protect_hub_exact = config_int(cfg, "score_protect_hub_exact", out.score_protect_hub_exact);
+    out.score_protect_hub_fuzzy = config_int(cfg, "score_protect_hub_fuzzy", out.score_protect_hub_fuzzy);
+    out.score_forbid_rare_fuzzy = config_int(cfg, "score_forbid_rare_fuzzy", out.score_forbid_rare_fuzzy);
+    out.score_support_discount = config_int(cfg, "score_support_discount", out.score_support_discount);
+    out.score_rare_min_dist = config_int(cfg, "score_rare_min_dist", out.score_rare_min_dist);
+    out.score_rare_min_route_hits = config_int(cfg, "score_rare_min_route_hits", out.score_rare_min_route_hits);
+    out.score_rare_min_base_hits = config_int(cfg, "score_rare_min_base_hits", out.score_rare_min_base_hits);
+    out.score_pair_confidence_discount =
+        config_int(cfg, "score_pair_confidence_discount", out.score_pair_confidence_discount);
+    out.score_pair_confidence_max_dist =
+        config_int(cfg, "score_pair_confidence_max_dist", out.score_pair_confidence_max_dist);
+    out.score_pair_confidence_min_route_hits =
+        config_int(cfg, "score_pair_confidence_min_route_hits", out.score_pair_confidence_min_route_hits);
+    out.score_pair_confidence_min_base_hits =
+        config_int(cfg, "score_pair_confidence_min_base_hits", out.score_pair_confidence_min_base_hits);
     out.cam_compare_energy_fj_per_bit =
         config_number(cfg, "cam_compare_energy_fj_per_bit", out.cam_compare_energy_fj_per_bit);
     out.xor_popcount_energy_fj_per_bit =
@@ -57,6 +77,31 @@ DigitalHashReuseEngine::DigitalHashReuseEngine(DigitalConfig config) : config_(c
     }
     if (config_.verify_lanes <= 0 || config_.verify_cycles <= 0 || config_.cam_search_cycles <= 0) {
         throw std::invalid_argument("verify_lanes, verify_cycles and cam_search_cycles must be positive");
+    }
+    if (config_.direct_support_threshold < config_.support_threshold
+        || config_.direct_support_threshold > static_cast<int>(kDefaultHeads)) {
+        throw std::invalid_argument("direct_support_threshold must be in support_threshold..8");
+    }
+    if (config_.score_gate_enabled != 0 && config_.score_gate_enabled != 1) {
+        throw std::invalid_argument("score_gate_enabled must be 0 or 1");
+    }
+    if ((config_.score_protect_hub_exact != 0 && config_.score_protect_hub_exact != 1)
+        || (config_.score_protect_hub_fuzzy != 0 && config_.score_protect_hub_fuzzy != 1)
+        || (config_.score_forbid_rare_fuzzy != 0 && config_.score_forbid_rare_fuzzy != 1)
+        || (config_.score_support_discount != 0 && config_.score_support_discount != 1)) {
+        throw std::invalid_argument("score-gate boolean flags must be 0 or 1");
+    }
+    if (config_.score_reuse_threshold < 0
+        || config_.score_hub_threshold < 0
+        || config_.score_rare_threshold < 0
+        || config_.score_rare_min_dist < 1
+        || config_.score_rare_min_route_hits < 1
+        || config_.score_rare_min_base_hits < 1
+        || config_.score_pair_confidence_discount < 0
+        || config_.score_pair_confidence_max_dist < 0
+        || config_.score_pair_confidence_min_route_hits <= 0
+        || config_.score_pair_confidence_min_base_hits <= 0) {
+        throw std::invalid_argument("score-gate thresholds must be non-negative and support floors positive");
     }
     if (config_.shared_verifier_lanes != 0 && config_.shared_verifier_lanes != 1) {
         throw std::invalid_argument("shared_verifier_lanes must be 0 or 1");
@@ -95,6 +140,27 @@ DigitalHashReuseEngine::DigitalHashReuseEngine(DigitalConfig config) : config_(c
     for (auto& head_buckets : buckets_) {
         head_buckets.resize(65536);
     }
+}
+
+UnifiedFrontendConfig DigitalHashReuseEngine::frontend_policy_config() const {
+    UnifiedFrontendConfig cfg;
+    cfg.score_gate_enabled = config_.score_gate_enabled != 0;
+    cfg.score_reuse_threshold = config_.score_reuse_threshold;
+    cfg.score_hub_threshold = config_.score_hub_threshold;
+    cfg.score_rare_threshold = config_.score_rare_threshold;
+    cfg.score_protect_hub_exact = config_.score_protect_hub_exact != 0;
+    cfg.score_protect_hub_fuzzy = config_.score_protect_hub_fuzzy != 0;
+    cfg.score_forbid_rare_fuzzy = config_.score_forbid_rare_fuzzy != 0;
+    cfg.score_support_discount = config_.score_support_discount != 0;
+    cfg.score_rare_min_dist = config_.score_rare_min_dist;
+    cfg.score_rare_min_route_hits = config_.score_rare_min_route_hits;
+    cfg.score_rare_min_base_hits = config_.score_rare_min_base_hits;
+    cfg.score_pair_confidence_discount = config_.score_pair_confidence_discount;
+    cfg.score_pair_confidence_max_dist = config_.score_pair_confidence_max_dist;
+    cfg.score_pair_confidence_min_route_hits = config_.score_pair_confidence_min_route_hits;
+    cfg.score_pair_confidence_min_base_hits = config_.score_pair_confidence_min_base_hits;
+    cfg.direct_support_threshold = config_.direct_support_threshold;
+    return cfg;
 }
 
 uint64_t DigitalHashReuseEngine::active_rows_for_head(uint32_t head) const {
@@ -199,6 +265,92 @@ bool DigitalHashReuseEngine::coarse_filter_hit(
     const int chunk_count = chunk_count_for_word_bits(word_bits);
     const int required_exact_chunks = std::max(0, chunk_count - config_.radius);
     return matching_chunks(row_hash, query_hash, word_bits) >= required_exact_chunks;
+}
+
+const std::vector<uint16_t>& DigitalHashReuseEngine::coarse_filter_hashes(
+    uint16_t query_hash,
+    uint32_t word_bits
+) const {
+    const uint32_t cache_key =
+        (word_bits << 24)
+        | (static_cast<uint32_t>(config_.cam_chunk_bits) << 20)
+        | (static_cast<uint32_t>(config_.radius) << 16)
+        ^ static_cast<uint32_t>(query_hash);
+    auto cached = coarse_hash_cache_.find(cache_key);
+    if (cached != coarse_hash_cache_.end()) {
+        return cached->second;
+    }
+
+    const int chunk_count = chunk_count_for_word_bits(word_bits);
+    std::vector<uint32_t> offsets;
+    std::vector<uint32_t> widths;
+    std::vector<uint16_t> masks;
+    std::vector<uint16_t> base_values;
+    offsets.reserve(static_cast<size_t>(chunk_count));
+    widths.reserve(static_cast<size_t>(chunk_count));
+    masks.reserve(static_cast<size_t>(chunk_count));
+    base_values.reserve(static_cast<size_t>(chunk_count));
+
+    uint32_t bit_offset = 0;
+    while (bit_offset < word_bits) {
+        const uint32_t chunk_bits = std::min<uint32_t>(
+            static_cast<uint32_t>(config_.cam_chunk_bits),
+            word_bits - bit_offset
+        );
+        const uint16_t raw_mask = static_cast<uint16_t>((1u << chunk_bits) - 1u);
+        const uint16_t mask = static_cast<uint16_t>(raw_mask << bit_offset);
+        offsets.push_back(bit_offset);
+        widths.push_back(chunk_bits);
+        masks.push_back(mask);
+        base_values.push_back(static_cast<uint16_t>((query_hash & mask) >> bit_offset));
+        bit_offset += chunk_bits;
+    }
+
+    auto set_chunk = [&](uint16_t hash, int chunk_idx, uint16_t value) {
+        hash = static_cast<uint16_t>(hash & ~masks[static_cast<size_t>(chunk_idx)]);
+        hash = static_cast<uint16_t>(
+            hash | static_cast<uint16_t>(value << offsets[static_cast<size_t>(chunk_idx)])
+        );
+        return hash;
+    };
+
+    std::vector<uint16_t> values;
+    values.reserve(1500);
+    values.push_back(query_hash);
+    if (config_.radius >= 1) {
+        for (int i = 0; i < chunk_count; ++i) {
+            const uint16_t limit = static_cast<uint16_t>(1u << widths[static_cast<size_t>(i)]);
+            for (uint16_t vi = 0; vi < limit; ++vi) {
+                if (vi == base_values[static_cast<size_t>(i)]) {
+                    continue;
+                }
+                values.push_back(set_chunk(query_hash, i, vi));
+            }
+        }
+    }
+    if (config_.radius >= 2) {
+        for (int i = 0; i < chunk_count; ++i) {
+            const uint16_t limit_i = static_cast<uint16_t>(1u << widths[static_cast<size_t>(i)]);
+            for (int j = i + 1; j < chunk_count; ++j) {
+                const uint16_t limit_j = static_cast<uint16_t>(1u << widths[static_cast<size_t>(j)]);
+                for (uint16_t vi = 0; vi < limit_i; ++vi) {
+                    if (vi == base_values[static_cast<size_t>(i)]) {
+                        continue;
+                    }
+                    const uint16_t partial = set_chunk(query_hash, i, vi);
+                    for (uint16_t vj = 0; vj < limit_j; ++vj) {
+                        if (vj == base_values[static_cast<size_t>(j)]) {
+                            continue;
+                        }
+                        values.push_back(set_chunk(partial, j, vj));
+                    }
+                }
+            }
+        }
+    }
+
+    auto inserted = coarse_hash_cache_.emplace(cache_key, std::move(values));
+    return inserted.first->second;
 }
 
 void DigitalHashReuseEngine::deactivate_active_node(
@@ -309,6 +461,9 @@ Decision DigitalHashReuseEngine::select_candidate(
         decision.hit = true;
         decision.source_id = best->node_id;
         decision.support = best->support;
+        decision.route_hit_count = best->support;
+        decision.base_route_hit_count = best->support > 0 ? 1 : 0;
+        decision.winning_base_table_hit_count = best->support;
         decision.min_dist = best->min_dist;
         decision.kind = kind;
     }
@@ -332,6 +487,7 @@ void DigitalHashReuseEngine::insert_record(const TraceRecord& rec, SimulationSta
             row.active = true;
             cam_rows_[head].push_back(row);
             node.cam_indices[head] = cam_rows_[head].size() - 1;
+            buckets_[head][row.hash].push_front(BucketEntry{node.cam_indices[head]});
             stats.bucket_writes += 1;
         }
         active_nodes_[rec.node_id] = node;
@@ -383,6 +539,7 @@ DigitalResult DigitalHashReuseEngine::run(const TraceData& trace, ProgressBar* p
 
     uint64_t max_active_rows_seen = 0;
     uint64_t processed = 0;
+    const UnifiedFrontendConfig policy_cfg = frontend_policy_config();
     for (const TraceRecord& rec : trace.records) {
         const uint64_t active_rows = active_rows_all_heads();
         max_active_rows_seen = std::max(max_active_rows_seen, active_rows);
@@ -396,22 +553,35 @@ DigitalResult DigitalHashReuseEngine::run(const TraceData& trace, ProgressBar* p
         }
         const uint64_t search_cycles = search_cycles_for_active_rows(max_head_rows);
 
-        std::unordered_map<uint32_t, Candidate> candidates;
-        candidates.reserve(256);
+        std::unordered_map<uint32_t, Candidate> exact_candidates;
+        std::unordered_map<uint32_t, Candidate> fuzzy_candidates;
+        exact_candidates.reserve(128);
+        fuzzy_candidates.reserve(256);
         uint64_t verified_rows = 0;
         std::array<uint64_t, kDefaultHeads> verified_rows_per_head{};
         for (uint32_t head = 0; head < kDefaultHeads; ++head) {
             if (use_global_lru_) {
-                for (const auto& kv : active_nodes_) {
-                    const CamEntry& row = cam_rows_[head][kv.second.cam_indices[head]];
-                    if (!coarse_filter_hit(row.hash, rec.head_hashes[head], trace.header.hash_bits)) {
-                        continue;
-                    }
-                    verified_rows += 1;
-                    verified_rows_per_head[head] += 1;
-                    const int dist = hamming_distance16(rec.head_hashes[head], row.hash);
-                    if (dist <= config_.radius) {
-                        add_candidate(candidates, row, dist, stats);
+                const auto& hash_values = coarse_filter_hashes(rec.head_hashes[head], trace.header.hash_bits);
+                for (const uint16_t hash_value : hash_values) {
+                    const Bucket& bucket = buckets_[head][hash_value];
+                    for (const BucketEntry& bucket_entry : bucket) {
+                        if (bucket_entry.cam_index >= cam_rows_[head].size()) {
+                            continue;
+                        }
+                        const CamEntry& row = cam_rows_[head][bucket_entry.cam_index];
+                        if (!row.active) {
+                            continue;
+                        }
+                        verified_rows += 1;
+                        verified_rows_per_head[head] += 1;
+                        const int dist = hamming_distance16(rec.head_hashes[head], row.hash);
+                        if (dist <= config_.radius) {
+                            if (dist == 0) {
+                                add_candidate(exact_candidates, row, dist, stats);
+                            } else {
+                                add_candidate(fuzzy_candidates, row, dist, stats);
+                            }
+                        }
                     }
                 }
             } else {
@@ -426,7 +596,11 @@ DigitalResult DigitalHashReuseEngine::run(const TraceData& trace, ProgressBar* p
                     verified_rows_per_head[head] += 1;
                     const int dist = hamming_distance16(rec.head_hashes[head], row.hash);
                     if (dist <= config_.radius) {
-                        add_candidate(candidates, row, dist, stats);
+                        if (dist == 0) {
+                            add_candidate(exact_candidates, row, dist, stats);
+                        } else {
+                            add_candidate(fuzzy_candidates, row, dist, stats);
+                        }
                     }
                 }
             }
@@ -451,10 +625,60 @@ DigitalResult DigitalHashReuseEngine::run(const TraceData& trace, ProgressBar* p
              * config_.xor_popcount_energy_fj_per_bit)
             / 1000.0;
 
-        Decision decision = select_candidate(candidates, rec.node_id, "fuzzy");
-        if (decision.hit && decision.min_dist == 0) {
-            decision.kind = "exact";
+        uint64_t score_checks_for_query = 0;
+        uint64_t score_rejects_for_query = 0;
+        uint64_t score_risk_rejects_for_query = 0;
+        uint64_t score_hub_rejects_for_query = 0;
+        uint64_t score_rare_rejects_for_query = 0;
+        auto apply_route_policy = [&](Decision& candidate) {
+            candidate.candidate_found = candidate.hit;
+            candidate.sensitivity_q = rec.sensitivity_q;
+            candidate.propagation_q = rec.propagation_q;
+            candidate.graph_context_q = rec.graph_context_q;
+            candidate.low_unique_q = rec.low_unique_q;
+            candidate.rarity_q = rec.rarity_q;
+            const UnifiedFrontendDecision route = apply_unified_frontend_policy(
+                rec.sensitivity_q,
+                rec.propagation_q,
+                rec.low_unique_q,
+                candidate.route_hit_count,
+                candidate.base_route_hit_count,
+                candidate.min_dist,
+                policy_cfg
+            );
+            candidate.score_gate_checked = candidate.candidate_found && (config_.score_gate_enabled != 0);
+            candidate.score_gate_allow = candidate.candidate_found && route.accepted;
+            candidate.score_error_q = route.score_error_q;
+            candidate.score_risk = route.score_risk;
+            candidate.score_reason = route.score_reason;
+            candidate.route = route.route;
+            if (candidate.score_gate_checked) {
+                score_checks_for_query += 1;
+                if (!route.accepted) {
+                    score_rejects_for_query += 1;
+                    if (route.score_reason == "risk") {
+                        score_risk_rejects_for_query += 1;
+                    } else if (route.score_reason == "hub_protect") {
+                        score_hub_rejects_for_query += 1;
+                    } else if (route.score_reason == "rare_leaf") {
+                        score_rare_rejects_for_query += 1;
+                    }
+                }
+            }
+            return route;
+        };
+
+        Decision decision = select_candidate(exact_candidates, rec.node_id, "exact");
+        UnifiedFrontendDecision route_decision = apply_route_policy(decision);
+        if (!decision.candidate_found || !route_decision.accepted) {
+            Decision fuzzy_decision = select_candidate(fuzzy_candidates, rec.node_id, "fuzzy");
+            if (fuzzy_decision.hit) {
+                UnifiedFrontendDecision fuzzy_route_decision = apply_route_policy(fuzzy_decision);
+                decision = fuzzy_decision;
+                route_decision = fuzzy_route_decision;
+            }
         }
+        decision.hit = route_decision.accepted;
         if (decision.hit) {
             touch_node(decision.source_id);
         }
@@ -464,8 +688,18 @@ DigitalResult DigitalHashReuseEngine::run(const TraceData& trace, ProgressBar* p
         decision.verified_rows = verified_rows;
 
         stats.cycles += static_cast<uint64_t>(config_.candidate_select_cycles);
+        stats.score_checked += score_checks_for_query;
+        stats.score_reject += score_rejects_for_query;
+        stats.score_reject_risk += score_risk_rejects_for_query;
+        stats.score_reject_hub_protect += score_hub_rejects_for_query;
+        stats.score_reject_rare_leaf += score_rare_rejects_for_query;
         if (decision.hit) {
             stats.reuse += 1;
+            if (decision.route == "direct") {
+                stats.direct_reuse += 1;
+            } else if (decision.route == "residual") {
+                stats.residual_route += 1;
+            }
             if (decision.kind == "exact") {
                 stats.exact_reuse += 1;
             } else {

@@ -85,14 +85,33 @@ void write_decisions_csv(const std::string& path, const std::vector<Decision>& d
     if (!out) {
         throw std::runtime_error("failed to write decisions file: " + path);
     }
-    out << "node_id,hit,source_id,support,min_dist,kind,active_rows,search_cycles,verify_cycles,verified_rows\n";
+    out << "node_id,hit,candidate_found,source_id,support,route_hit_count,base_route_hit_count,"
+           "winning_base_table_hit_count,min_dist,kind,route,sensitivity_q,propagation_q,"
+           "graph_context_q,low_unique_q,rarity_q,"
+           "score_gate_checked,score_gate_allow,score_error_q,score_risk,score_reason,"
+           "active_rows,search_cycles,verify_cycles,verified_rows\n";
     for (const Decision& decision : decisions) {
         out << decision.node_id << ','
             << (decision.hit ? 1 : 0) << ','
+            << (decision.candidate_found ? 1 : 0) << ','
             << decision.source_id << ','
             << decision.support << ','
+            << decision.route_hit_count << ','
+            << decision.base_route_hit_count << ','
+            << decision.winning_base_table_hit_count << ','
             << decision.min_dist << ','
             << decision.kind << ','
+            << decision.route << ','
+            << decision.sensitivity_q << ','
+            << static_cast<int>(decision.propagation_q) << ','
+            << static_cast<int>(decision.graph_context_q) << ','
+            << static_cast<int>(decision.low_unique_q) << ','
+            << static_cast<int>(decision.rarity_q) << ','
+            << (decision.score_gate_checked ? 1 : 0) << ','
+            << (decision.score_gate_allow ? 1 : 0) << ','
+            << decision.score_error_q << ','
+            << decision.score_risk << ','
+            << decision.score_reason << ','
             << decision.active_rows << ','
             << decision.search_cycles << ','
             << decision.verify_cycles << ','
@@ -131,8 +150,17 @@ void write_report_json(
     out << "  \"reuse\": " << stats.reuse << ",\n";
     out << "  \"exact_reuse\": " << stats.exact_reuse << ",\n";
     out << "  \"fuzzy_reuse\": " << stats.fuzzy_reuse << ",\n";
+    out << "  \"direct_reuse\": " << stats.direct_reuse << ",\n";
+    out << "  \"residual_route\": " << stats.residual_route << ",\n";
     out << "  \"computed\": " << stats.computed << ",\n";
     out << "  \"reuse_rate\": " << stats.reuse_rate() << ",\n";
+    out << "  \"direct_reuse_rate\": " << stats.direct_reuse_rate() << ",\n";
+    out << "  \"residual_route_rate\": " << stats.residual_route_rate() << ",\n";
+    out << "  \"score_checked\": " << stats.score_checked << ",\n";
+    out << "  \"score_reject\": " << stats.score_reject << ",\n";
+    out << "  \"score_reject_risk\": " << stats.score_reject_risk << ",\n";
+    out << "  \"score_reject_hub_protect\": " << stats.score_reject_hub_protect << ",\n";
+    out << "  \"score_reject_rare_leaf\": " << stats.score_reject_rare_leaf << ",\n";
     out << "  \"candidate_inserts\": " << stats.candidate_inserts << ",\n";
     out << "  \"candidate_overflows\": " << stats.candidate_overflows << ",\n";
     out << "  \"sram_probes\": " << stats.sram_probes << ",\n";
