@@ -201,6 +201,8 @@ class PaperHashReuseController(HeatPlusPlus_NDP_Controller):
         self.quant_policy = None
         self.score_summary = None
         self._time_counter = 0
+        self.last_query_trace = None
+        self.last_query_decisions = []
 
         super().__init__(input_dim, sketch_bits, device, hamming_radius, random_seed=self.hash_init_seed)
 
@@ -1096,11 +1098,15 @@ class PaperHashReuseController(HeatPlusPlus_NDP_Controller):
         query_node_id,
         apply_structure_check=True,
         exact_guard=False,
+        return_debug=False,
     ):
         if not scored:
+            if return_debug:
+                return None, {"candidate_found": False, "best_score_reject_item": None}
             return None
 
         accepted = []
+        best_score_reject_item = None
         max_structure_checks = self.max_structure_checks
         if max_structure_checks is None:
             max_structure_checks = max(self.vote_top_m * 4, 8)
@@ -1121,34 +1127,63 @@ class PaperHashReuseController(HeatPlusPlus_NDP_Controller):
                 ):
                     self.stats["structure_reject"] += 1
                     continue
-            score_ok, _score_decision = self._score_gate_allows(query_node_id, item)
+            score_ok, score_decision = self._score_gate_allows(query_node_id, item)
             if not score_ok:
+                if return_debug and best_score_reject_item is None:
+                    rejected_item = dict(item)
+                    rejected_item["score_decision"] = dict(score_decision) if score_decision is not None else None
+                    best_score_reject_item = rejected_item
                 continue
-            accepted.append(item)
+            if return_debug:
+                accepted_item = dict(item)
+                accepted_item["score_decision"] = dict(score_decision) if score_decision is not None else None
+                accepted.append(accepted_item)
+            else:
+                accepted.append(item)
 
         if not accepted:
+            if return_debug:
+                return None, {
+                    "candidate_found": best_score_reject_item is not None,
+                    "best_score_reject_item": best_score_reject_item,
+                }
             return None
 
         top_item = accepted[0]
         top_required_tau = self._required_route_cosine_tau(top_item["route_idx"], top_item["dist"])
         route_vote_count = sum(1 for item in accepted if item["route_idx"] == top_item["route_idx"])
         if route_vote_count < self.route_min_accept_votes[top_item["route_idx"]]:
+            if return_debug:
+                return None, {"candidate_found": False, "best_score_reject_item": best_score_reject_item}
             return None
         if int(top_item.get("base_route_hit_count", 0)) < self.min_base_route_hits:
+            if return_debug:
+                return None, {"candidate_found": False, "best_score_reject_item": best_score_reject_item}
             return None
         winning_base_route_idx = int(top_item.get("winning_base_route_idx", 0))
         winning_base_table_hit_count = int(top_item.get("winning_base_table_hit_count", 1))
         if winning_base_table_hit_count < self.route_min_support_hits[winning_base_route_idx]:
+            if return_debug:
+                return None, {"candidate_found": False, "best_score_reject_item": best_score_reject_item}
             return None
         if not self.hamming_only_acceptor and top_item["cos"] < top_required_tau and len(accepted) < 2:
+            if return_debug:
+                return None, {"candidate_found": False, "best_score_reject_item": best_score_reject_item}
             return None
         if exact_guard and not self.hamming_only_acceptor and not self._passes_exact_bucket_guard(accepted):
             self.stats["exact_guard_reject"] += 1
+            if return_debug:
+                return None, {"candidate_found": False, "best_score_reject_item": best_score_reject_item}
             return None
 
-        return {
+        score_decision = top_item.get("score_decision", None)
+        if score_decision is None:
+            score_decision = {}
+        result = {
             "best_route_idx": top_item["route_idx"],
             "best_route_name": top_item["route_name"],
+            "best_base_route_idx": int(top_item.get("base_route_idx", 0)),
+            "best_base_route_name": top_item.get("base_route_name", ""),
             "best_hash": top_item["hash"],
             "best_entry": top_item["entry"],
             "best_cos": top_item["cos"],
@@ -1156,8 +1191,18 @@ class PaperHashReuseController(HeatPlusPlus_NDP_Controller):
             "route_hit_count": int(top_item.get("route_hit_count", 1)),
             "base_route_hit_count": int(top_item.get("base_route_hit_count", 1)),
             "winning_base_table_hit_count": int(top_item.get("winning_base_table_hit_count", 1)),
+            "best_route_weight": float(top_item.get("route_weight", 1.0)),
+            "best_route_score": float(top_item.get("route_score", 0.0)),
+            "best_timestamp": int(top_item["entry"].get("timestamp", -1)),
+            "score_decision": dict(score_decision),
             "voted_emb": top_item["entry"]["cached_emb"],
         }
+        if return_debug:
+            return result, {
+                "candidate_found": True,
+                "best_score_reject_item": best_score_reject_item,
+            }
+        return result
 
     def _aggregate_candidate_vote(
         self,
@@ -1176,9 +1221,29 @@ class PaperHashReuseController(HeatPlusPlus_NDP_Controller):
             exact_guard=exact_guard,
         )
 
+    def _aggregate_candidate_vote_with_trace(
+        self,
+        candidate_refs,
+        query_feat,
+        query_node_id,
+        apply_structure_check=True,
+        exact_guard=False,
+    ):
+        scored = self._collect_scored_candidates(candidate_refs, query_feat, exclude_node_id=query_node_id)
+        return self._select_vote_from_scored(
+            scored,
+            query_feat,
+            query_node_id,
+            apply_structure_check=apply_structure_check,
+            exact_guard=exact_guard,
+            return_debug=True,
+        )
+
     def query_full_batch(self, hash_features, verify_features, oracle_embs):
         num_nodes = verify_features.size(0)
         self._reset_route_caches()
+        self.last_query_trace = None
+        self.last_query_decisions = []
         self.stats = {
             "total_queries": 0,
             "reuse": 0,
@@ -1224,7 +1289,115 @@ class PaperHashReuseController(HeatPlusPlus_NDP_Controller):
         route_hit_counts = [0] * num_nodes
         base_route_hit_counts = [0] * num_nodes
         winning_base_table_hit_counts = [0] * num_nodes
+        decision_rows = [None] * num_nodes
         indices_compute = []
+
+        def score_fields_for_node(node_idx):
+            if self.node_risk_scores is None:
+                return {
+                    "sensitivity_q": 0,
+                    "propagation_q": 0,
+                    "graph_context_q": 0,
+                    "low_unique_q": 0,
+                    "rarity_q": 0,
+                }
+            return {
+                "sensitivity_q": int(self.node_risk_scores["sensitivity_q"][node_idx].item()),
+                "propagation_q": int(self.node_risk_scores["propagation_q"][node_idx].item()),
+                "graph_context_q": int(self.node_risk_scores["graph_context_q"][node_idx].item()),
+                "low_unique_q": int(self.node_risk_scores["low_degree_unique_q"][node_idx].item()),
+                "rarity_q": int(self.node_risk_scores["rarity_q"][node_idx].item()),
+            }
+
+        def base_decision_row(node_idx):
+            row = {
+                "node_id": int(node_idx),
+                "hit": False,
+                "candidate_found": False,
+                "source_id": -1,
+                "support": 0,
+                "route_hit_count": 0,
+                "base_route_hit_count": 0,
+                "winning_base_table_hit_count": 0,
+                "min_dist": -1,
+                "kind": "miss",
+                "route": "compute",
+                "score_gate_checked": False,
+                "score_gate_allow": False,
+                "score_error_q": 0,
+                "score_risk": 0,
+                "score_reason": "none",
+                "route_idx": -1,
+                "route_name": "",
+                "base_route_idx": -1,
+                "base_route_name": "",
+                "route_weight": 0.0,
+                "route_score": 0.0,
+                "timestamp": -1,
+            }
+            row.update(score_fields_for_node(node_idx))
+            return row
+
+        def decision_row_from_vote(node_idx, vote_result, kind, accepted):
+            row = base_decision_row(node_idx)
+            score_decision = dict(vote_result.get("score_decision", {}) or {})
+            row.update(
+                {
+                    "hit": bool(accepted),
+                    "candidate_found": True,
+                    "source_id": int(vote_result["best_entry"]["node_id"]),
+                    "support": int(vote_result.get("winning_base_table_hit_count", 0)),
+                    "route_hit_count": int(vote_result.get("route_hit_count", 0)),
+                    "base_route_hit_count": int(vote_result.get("base_route_hit_count", 0)),
+                    "winning_base_table_hit_count": int(vote_result.get("winning_base_table_hit_count", 0)),
+                    "min_dist": int(vote_result.get("best_dist", -1)),
+                    "kind": str(kind),
+                    "score_gate_checked": self.risk_gate is not None,
+                    "score_gate_allow": bool(score_decision.get("allow", self.risk_gate is None)),
+                    "score_error_q": int(score_decision.get("approx_error", 0)),
+                    "score_risk": int(score_decision.get("risk", 0)),
+                    "score_reason": str(score_decision.get("reason", "allow" if accepted else "none")),
+                    "route_idx": int(vote_result.get("best_route_idx", -1)),
+                    "route_name": str(vote_result.get("best_route_name", "")),
+                    "base_route_idx": int(vote_result.get("best_base_route_idx", -1)),
+                    "base_route_name": str(vote_result.get("best_base_route_name", "")),
+                    "route_weight": float(vote_result.get("best_route_weight", 0.0)),
+                    "route_score": float(vote_result.get("best_route_score", 0.0)),
+                    "timestamp": int(vote_result.get("best_timestamp", -1)),
+                }
+            )
+            return row
+
+        def decision_row_from_reject(node_idx, reject_item, kind):
+            row = base_decision_row(node_idx)
+            score_decision = dict(reject_item.get("score_decision", {}) or {})
+            entry = reject_item.get("entry", {})
+            row.update(
+                {
+                    "hit": False,
+                    "candidate_found": True,
+                    "source_id": int(entry.get("node_id", -1)),
+                    "support": int(reject_item.get("winning_base_table_hit_count", 0)),
+                    "route_hit_count": int(reject_item.get("route_hit_count", 0)),
+                    "base_route_hit_count": int(reject_item.get("base_route_hit_count", 0)),
+                    "winning_base_table_hit_count": int(reject_item.get("winning_base_table_hit_count", 0)),
+                    "min_dist": int(reject_item.get("dist", -1)),
+                    "kind": str(kind),
+                    "score_gate_checked": self.risk_gate is not None,
+                    "score_gate_allow": bool(score_decision.get("allow", False)),
+                    "score_error_q": int(score_decision.get("approx_error", 0)),
+                    "score_risk": int(score_decision.get("risk", 0)),
+                    "score_reason": str(score_decision.get("reason", "none")),
+                    "route_idx": int(reject_item.get("route_idx", -1)),
+                    "route_name": str(reject_item.get("route_name", "")),
+                    "base_route_idx": int(reject_item.get("base_route_idx", -1)),
+                    "base_route_name": str(reject_item.get("base_route_name", "")),
+                    "route_weight": float(reject_item.get("route_weight", 0.0)),
+                    "route_score": float(reject_item.get("route_score", 0.0)),
+                    "timestamp": int(entry.get("timestamp", -1)),
+                }
+            )
+            return row
 
         query_iter = tqdm(
             range(num_nodes),
@@ -1238,6 +1411,7 @@ class PaperHashReuseController(HeatPlusPlus_NDP_Controller):
             allowed_r = self.node_policies[node_idx].item()
 
             exact_candidate_refs = self._find_exact_candidate_refs(query_hashes)
+            exact_vote_trace = {"candidate_found": False, "best_score_reject_item": None}
             if exact_candidate_refs:
                 exact_guard = any(
                     self._should_guard_exact_bucket(ref["hash"], route_idx=ref["route_idx"])
@@ -1245,7 +1419,7 @@ class PaperHashReuseController(HeatPlusPlus_NDP_Controller):
                 )
                 if exact_guard:
                     self.stats["exact_guarded"] += 1
-                vote_result = self._aggregate_candidate_vote(
+                vote_result, exact_vote_trace = self._aggregate_candidate_vote_with_trace(
                     exact_candidate_refs,
                     verify_features[node_idx],
                     node_idx,
@@ -1264,12 +1438,13 @@ class PaperHashReuseController(HeatPlusPlus_NDP_Controller):
                     route_hit_counts[node_idx] = int(vote_result.get("route_hit_count", 1))
                     base_route_hit_counts[node_idx] = int(vote_result.get("base_route_hit_count", 1))
                     winning_base_table_hit_counts[node_idx] = int(vote_result.get("winning_base_table_hit_count", 1))
+                    decision_rows[node_idx] = decision_row_from_vote(node_idx, vote_result, "exact", True)
                     self.stats["reuse"] += 1
                     self.stats["exact_reuse"] += 1
                     continue
 
             candidate_refs = self._collect_union_candidate_refs(query_hashes, allowed_r)
-            vote_result = self._aggregate_candidate_vote(
+            vote_result, fuzzy_vote_trace = self._aggregate_candidate_vote_with_trace(
                 candidate_refs,
                 verify_features[node_idx],
                 node_idx,
@@ -1287,6 +1462,7 @@ class PaperHashReuseController(HeatPlusPlus_NDP_Controller):
                 route_hit_counts[node_idx] = int(vote_result.get("route_hit_count", 1))
                 base_route_hit_counts[node_idx] = int(vote_result.get("base_route_hit_count", 1))
                 winning_base_table_hit_counts[node_idx] = int(vote_result.get("winning_base_table_hit_count", 1))
+                decision_rows[node_idx] = decision_row_from_vote(node_idx, vote_result, "fuzzy", True)
                 self.stats["reuse"] += 1
                 self.stats["fuzzy_reuse"] += 1
                 self.stats["fuzzy"] += 1
@@ -1304,6 +1480,18 @@ class PaperHashReuseController(HeatPlusPlus_NDP_Controller):
             self._time_counter += 1
             self._cache_computed_entry(query_hashes, entry)
             final_embs_list[node_idx] = produced_emb
+            reject_item = None
+            reject_kind = "miss"
+            if fuzzy_vote_trace.get("candidate_found", False):
+                reject_item = fuzzy_vote_trace.get("best_score_reject_item", None)
+                reject_kind = "fuzzy"
+            elif exact_vote_trace.get("candidate_found", False):
+                reject_item = exact_vote_trace.get("best_score_reject_item", None)
+                reject_kind = "exact"
+            if reject_item is not None:
+                decision_rows[node_idx] = decision_row_from_reject(node_idx, reject_item, reject_kind)
+            else:
+                decision_rows[node_idx] = base_decision_row(node_idx)
 
         self.stats["total_queries"] = num_nodes
         self.stats["computed"] = len(indices_compute)
@@ -1357,4 +1545,5 @@ class PaperHashReuseController(HeatPlusPlus_NDP_Controller):
                 device=self.device,
             ),
         }
+        self.last_query_decisions = decision_rows
         return final_embs, hits_tensor
