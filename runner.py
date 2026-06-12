@@ -1,5 +1,6 @@
 import os
 import json
+import time
 from copy import deepcopy
 
 import numpy as np
@@ -46,6 +47,17 @@ from .routing import (
     resolve_route_min_support_hits,
     resolve_route_score_weights,
 )
+
+
+def _sync_timing_device(device):
+    if not torch.cuda.is_available():
+        return
+    try:
+        if torch.device(device).type == "cuda":
+            torch.cuda.synchronize(device)
+    except (TypeError, RuntimeError):
+        torch.cuda.synchronize()
+
 
 def build_adaptive_configs(args):
     radius_name = f"R{int(args.radius)}"
@@ -226,6 +238,9 @@ def train_baseline_model(data, args, device):
 
 
 def build_route_bundle(verify_features, data, oracle_embs, oracle_logits, args, log_important, device):
+    _sync_timing_device(device)
+    route_build_start = time.perf_counter()
+    feature_start = time.perf_counter()
     base_route_specs = build_hash_feature_routes(
         verify_features,
         data.edge_index,
@@ -248,6 +263,7 @@ def build_route_bundle(verify_features, data, oracle_embs, oracle_logits, args, 
                 "route_role": "topology",
             }
         )
+    feature_elapsed = time.perf_counter() - feature_start
     base_route_tags = list_retrieval_route_tags(
         args.hash_view,
         args.union_hash_views,
@@ -284,6 +300,8 @@ def build_route_bundle(verify_features, data, oracle_embs, oracle_logits, args, 
         else:
             supervision_mask = data.train_mask | data.val_mask
 
+    _sync_timing_device(device)
+    projection_start = time.perf_counter()
     route_specs, projection_stats = fit_multihead_hash_projection(
         route_specs,
         oracle_embs,
@@ -292,7 +310,10 @@ def build_route_bundle(verify_features, data, oracle_embs, oracle_logits, args, 
         args=args,
         device=device,
     )
+    _sync_timing_device(device)
+    projection_elapsed = time.perf_counter() - projection_start
 
+    finalize_start = time.perf_counter()
     hash_route_features = [spec["features"] for spec in route_specs]
     hash_route_matrices = [spec.get("hash_matrix") for spec in route_specs]
     hash_route_bits = [int(spec.get("hash_bits", matrix.size(1) if matrix is not None else args.sketch_bits)) for spec, matrix in zip(route_specs, hash_route_matrices)]
@@ -333,8 +354,17 @@ def build_route_bundle(verify_features, data, oracle_embs, oracle_logits, args, 
         "route_min_accept_votes": route_min_accept_votes,
         "route_min_support_hits": base_route_min_support_hits,
     }
+    finalize_elapsed = time.perf_counter() - finalize_start
+    total_elapsed = time.perf_counter() - route_build_start
 
     log_important(f"[HashRoutes] {format_hash_route_specs(route_specs, route_score_weights)}")
+    log_important(
+        "[HashPreprocessTiming] "
+        f"route_features_s={feature_elapsed:.4f} "
+        f"| projection_s={projection_elapsed:.4f} "
+        f"| bundle_finalize_s={finalize_elapsed:.4f} "
+        f"| total_s={total_elapsed:.4f}"
+    )
     log_important(
         "[RouteAccept] "
         + ", ".join(
@@ -446,6 +476,8 @@ def _greedy_refine_hash_order(base_order, hashes_by_head, head_count, block_size
 
 
 def build_hash_node_order(route_bundle, args, device, log_important):
+    _sync_timing_device(device)
+    order_start = time.perf_counter()
     matrices = route_bundle.get("hash_route_matrices")
     if matrices is None:
         log_important("[HashOrder] unavailable: route_bundle has no explicit hash matrices; using default order")
@@ -454,11 +486,16 @@ def build_hash_node_order(route_bundle, args, device, log_important):
     requested_heads = int(getattr(args, "hash_node_order_heads", 4))
     head_count = max(1, min(requested_heads, len(route_features), len(matrices)))
 
+    _sync_timing_device(device)
+    fingerprint_start = time.perf_counter()
     hashes_by_head = [
         _fingerprints_from_projection(route_features[head_idx], matrices[head_idx], device)
         for head_idx in range(head_count)
     ]
+    _sync_timing_device(device)
+    fingerprint_elapsed = time.perf_counter() - fingerprint_start
     num_nodes = len(hashes_by_head[0])
+    sort_start = time.perf_counter()
     base_order = sorted(
         range(num_nodes),
         key=lambda node_id: tuple(
@@ -467,16 +504,24 @@ def build_hash_node_order(route_bundle, args, device, log_important):
         )
         + (node_id,),
     )
+    sort_elapsed = time.perf_counter() - sort_start
     block_size = int(getattr(args, "hash_node_order_block_size", 0))
     if block_size <= 0:
         cache_size = getattr(args, "cache_size", None)
         block_size = int(cache_size) if cache_size is not None and int(cache_size) > 0 else 128
+    refine_start = time.perf_counter()
     node_order = _greedy_refine_hash_order(base_order, hashes_by_head, head_count, block_size)
+    refine_elapsed = time.perf_counter() - refine_start
+    total_elapsed = time.perf_counter() - order_start
     unique_first_head = len(set(hashes_by_head[0])) if hashes_by_head else 0
     log_important(
         "[HashOrder] "
         f"heads={head_count}/{len(route_features)} | block_size={block_size} "
-        f"| order_len={len(node_order)} | unique_head0={unique_first_head}"
+        f"| order_len={len(node_order)} | unique_head0={unique_first_head} "
+        f"| fingerprint_s={fingerprint_elapsed:.4f} "
+        f"| sort_s={sort_elapsed:.4f} "
+        f"| refine_s={refine_elapsed:.4f} "
+        f"| total_s={total_elapsed:.4f}"
     )
     return node_order
 
@@ -1164,6 +1209,23 @@ def log_residual_fit_config(log_important, fit_cfg):
     )
 
 
+def log_residual_fit_timing(log_important, train_info):
+    timing = dict(train_info.get("timing", {}) or {})
+    if not timing:
+        return
+    log_important(
+        "[ResidualFitTiming] "
+        f"select_nodes_s={float(timing.get('select_nodes_s', 0.0)):.4f} "
+        f"| pair_prepare_s={float(timing.get('pair_prepare_s', 0.0)):.4f} "
+        f"| feature_build_s={float(timing.get('feature_build_s', 0.0)):.4f} "
+        f"| probe_fit_s={float(timing.get('probe_fit_s', 0.0)):.4f} "
+        f"| global_fit_s={float(timing.get('global_fit_s', 0.0)):.4f} "
+        f"| bucket_fit_s={float(timing.get('bucket_fit_s', 0.0)):.4f} "
+        f"| bucket_adapters={int(timing.get('bucket_adapter_count', 0))} "
+        f"| total_s={float(timing.get('total_s', 0.0)):.4f}"
+    )
+
+
 def build_support_split_masks(trace, soft_min_hits, hard_min_hits, device):
     hit_mask = trace["hit_mask"].to(device=device, dtype=torch.bool)
     source_ok = trace["source_ids"].to(device=device) >= 0
@@ -1508,6 +1570,7 @@ def run_residual_reuse_experiment(args):
                     classifier_accept_probe_alpha=args.residual_classifier_accept_probe_alpha,
                     classifier_accept_max_kl=args.residual_classifier_accept_max_kl,
                 )
+                log_residual_fit_timing(log_important, train_info)
 
                 if adapter is not None:
                     support_alpha_enabled = bool(args.residual_support_aware_alpha)
@@ -3459,6 +3522,7 @@ def run_residual_precision_depth_experiment(args):
                     classifier_accept_probe_alpha=run_args.residual_classifier_accept_probe_alpha,
                     classifier_accept_max_kl=run_args.residual_classifier_accept_max_kl,
                 )
+                log_residual_fit_timing(log_important, train_info)
 
                 if adapter is not None:
                     support_alpha_enabled = bool(run_args.residual_support_aware_alpha)
@@ -4540,6 +4604,7 @@ def run_hierarchical_encoder_experiment(args):
                     classifier_accept_probe_alpha=run_args.residual_classifier_accept_probe_alpha,
                     classifier_accept_max_kl=run_args.residual_classifier_accept_max_kl,
                 )
+                log_residual_fit_timing(log_important, train_info)
 
                 if adapter is not None and float(run_args.residual_alpha) < 0.0:
                     alpha_grid = resolve_residual_alpha_grid(run_args, residual_fit_cfg)

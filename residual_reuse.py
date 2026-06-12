@@ -1,10 +1,21 @@
 import re
+import time
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
 from .features import _compute_neighbor_mean
+
+
+def _sync_timing_device(device):
+    if not torch.cuda.is_available():
+        return
+    try:
+        if torch.device(device).type == "cuda":
+            torch.cuda.synchronize(device)
+    except (TypeError, RuntimeError):
+        torch.cuda.synchronize()
 
 
 class LowRankResidualAdapter(nn.Module):
@@ -1068,6 +1079,9 @@ def train_residual_adapter(
     classifier_accept_max_kl=0.2,
 ):
     device = target_embeddings.device
+    _sync_timing_device(device)
+    total_start = time.perf_counter()
+    select_start = time.perf_counter()
     train_nodes = select_residual_train_nodes(
         trace,
         data,
@@ -1076,9 +1090,26 @@ def train_residual_adapter(
         correction_mask=correction_mask,
         min_dist=min_dist,
     )
+    _sync_timing_device(device)
+    select_elapsed = time.perf_counter() - select_start
     if train_nodes.numel() == 0:
-        return None, {"train_pairs": 0, "loss": 0.0}
+        total_elapsed = time.perf_counter() - total_start
+        return None, {
+            "train_pairs": 0,
+            "loss": 0.0,
+            "timing": {
+                "select_nodes_s": float(select_elapsed),
+                "pair_prepare_s": 0.0,
+                "feature_build_s": 0.0,
+                "probe_fit_s": 0.0,
+                "global_fit_s": 0.0,
+                "bucket_fit_s": 0.0,
+                "bucket_adapter_count": 0,
+                "total_s": float(total_elapsed),
+            },
+        }
 
+    pair_prepare_start = time.perf_counter()
     pair_tensors = _build_training_pair_tensors(trace, train_nodes, device)
     pair_tensors, base_pairs_kept, base_pairs_total = _filter_positive_pairs_by_error(
         pair_tensors,
@@ -1146,6 +1177,8 @@ def train_residual_adapter(
         max(0, int(max_pairs)),
         negative_error_min,
     )
+    _sync_timing_device(device)
+    pair_prepare_elapsed = time.perf_counter() - pair_prepare_start
     accept_targets = None
     class_accept_labelled = 0
     class_accept_positive = 0
@@ -1154,6 +1187,7 @@ def train_residual_adapter(
     classifier_accept_mean_kl = 0.0
     class_targets = None
     if pair_tensors["node_indices"].numel() == 0:
+        total_elapsed = time.perf_counter() - total_start
         return None, {
             "train_pairs": 0,
             "base_train_nodes": int(train_nodes.numel()),
@@ -1181,6 +1215,16 @@ def train_residual_adapter(
             "classifier_accept_mean_kl": 0.0,
             "classifier_accept_after_residual": bool(classifier_accept_after_residual),
             "classifier_accept_probe_alpha": float(classifier_accept_probe_alpha),
+            "timing": {
+                "select_nodes_s": float(select_elapsed),
+                "pair_prepare_s": float(pair_prepare_elapsed),
+                "feature_build_s": 0.0,
+                "probe_fit_s": 0.0,
+                "global_fit_s": 0.0,
+                "bucket_fit_s": 0.0,
+                "bucket_adapter_count": 0,
+                "total_s": float(total_elapsed),
+            },
         }
 
     if bool(classifier_accept_gate) and not bool(classifier_accept_after_residual):
@@ -1208,6 +1252,8 @@ def train_residual_adapter(
         if class_targets is not None:
             accept_targets = class_targets if accept_targets is None else accept_targets * class_targets
 
+    _sync_timing_device(device)
+    feature_build_start = time.perf_counter()
     x_train = build_residual_pair_inputs(
         verify_features,
         edge_index,
@@ -1239,8 +1285,13 @@ def train_residual_adapter(
             winning_base_table_hit_counts=negative_pairs["winning_base_table_hit_counts"],
             best_cosines=negative_pairs["best_cosines"],
         )
+    _sync_timing_device(device)
+    feature_build_elapsed = time.perf_counter() - feature_build_start
+    probe_fit_elapsed = 0.0
     if bool(classifier_accept_gate) and bool(classifier_accept_after_residual):
         probe_epochs = max(20, int(epochs) // 2)
+        _sync_timing_device(device)
+        probe_fit_start = time.perf_counter()
         probe_adapter, _probe_loss, _probe_gate_mean, _probe_accept_gate_mean = _fit_residual_adapter(
             x_train,
             anchors,
@@ -1267,6 +1318,8 @@ def train_residual_adapter(
             negative_gate_weight=negative_gate_weight,
             accept_targets=class_targets,
         )
+        _sync_timing_device(device)
+        probe_fit_elapsed = time.perf_counter() - probe_fit_start
         probe_adapter.eval()
         with torch.no_grad():
             probe_residual, _probe_raw_delta, _probe_gate, _probe_accept_gate = _adapter_forward(probe_adapter, x_train)
@@ -1289,6 +1342,8 @@ def train_residual_adapter(
         )
         if class_targets is not None:
             accept_targets = accept_targets * class_targets
+    _sync_timing_device(device)
+    global_fit_start = time.perf_counter()
     global_adapter, global_loss, global_gate_mean, global_accept_gate_mean = _fit_residual_adapter(
         x_train,
         anchors,
@@ -1315,6 +1370,8 @@ def train_residual_adapter(
         negative_gate_weight=negative_gate_weight,
         accept_targets=accept_targets,
     )
+    _sync_timing_device(device)
+    global_fit_elapsed = time.perf_counter() - global_fit_start
 
     support_hits = pair_tensors["winning_base_table_hit_counts"].to(device=device, dtype=torch.long)
     best_dists = pair_tensors["best_dists"].to(device=device, dtype=torch.long)
@@ -1335,12 +1392,16 @@ def train_residual_adapter(
     support_gate_means = {}
     support_accept_gate_means = {}
     min_bucket_pairs = max(32, int(rank))
+    bucket_fit_elapsed = 0.0
+    bucket_adapter_count = 0
 
     for support_value in sorted(set(int(v) for v in bucket_values.detach().cpu().tolist())):
         bucket_mask = bucket_values == int(support_value)
         bucket_pairs = int(bucket_mask.sum().item())
         if bucket_pairs < min_bucket_pairs:
             continue
+        _sync_timing_device(device)
+        bucket_fit_start = time.perf_counter()
         bucket_x = x_train[bucket_mask]
         bucket_anchors = anchors[bucket_mask]
         bucket_targets = targets[bucket_mask]
@@ -1370,6 +1431,9 @@ def train_residual_adapter(
             negative_gate_weight=negative_gate_weight,
             accept_targets=None if accept_targets is None else accept_targets[bucket_mask],
         )
+        _sync_timing_device(device)
+        bucket_fit_elapsed += time.perf_counter() - bucket_fit_start
+        bucket_adapter_count += 1
         adapters_by_support[int(support_value)] = bucket_adapter
         support_pair_counts[int(support_value)] = bucket_pairs
         support_losses[int(support_value)] = bucket_loss
@@ -1385,6 +1449,7 @@ def train_residual_adapter(
     else:
         adapter = global_adapter
 
+    total_elapsed = time.perf_counter() - total_start
     return adapter, {
         "train_pairs": int(pair_tensors["node_indices"].numel()),
         "base_train_nodes": int(train_nodes.numel()),
@@ -1412,6 +1477,16 @@ def train_residual_adapter(
         "classifier_accept_mean_kl": float(classifier_accept_mean_kl),
         "classifier_accept_after_residual": bool(classifier_accept_after_residual),
         "classifier_accept_probe_alpha": float(classifier_accept_probe_alpha),
+        "timing": {
+            "select_nodes_s": float(select_elapsed),
+            "pair_prepare_s": float(pair_prepare_elapsed),
+            "feature_build_s": float(feature_build_elapsed),
+            "probe_fit_s": float(probe_fit_elapsed),
+            "global_fit_s": float(global_fit_elapsed),
+            "bucket_fit_s": float(bucket_fit_elapsed),
+            "bucket_adapter_count": int(bucket_adapter_count),
+            "total_s": float(total_elapsed),
+        },
     }
 
 
