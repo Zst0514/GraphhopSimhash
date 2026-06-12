@@ -10,6 +10,8 @@
 
 ## 当前主文档
 
+- `CAM` 选型总结：
+  [CAM选型总结.md](/home/qiumingzhi/Simhash-S/OneForAll/GraphhopSimhash/CAM_sim/docs/design/CAM选型总结.md)
 - 硬件模型总说明：
   [HARDWARE_MODEL.md](/home/qiumingzhi/Simhash-S/OneForAll/GraphhopSimhash/CAM_sim/docs/HARDWARE_MODEL.md)
 - 模拟 CAM 的 8x16bit 匹配机制解释：

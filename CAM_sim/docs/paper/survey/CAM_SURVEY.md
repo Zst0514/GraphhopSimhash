@@ -919,6 +919,133 @@ EDAM 的重要性在于：
 
 如果我们以后想保留严格的数字可解释性，或者需要多阈值与排序控制，这一支最值得看。
 
+
+#### 5.1.0 Manku et al.：Simhash Near-Duplicate Detection（粗筛 + 验证的软件源头）
+
+**发表信息**：WWW 2007；Google simhash 近重复文档检测系统。
+
+**技术路线标签**：
+
+- 器件：不涉及硬件（纯软件 / 分布式系统）
+- 风格：simhash fingerprint + Hamming distance 搜索
+- 匹配类型：`HD ≤ k`（64-bit, k=3）
+- 路线：`R6a`（两层粗筛 + 验证的策略源头）
+- 距离实现机制：`block partition → exact prefix match → XOR/popcount verify`
+
+### 核心问题
+
+8B 网页，每页生成 64-bit simhash fingerprint。给定一个新 fingerprint F，如何快速找到已有 fingerprint 中与 F 汉明距离 ≤3 的条目？
+
+### 核心 idea
+
+把 "先粗筛、再精确验证" 提炼成一条清晰的两层策略：
+
+1. **block partition + prefix match（粗筛）**：
+   - 将 64-bit 分成多个 block（如 4×16-bit 或 6×11/11/11/11/10/10-bit）
+   - 对每个 block 选择不同的 permutation，将选中的 block 移到 leading bits
+   - 构建多张 sorted table，每张表按 leading bits 排序
+   - 查询时，在 leading bits 上做 prefix match → 粗筛出候选集
+
+2. **XOR + popcount（精确验证）**：
+   - 对候选 fingerprint 做完整 XOR
+   - 统计差异 bit 是否 ≤ 3 → 最终判断
+
+关键见解（论文 §3.1）：
+
+> "A single probe suffices to identify all fingerprints which match F in d' most significant bit-positions. For each matching fingerprint, we can easily figure out if it differs from F in at most k bit-positions or not."
+
+### 在技术路线中的位置
+
+这篇论文不是硬件 CAM 论文（没有 bitcell / matchline / sense amplifier）。它是：
+
+```text
+分布式系统的 sorted table + binary search
+```
+
+但它在概念上精确对应了硬件中 "chunk CAM 粗筛 + XOR/popcount 验证" 的两层结构：
+
+| Manku 2007 软件版 | 数字引擎硬件版 |
+|---|---|
+| 64-bit 分 4×16-bit block | 16-bit 分 4×4-bit chunk |
+| sorted table prefix match 粗筛 | CAM chunk exact match 粗筛 |
+| XOR + 差异 bit 计数 ≤ 3 | XOR + popcount ≤ 2 |
+| 多表覆盖所有 3-bit 差异情况 | 8-head 独立搜索 + support ≥ 3 |
+
+### 优点
+
+- 两层策略清晰，可解释性强
+- 在 8B 网页规模上经过 Google 生产验证
+- 多表 permutation 策略保障了 Hamming 球的覆盖完整性
+- 对硬件设计有直接的 architecture-level 启发
+
+### 局限
+
+- 纯软件 / 分布式系统，不涉及 bitcell / ML / sensing 等电路层面
+- 表是 sorted array，不是并行 CAM search
+- 查询延迟受 binary search / index lookup 限制，不是单周期 associative hit
+
+### 对我们的价值
+
+这篇论文是 **"粗筛 + 验证"两层策略的明确软件源头**。对于 GraphhopSimhash：
+
+1. 它为数字引擎（`chunk CAM coarse filter + XOR/popcount verify`）提供了**软件层面的 prior art**
+2. 多表 permutation 覆盖完整 Hamming 球的思想，和 8-head 独立搜索 + support aggregation 在策略层面对齐
+3. 在论文中引用它，可以从软件搜索策略自然过渡到硬件加速的动机——"这个方法在 8B 网页上效果很好，但每次查询需要多表 probe，延迟不恒定；如果把它搬到 CAM 硬件里做单周期粗筛，就能把 Hamming 搜索做成固定低时延前端"
+
+
+
+#### 5.1.0b Shinde et al.：用商用 TCAM 做 simhash 近似搜索（Manku 路线的 CAM 硬件延伸）
+
+**发表信息**：SIGMOD 2010；Stanford + Cisco。
+
+**技术路线标签**：
+
+- 器件：商用 `TCAM`（Ternary CAM，Cisco 交换机内置）
+- 风格：`TLSH (Ternary LSH)` → TCAM wildcard `*` 模糊匹配 → Euclidean 距离验证
+- 匹配类型：`(1,c)-NN` 近似最近邻搜索
+- 路线：`R6b`（TCAM-based similarity search / hybrid retrieval）
+- 距离实现机制：`ternary hash embedding → TCAM wildcard match → distance verification`（注意：**不是** XOR+popcount）
+
+### 核心问题
+
+LSH 在 c≈1 时空间需求接近 n²。能否用 TCAM 的 wildcard `*` 特性做硬件加速？
+
+### 核心 idea
+
+设计 **TLSH (Ternary Locality Sensitive Hashing)**：
+- 将标准 LSH 的二元哈希 `{0, 1}` 扩展为三元哈希 `{0, 1, *}`
+- 在随机方向上取超平面分区，交替区域标记为 `0, *, 1, *, 0, *, 1...`
+- `*` 起到"模糊边界"作用 → 相邻点有更高概率在 TCAM 中匹配
+- 将三元签名存入 TCAM，单次 O(1) TCAM lookup 返回所有 wildcard 匹配的候选
+- 后端用 Euclidean 距离做精确验证
+
+### 与我们的数字引擎的区别（重要）
+
+Shinde 2010 **没有**使用 "chunk exact match 粗筛 + XOR/popcount 验证"。它的机制是：
+
+| 要素 | Shinde 2010 | 我们的数字引擎 |
+|---|---|---|
+| 粗筛机制 | TCAM wildcard `*` 模糊匹配 | 普通 CAM chunk exact match |
+| 验证方式 | Euclidean 距离计算 | XOR + popcount |
+| 哈希方式 | TLSH 三元嵌入 (0/1/*) | 8×16-bit 二值 hash |
+| 硬件 | 商用 TCAM (72/144/288-bit) | 定制 CAM + verifier lanes |
+
+它和我们在"用 CAM 硬件做近似搜索"这个方向上**动机相同**，但实现机制不同。
+
+### 与 Manku 2007 的关系
+
+- 实验直接用 Manku 2007 的 simhash Wikipedia 数据集
+- 但匹配机制是 TCAM wildcard，不是 Manku 的 block partition + prefix match
+- 288-bit TCAM 在 1M 点数据集上做到 (1,2)-NN，F-score > 0.95
+- 在 Cisco Catalyst 4500 交换机上实测 1.5M queries/s per 1Gbps port
+
+### 对我们的价值
+
+1. 证明了"商用 CAM（TCAM）+ simhash"这条路径在小阈值近似搜索上是可行的，给了我们做定制 CAM 的信心
+2. TCAM 的 `*` wildcard 机制在概念上类似 HD-CAM 的 Veval/Vref 阈值放缩——都是通过放宽匹配条件来容忍小汉明距离
+3. 但它的具体实现（ternary embedding + Euclidean verify）**和我们的 chunk CAM + XOR/popcount 是两条不同的技术路线**，引用时需要注意区分
+
+
 #### 5.1.1 Castañeda et al.: PPAC
 
 **发表信息**：ASAP 2019。

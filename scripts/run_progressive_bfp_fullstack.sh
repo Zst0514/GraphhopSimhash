@@ -16,6 +16,8 @@ set -euo pipefail
 # Examples:
 #   DATASET=cora RUNS=1 bash GraphhopSimhash/scripts/run_progressive_bfp_fullstack.sh
 #   DATASET=pubmed RUNS=3 REFINE_BIT=5 REFINE_RATIO=0.30 bash GraphhopSimhash/scripts/run_progressive_bfp_fullstack.sh
+#   DATASET=cora RUNS=1 CACHE_SIZE=32 NODE_ORDER_TYPE=hash FORCE=1 bash GraphhopSimhash/scripts/run_progressive_bfp_fullstack.sh
+#   DATASET=cora RUNS=1 CACHE_SIZE=32 NODE_ORDER_TYPE=metis METIS_PARTITION_SIZE=32 FORCE=1 bash GraphhopSimhash/scripts/run_progressive_bfp_fullstack.sh
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
@@ -41,7 +43,51 @@ RESIDUAL_EPOCHS="${RESIDUAL_EPOCHS:-200}"
 RESIDUAL_MAX_TRAIN_PAIRS="${RESIDUAL_MAX_TRAIN_PAIRS:-4096}"
 RESIDUAL_ALPHA_GRID=(${RESIDUAL_ALPHA_GRID:-0 0.03125 0.0625 0.125 0.25 0.5})
 
-FRONTEND_ID="${FRONTEND_ID:-h8_${HARD_SUPPORT}${SOFT_SUPPORT}_T${THRESHOLD}}"
+# Optional online CAM/cache and query-order controls. Defaults preserve the historical script behavior.
+CACHE_SIZE="${CACHE_SIZE:-}"
+NODE_ORDER_TYPE="${NODE_ORDER_TYPE:-${NODE_ORDER:-default}}"
+METIS_PARTITION_SIZE="${METIS_PARTITION_SIZE:-0}"
+HASH_NODE_ORDER_HEADS="${HASH_NODE_ORDER_HEADS:-4}"
+HASH_NODE_ORDER_BLOCK_SIZE="${HASH_NODE_ORDER_BLOCK_SIZE:-0}"
+
+node_order_args=()
+if [[ -n "${CACHE_SIZE}" ]]; then
+  node_order_args+=(--cache_size "${CACHE_SIZE}")
+fi
+if [[ "${NODE_ORDER_TYPE}" != "default" ]]; then
+  node_order_args+=(--node_order_type "${NODE_ORDER_TYPE}")
+fi
+if [[ "${METIS_PARTITION_SIZE}" != "0" ]]; then
+  node_order_args+=(--metis_partition_size "${METIS_PARTITION_SIZE}")
+fi
+if [[ "${NODE_ORDER_TYPE}" == "hash" ]]; then
+  node_order_args+=(
+    --hash_node_order_heads "${HASH_NODE_ORDER_HEADS}"
+    --hash_node_order_block_size "${HASH_NODE_ORDER_BLOCK_SIZE}"
+  )
+fi
+
+ORDER_SUFFIX=""
+if [[ -n "${CACHE_SIZE}" || "${NODE_ORDER_TYPE}" != "default" || "${METIS_PARTITION_SIZE}" != "0" ]]; then
+  order_parts=()
+  if [[ -n "${CACHE_SIZE}" ]]; then
+    order_parts+=("cam${CACHE_SIZE}")
+  fi
+  order_parts+=("order${NODE_ORDER_TYPE}")
+  if [[ "${NODE_ORDER_TYPE}" == "metis" || "${METIS_PARTITION_SIZE}" != "0" ]]; then
+    order_parts+=("metis${METIS_PARTITION_SIZE}")
+  fi
+  if [[ "${NODE_ORDER_TYPE}" == "hash" ]]; then
+    if [[ "${HASH_NODE_ORDER_BLOCK_SIZE}" == "0" ]]; then
+      order_parts+=("hh${HASH_NODE_ORDER_HEADS}" "hbauto")
+    else
+      order_parts+=("hh${HASH_NODE_ORDER_HEADS}" "hb${HASH_NODE_ORDER_BLOCK_SIZE}")
+    fi
+  fi
+  ORDER_SUFFIX="_$(IFS=_; echo "${order_parts[*]}")"
+fi
+
+FRONTEND_ID="${FRONTEND_ID:-h8_${HARD_SUPPORT}${SOFT_SUPPORT}_T${THRESHOLD}${ORDER_SUFFIX}}"
 OUT_DIR="${OUT_DIR:-${OFA_DIR}/output/progressive_bfp_fullstack/${DATASET}_${FRONTEND_ID}_bfpa${REFINE_BIT}_r${REFINE_RATIO}}"
 LOG_DIR="${OUT_DIR}/logs"
 LOG_PATH="${LOG_DIR}/${DATASET}_runs${RUNS}.log"
@@ -127,6 +173,7 @@ fi
 echo "================================================================"
 echo "[$(timestamp)] Progressive BFP full-stack"
 echo "dataset=${DATASET} runs=${RUNS} frontend=${FRONTEND_ID}"
+echo "cache_size=${CACHE_SIZE:-none} node_order=${NODE_ORDER_TYPE} metis_partition_size=${METIS_PARTITION_SIZE} hash_order_heads=${HASH_NODE_ORDER_HEADS} hash_order_block=${HASH_NODE_ORDER_BLOCK_SIZE}"
 echo "reference=${REFERENCE_TAG} base=P${BASE_BIT}:${BASE_TAG} refine=P${REFINE_BIT}:${REFINE_TAG} ratio=${REFINE_RATIO}"
 echo "log=${LOG_PATH}"
 echo "================================================================"
@@ -136,6 +183,7 @@ set +e
   --datasets "${DATASET}" \
   --runs "${RUNS}" \
   --seed "${SEED}" \
+  "${node_order_args[@]}" \
   --experiment_suite residual_precision_depth \
   --real_quant_model_name llama2_7b \
   --precision_depth_reference_tag "${REFERENCE_TAG}" \

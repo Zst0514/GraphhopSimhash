@@ -74,6 +74,34 @@ def build_parser():
 
     parser.add_argument("--cache_size", type=int, default=None)
     parser.add_argument("--memo_k", type=int, default=3)
+    parser.add_argument(
+        "--node_order_type",
+        "--node_order",
+        dest="node_order_type",
+        type=str,
+        default="default",
+        choices=["default", "metis", "hash"],
+        help=(
+            "Node query ordering for CAM locality. 'default' keeps dataset order, 'metis' uses "
+            "graph partition order, and 'hash' sorts by learned multi-head hash locality. "
+            "--node_order is kept as a shorter alias for --node_order_type. "
+            "For backward compatibility, --metis_partition_size > 0 with default order also enables METIS."
+        ),
+    )
+    parser.add_argument("--metis_partition_size", type=int, default=0,
+                        help="If > 0, partition graph with METIS and process nodes in partition order")
+    parser.add_argument(
+        "--hash_node_order_heads",
+        type=int,
+        default=4,
+        help="Number of leading hash heads used to build hash-aware query order",
+    )
+    parser.add_argument(
+        "--hash_node_order_block_size",
+        type=int,
+        default=0,
+        help="Optional local greedy block size for hash order. 0 uses --cache_size when available, otherwise 128.",
+    )
     parser.add_argument("--vote_top_m", type=int, default=4)
     parser.add_argument("--vote_relax_margin", type=float, default=0.05)
 
@@ -1232,6 +1260,12 @@ def validate_args(parser, args):
         parser.error("--max_test must be a positive integer")
     if args.memo_k <= 0:
         parser.error("--memo_k must be a positive integer")
+    if args.metis_partition_size < 0:
+        parser.error("--metis_partition_size must be non-negative")
+    if args.hash_node_order_heads <= 0:
+        parser.error("--hash_node_order_heads must be positive")
+    if args.hash_node_order_block_size < 0:
+        parser.error("--hash_node_order_block_size must be non-negative")
     if args.vote_top_m <= 0:
         parser.error("--vote_top_m must be a positive integer")
     if args.vote_relax_margin < 0:

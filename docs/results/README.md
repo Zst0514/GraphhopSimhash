@@ -10,6 +10,9 @@
 - [UNIFIED_FRONTEND_POLICY_RESULT.md](UNIFIED_FRONTEND_POLICY_RESULT.md)
   固定在线控制流下的 dataset-level `T` policy register 收敛结果，包含 Cora/PubMed/Arxiv 当前主线参数。
 
+- [CORA_CAM32_NODE_ORDER_RESULT.md](CORA_CAM32_NODE_ORDER_RESULT.md)
+  Cora 在 `CACHE_SIZE=32` 下的节点访问顺序对比结果，包含默认、哈希、请求 METIS 三组日志和复现命令。
+
 - [GRAPH_BIT_MAIN_RESULTS.md](GRAPH_BIT_MAIN_RESULTS.md)
   当前端到端主结果入口：front-end reuse、residual-gate、BFP miss-node path。
 

@@ -1239,7 +1239,7 @@ class PaperHashReuseController(HeatPlusPlus_NDP_Controller):
             return_debug=True,
         )
 
-    def query_full_batch(self, hash_features, verify_features, oracle_embs):
+    def query_full_batch(self, hash_features, verify_features, oracle_embs, node_order=None):
         num_nodes = verify_features.size(0)
         self._reset_route_caches()
         self.last_query_trace = None
@@ -1399,8 +1399,9 @@ class PaperHashReuseController(HeatPlusPlus_NDP_Controller):
             )
             return row
 
+        order = list(node_order) if node_order is not None else range(num_nodes)
         query_iter = tqdm(
-            range(num_nodes),
+            order,
             desc="[Adaptive] Query",
             unit="node",
             mininterval=5.0,

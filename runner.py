@@ -390,6 +390,138 @@ def build_route_bundle(verify_features, data, oracle_embs, oracle_logits, args, 
     return route_bundle
 
 
+def _inverse_gray_code(value):
+    value = int(value)
+    mask = value
+    while mask:
+        mask >>= 1
+        value ^= mask
+    return int(value)
+
+
+def _fingerprints_from_projection(features, matrix, device):
+    proj = torch.matmul(features.to(device), matrix.to(device))
+    bits = (proj > 0).detach().cpu().numpy().astype(np.uint8)
+    fingerprints = []
+    for row in bits:
+        value = 0
+        for bit in row:
+            value = (value << 1) | int(bit)
+        fingerprints.append(int(value))
+    return fingerprints
+
+
+def _signature_hamming_distance(hashes_by_head, lhs, rhs, head_count):
+    return sum(
+        bin(int(hashes_by_head[head_idx][lhs] ^ hashes_by_head[head_idx][rhs])).count("1")
+        for head_idx in range(int(head_count))
+    )
+
+
+def _greedy_refine_hash_order(base_order, hashes_by_head, head_count, block_size):
+    block_size = int(block_size)
+    if block_size <= 1:
+        return list(base_order)
+    refined = []
+    for start in range(0, len(base_order), block_size):
+        block = list(base_order[start : start + block_size])
+        if len(block) <= 2:
+            refined.extend(block)
+            continue
+        current = block[0]
+        remaining = set(block[1:])
+        refined.append(current)
+        while remaining:
+            next_node = min(
+                remaining,
+                key=lambda node_id: (
+                    _signature_hamming_distance(hashes_by_head, current, node_id, head_count),
+                    node_id,
+                ),
+            )
+            remaining.remove(next_node)
+            refined.append(next_node)
+            current = next_node
+    return refined
+
+
+def build_hash_node_order(route_bundle, args, device, log_important):
+    matrices = route_bundle.get("hash_route_matrices")
+    if matrices is None:
+        log_important("[HashOrder] unavailable: route_bundle has no explicit hash matrices; using default order")
+        return None
+    route_features = route_bundle["hash_route_features"]
+    requested_heads = int(getattr(args, "hash_node_order_heads", 4))
+    head_count = max(1, min(requested_heads, len(route_features), len(matrices)))
+
+    hashes_by_head = [
+        _fingerprints_from_projection(route_features[head_idx], matrices[head_idx], device)
+        for head_idx in range(head_count)
+    ]
+    num_nodes = len(hashes_by_head[0])
+    base_order = sorted(
+        range(num_nodes),
+        key=lambda node_id: tuple(
+            _inverse_gray_code(hashes_by_head[head_idx][node_id])
+            for head_idx in range(head_count)
+        )
+        + (node_id,),
+    )
+    block_size = int(getattr(args, "hash_node_order_block_size", 0))
+    if block_size <= 0:
+        cache_size = getattr(args, "cache_size", None)
+        block_size = int(cache_size) if cache_size is not None and int(cache_size) > 0 else 128
+    node_order = _greedy_refine_hash_order(base_order, hashes_by_head, head_count, block_size)
+    unique_first_head = len(set(hashes_by_head[0])) if hashes_by_head else 0
+    log_important(
+        "[HashOrder] "
+        f"heads={head_count}/{len(route_features)} | block_size={block_size} "
+        f"| order_len={len(node_order)} | unique_head0={unique_first_head}"
+    )
+    return node_order
+
+
+def build_metis_node_order(data, args, log_important):
+    try:
+        import metis
+        num_parts = max(1, data.x.size(0) // int(args.metis_partition_size))
+        r, c = data.edge_index
+        adj = [[] for _ in range(data.x.size(0))]
+        for u, v in zip(r.tolist(), c.tolist()):
+            adj[u].append(v)
+            adj[v].append(u)
+        _, parts = metis.part_graph(adj, nparts=num_parts, recursive=True)
+        parts = list(parts)
+        nodes_by_part = {i: [] for i in range(num_parts)}
+        for nid, pid in enumerate(parts):
+            nodes_by_part[pid].append(nid)
+        node_order = []
+        for pid in range(num_parts):
+            node_order.extend(nodes_by_part[pid])
+        log_important(
+            f"[METIS] partition_size={args.metis_partition_size}, "
+            f"num_parts={num_parts}, order_len={len(node_order)}"
+        )
+        return node_order
+    except Exception as e:
+        log_important(f"[METIS] Failed to partition graph ({e}), falling back to default order")
+        return None
+
+
+def resolve_node_order(data, route_bundle, args, device, log_important):
+    order_type = str(getattr(args, "node_order_type", "default"))
+    if order_type == "default" and int(getattr(args, "metis_partition_size", 0)) > 0:
+        order_type = "metis"
+    if order_type == "hash":
+        return build_hash_node_order(route_bundle, args, device, log_important)
+    if order_type == "metis":
+        if int(getattr(args, "metis_partition_size", 0)) <= 0:
+            log_important("[METIS] node_order_type=metis requires --metis_partition_size > 0; using default order")
+            return None
+        return build_metis_node_order(data, args, log_important)
+    return None
+
+
 def build_controller(
     data,
     verify_features,
@@ -3212,10 +3344,12 @@ def run_residual_precision_depth_experiment(args):
                     run_args,
                     device,
                 )
+                node_order = resolve_node_order(data, route_bundle, run_args, device, log_important)
                 direct_raw, trace_hits = controller.query_full_batch(
                     route_bundle["hash_route_features"],
                     verify_features,
                     reference_raw,
+                    node_order=node_order,
                 )
                 trace = controller.last_query_trace
                 if run_args.residual_anchor_mode == "random":

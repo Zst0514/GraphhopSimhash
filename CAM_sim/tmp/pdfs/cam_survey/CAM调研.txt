@@ -1,0 +1,206 @@
+HD-CAM 调研
+
+| 用于HD 检索的CAM 总结
+
+CAM 直接计算HD（汉明距离）
+数字域
+CAM 粗筛+ popcount
+CAM for HD
+search
+模拟域
+
+HD-CAM（电压域放电速度）
+
+CMOS
+
+NVM
+
+HD-CAM （时间域放电速度）
+
+| CAM 直接计算HD (PPAC, 2019)
+
+ 优点
+
+➢ HD计算直接在CAM每一行利用ALU 直接完成
+➢ 每一行的ALU不仅可以用于HD检索，还可以用于
+其他的计算（实际上已经变成了CAM存内计算）
+
+➢ 纯数字设计，精确度高，鲁棒性好
+➢ 通用性
+ 缺点
+➢ 面积开销大：CAM的每一行都有ALU，单元面积
+大，布线复杂：
+• PPAC (2019)：容量为 64 Kbit ，面积为
+
+0.78 mm2，28nm 工艺
+• HD-CAM (2025)：容量为 128 Kbit，总面积
+仅为 0.64 mm2，65nm 工艺
+
+➢ 如果仅用做HD检索，这种设计不划算
+O. Castañeda, M. Bobbett, A. Gallyas-Sanhueza, and C. Studer, “PPAC: A Versatile In-Memory Accelerator for Matrix-Vector-Product-Like Operations,” in 2019 IEEE 30th
+International Conference on Application-specific Systems, Architectures and Processors (ASAP), Jul. 2019, pp. 149–156.
+
+| CAM 粗筛+ popcount (先前采用的方法)
+假设哈希向量完全随机（不考虑真实embbedding存在的各向异性）
+
+* O(1) vs O(N)： 每检索1个哈希向量，都要popcount 大量候选 （Arxiv约五千个）
+
+| HD-CAM
+
+• 优点1：相比前两种方案，直接进行HD检索，省去了数据集大/粗筛粒度不够时popcount任务繁重的风险
+• 优点2： 经过流片验证，其PVT鲁棒性好
+• 优点3： cell 级别仅增加一个晶体管，面积开销相对小
+• 缺点1： 放电曲线是非线性的，Vref 需要根据要匹配的HD阈值进行精确校准，操作麻烦
+• 缺点2： HD阈值实际范围仅1~8，范围较小（理论可达字长一半，实际受Meval 电压阈值的限制）
+E. Garzón et al., “A 128-kbit Approximate Search-Capable Content-Addressable Memory (CAM) With Tunable Hamming Distance,” IEEE J. Solid-State Circuits,
+vol. 60, no. 8, pp. 3009–3019, Aug. 2025
+
+| HD-CAM和纯数字方案 CAM粗筛+popcount比较
+• HD-CAM放电模型用SPICE 仿真，放电参数参照 JSSC’25, 模拟/数字CAM检索在Design Comipler中用28nm PDK 仿
+真，频率设置为500MHz
+Dataset
+
+数字CAM
+
+延迟 (ns)
+/query
+
+模拟 HD-CAM
+
+延迟 (ns)
+/query
+
+模拟相对数字加 数字popcount
+速
+验证 /query
+
+cora
+
+Digital CAM,
+per-head
+verifier
+
+8.521
+
+Analog HDCAM
+
+4.884
+
+1.74x
+
+3.638
+
+pubmed
+
+Digital CAM,
+per-head
+verifier
+
+13.621
+
+Analog HDCAM
+
+4.372
+
+3.12x
+
+9.251
+
+arxiv
+
+Digital CAM,
+per-head
+verifier
+
+57.833
+
+Analog HDCAM
+
+4.415
+
+13.10x
+
+53.418
+
+• 当数据集规模很大时，数字方案的后端popcount时间能占到单个query总延迟的绝大部分时间
+
+| NVM 方案
+ MRAM CAM
+
+• 加速多模态图片-文本的哈希检索
+• 512位的哈希向量，切分为8个64位 （HD主阈值220）
+• 哈希向量每一位用0， 1，X表示（TCAM）
+
+• 基于放电速度计算汉明距离
+• 优点：相比CMOS（10T）方案，MRAM 能做到2J2T，单位面积能缩小约一倍
+
+X. Liu et al., “MIRACLE: Multimodal Information Retrieval via a Combined In-Memory Processing and Content Addressable Memory Approach,” in 2025 62nd ACM/IEEE Design Automation
+Conference (DAC), Jun. 2025, pp. 1–7.
+
+| HD-CAM （时间域放电速度，TD-CAM ，利用铁电记忆电容）
+
+电压域：不匹配-> 低电阻 ->放电速度加快
+时间域：不匹配-> 高电容->放电速度减慢
+➢ 优点：
+•
+
+Δt ∝ Ron /k
+
+•
+
+将原有的非线性变化的放电速度，变成了线性的放电时间，
+
+变成
+
+Δt ∝CHCS x k
+
+大大增加了HD-CAM 阈值调节的便利性和精确度，阈值调节
+范围可以扩大至全字长
+➢ 缺点：
+
+•
+
+由于是时间域HD-CAM，为了实现多阈值，不免延迟高，频
+率低
+
+•
+
+论文报告当容忍 8 个错误位（HD=8）时，传播时间为125 ns
+
+（8MHz），远小于NPU的500MHz/1GHz，会成为关键路径
+
+M. Ryu, J. S. Woo, Y. Kim, and W. Y. Choi, “Single-Ferroelectric Memcapacitor-Based Time-Domain Content-Addressable Memory for Highly Precise Distance Function Computation,” Mar. 01,
+2025, arXiv: arXiv:2503.00447.
+
+| 用于HD 检索的CAM 总结
+CAM 直接计算HD（汉明距离）
+数字域
+CAM 粗筛+ popcount
+CAM for HD
+search
+模拟域
+
+HD-CAM（电压域放电速度）
+
+CMOS
+
+NVM
+
+HD-CAM （时间域放电速度）
+• 综合比较，在我们这个场景下 (16bit / HD=2)，电压域放电速度的HD-CAM 相比于其他方案，具有延迟低、
+
+面积开销小、功耗低的优点
+• 虽然 NVM的HD-CAM 相比CMOS 面积开销更小，存储密度更高。但是NVM HD-CAM不够成熟，尚停留在
+仿真层面（MRAM 器件的 TMR 比例低开关噪声大），CMOS HD-CAM已有流片验证，技术成熟，PVT鲁棒
+
+性好，因此从架构研究的角度倾向于选择CMOS HD-CAM (JSSC’25)
+
+| 后续CAM工作
+• 已经搭建好CAM的仿真框架（C++/RTL）可以接入simhash reuse
+
+• 初步验证512KB CAM（能放约3万个entry），对于约17万节点的Arxiv数据集来说，采用常规LRU 策略（驱
+逐最少使用的）没有掉点
+• 说明图任务数据集用于复用的节点仅仅是一小部分，512KB还是大了
+• 后续让于佳冰sweep，找到CAM的容量甜点区，然后评估其面积功耗等数据
+
+
