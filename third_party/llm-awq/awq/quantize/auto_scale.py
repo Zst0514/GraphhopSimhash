@@ -5,6 +5,7 @@ import torch.nn as nn
 from transformers.models.bloom.modeling_bloom import BloomBlock, BloomGelu
 from transformers.models.opt.modeling_opt import OPTDecoderLayer
 from transformers.models.llama.modeling_llama import LlamaDecoderLayer, LlamaRMSNorm
+from transformers.models.bert.modeling_bert import BertLayer
 from transformers.models.distilbert.modeling_distilbert import TransformerBlock as DistilBertTransformerBlock
 from transformers.activations import GELUActivation
 try:
@@ -319,6 +320,24 @@ def auto_scale_block(module, module_kwargs, w_bit, q_config, input_feat, module_
                 prev_op=module.ffn.activation,
                 layers=[module.ffn.lin2],
                 inp=input_feat["ffn.lin2"],
+            )
+        )
+    elif isinstance(module, BertLayer):
+        # BERT-family encoders are post-norm. Use only local Linear-to-Linear
+        # transforms that do not rescale residual branches.
+        if module.attention.self.value.weight.shape == module.attention.output.dense.weight.shape:
+            scales_list.append(
+                _auto_get_scale(
+                    prev_op=module.attention.self.value,
+                    layers=[module.attention.output.dense],
+                    inp=input_feat["attention.output.dense"],
+                )
+            )
+        scales_list.append(
+            _auto_get_scale(
+                prev_op=module.intermediate.dense,
+                layers=[module.output.dense],
+                inp=input_feat["output.dense"],
             )
         )
     elif "mpt" in str(module.__class__).lower():

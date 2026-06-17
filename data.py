@@ -86,6 +86,92 @@ def ensure_arxiv_masks(data, ds_key, device):
         return True
 
 
+def build_tape_products_data(cache_path):
+    import gzip
+
+    import pandas as pd
+    from torch_geometric.data import Data
+
+    text_path = os.path.join("data", "tape_ogbn_products_orig", "ogbn-products_subset_text.tsv")
+    products_path = os.path.join("data", "ogbn_products", "processed", "geometric_data_processed.pt")
+    split_dir = os.path.join("data", "ogbn_products", "split", "sales_ranking")
+    if not os.path.exists(text_path):
+        raise FileNotFoundError(
+            f"{text_path} missing. Run GraphhopSimhash/scripts/prepare_tape_products_text.py first."
+        )
+    if not os.path.exists(products_path):
+        raise FileNotFoundError(f"{products_path} missing. Download/process ogbn-products first.")
+
+    text_df = pd.read_csv(text_path, sep="\t")
+    nids = torch.tensor(text_df["nid"].astype("int64").values, dtype=torch.long)
+
+    loaded = torch.load(products_path, map_location="cpu")
+    full = loaded[0] if isinstance(loaded, tuple) else loaded
+    num_full_nodes = int(full.num_nodes)
+    local_of_global = torch.full((num_full_nodes,), -1, dtype=torch.long)
+    local_of_global[nids] = torch.arange(nids.numel(), dtype=torch.long)
+
+    src, dst = full.edge_index
+    edge_mask = (local_of_global[src] >= 0) & (local_of_global[dst] >= 0)
+    edge_index = torch.stack((local_of_global[src[edge_mask]], local_of_global[dst[edge_mask]]), dim=0)
+
+    def read_split(name):
+        path = os.path.join(split_dir, f"{name}.csv.gz")
+        if not os.path.exists(path):
+            raise FileNotFoundError(f"{path} missing")
+        with gzip.open(path, "rt") as f:
+            values = pd.read_csv(f, header=None).values.reshape(-1)
+        return torch.tensor(values, dtype=torch.long)
+
+    data = Data(
+        x=full.x[nids].to(torch.float32),
+        edge_index=edge_index.contiguous(),
+        y=full.y[nids].view(-1).to(torch.long),
+        num_nodes=int(nids.numel()),
+    )
+    data.global_nid = nids
+    for split_name, attr_name in (("train", "train_mask"), ("valid", "val_mask"), ("test", "test_mask")):
+        split_idx = read_split(split_name)
+        mask = torch.isin(nids, split_idx)
+        setattr(data, attr_name, mask)
+
+    os.makedirs(os.path.dirname(cache_path), exist_ok=True)
+    torch.save(data, cache_path)
+    print(
+        "[TAPEProducts] Built induced subgraph "
+        f"nodes={data.num_nodes} edges={data.edge_index.size(1)} "
+        f"train={int(data.train_mask.sum())} val={int(data.val_mask.sum())} test={int(data.test_mask.sum())}"
+    )
+    return data
+
+
+def build_tape_arxiv23_data(cache_path):
+    source_path = os.path.join(
+        "data",
+        "TAPE_repo",
+        "dataset",
+        "arxiv_2023",
+        "graph.pt",
+    )
+    if not os.path.exists(source_path):
+        raise FileNotFoundError(
+            f"{source_path} missing. Clone https://github.com/XiaoxinHe/TAPE under data/TAPE_repo first."
+        )
+    data = torch.load(source_path, map_location="cpu")
+    data.num_nodes = int(data.y.numel())
+    if not all(hasattr(data, name) for name in ("train_mask", "val_mask", "test_mask")):
+        raise ValueError(f"{source_path} must contain TAPE train/val/test masks")
+
+    os.makedirs(os.path.dirname(cache_path), exist_ok=True)
+    torch.save(data, cache_path)
+    print(
+        "[TAPEArxiv23] Built graph "
+        f"nodes={data.num_nodes} edges={data.edge_index.size(1)} "
+        f"train={int(data.train_mask.sum())} val={int(data.val_mask.sum())} test={int(data.test_mask.sum())}"
+    )
+    return data
+
+
 def load_data_pipeline(ds_key, params, device):
     batch_size = 1 if "llama2" in params.llm_name.lower() else params.batch_size
     encoder = SentenceEncoder(params.llm_name, batch_size=batch_size)
@@ -100,9 +186,25 @@ def load_data_pipeline(ds_key, params, device):
         loaded = torch.load(st_data_path)
         data = loaded[0] if isinstance(loaded, tuple) else loaded
 
+        if ds_key == "tape_arxiv23" and int(getattr(data, "num_nodes", data.y.numel())) != 46198:
+            print("[TAPEArxiv23] Cached graph is not the official 46,198-node TAPE split. Rebuilding.")
+            data = build_tape_arxiv23_data(st_data_path)
+
         if ensure_arxiv_masks(data, ds_key, device):
             torch.save(data.cpu(), st_data_path)
 
+        normalize_node_masks(data)
+        return data.to(device), encoder
+
+    if ds_key in ("tape_products", "products_text"):
+        print(f"[TAPEProducts] Cache miss. Building {st_data_path}")
+        data = build_tape_products_data(st_data_path)
+        normalize_node_masks(data)
+        return data.to(device), encoder
+
+    if ds_key == "tape_arxiv23":
+        print(f"[TAPEArxiv23] Cache miss. Building {st_data_path}")
+        data = build_tape_arxiv23_data(st_data_path)
         normalize_node_masks(data)
         return data.to(device), encoder
 
@@ -198,6 +300,30 @@ def load_raw_texts(ds_key):
                 .strip()
             )
         return texts
+    if ds_key in ("tape_products", "products_text"):
+        import pandas as pd
+
+        path = os.path.join("data", "tape_ogbn_products_orig", "ogbn-products_subset_text.tsv")
+        if not os.path.exists(path):
+            raise FileNotFoundError(
+                f"{path} missing. Run scripts/prepare_tape_products_text.py before generating pools."
+            )
+        df = pd.read_csv(path, sep="\t").fillna("")
+        if "raw_text" not in df.columns:
+            raise ValueError(f"{path} must contain a raw_text column")
+        return df["raw_text"].astype(str).tolist()
+    if ds_key == "tape_arxiv23":
+        import pandas as pd
+
+        path = os.path.join("data", "TAPE_repo", "dataset", "arxiv_2023_orig", "paper_info.csv")
+        if not os.path.exists(path):
+            raise FileNotFoundError(
+                f"{path} missing. Clone https://github.com/XiaoxinHe/TAPE under data/TAPE_repo first."
+            )
+        df = pd.read_csv(path).fillna("")
+        if "node_id" in df.columns:
+            df = df.sort_values("node_id")
+        return ("Title: " + df["title"].astype(str) + "\nAbstract: " + df["abstract"].astype(str)).tolist()
     raise ValueError(f"Dataset {ds_key} not supported for raw text loading.")
 
 
@@ -258,6 +384,15 @@ def load_bert_features(ds_key, data, device, layer_idx):
 
 
 def load_cheap_features(ds_key, data, device):
+    if ds_key in ("tape_products", "products_text"):
+        embs = data.x.detach().to(device=device, dtype=torch.float32)
+        print("[CheapFeature] Using ogbn-products node features for TAPE-products subset.")
+        return F.normalize(embs - embs.mean(dim=0, keepdim=True), p=2, dim=1)
+    if ds_key == "tape_arxiv23":
+        embs = data.x.detach().to(device=device, dtype=torch.float32)
+        print("[CheapFeature] Using TAPE-Arxiv23 provided node features.")
+        return F.normalize(embs - embs.mean(dim=0, keepdim=True), p=2, dim=1)
+
     cache_path = os.path.join("cache_data", f"{ds_key}_distilbert_l1.pt")
     if os.path.exists(cache_path):
         print(f"[CheapFeature] Loading cached DistilBERT Layer-1 features from {cache_path}")

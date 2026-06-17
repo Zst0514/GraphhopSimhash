@@ -103,6 +103,72 @@ graph-context SimHash:
     candidate nodes are encouraged to be similar in both self semantics and local context.
 ```
 
+## Candidate Quality Profiling
+
+为了验证 `0.5 self + 0.5 neighbor` 是否真的改善候选 anchor 质量，新增了一个 profiling：
+
+```text
+scripts/profile_graph_context_candidate_quality.py
+```
+
+它固定同一批 query nodes 和 anchor pool，分别用两种 key 做 SimHash 最近候选检索：
+
+```text
+self_only:
+    SimHash(f_self)
+
+graph_context:
+    SimHash(0.5 * f_self + 0.5 * neighbor_mean)
+```
+
+然后离线统计候选 anchor 质量：
+
+```text
+SelfSim:
+    query 和 anchor 的自身 LLaMA embedding cosine。
+
+CtxSim:
+    query 和 anchor 的一跳邻居均值 embedding cosine。
+
+LabelHit:
+    query 和 anchor 是否同类，只用于 profiling，不是在线信号。
+
+DegreeGap:
+    |log(1 + degree_q) - log(1 + degree_anchor)|
+```
+
+当前 LLaMA/W4A8 profiling 结果：
+
+```text
+output/graph_context_candidate_quality/llama_q5000_a8192/summary.md
+```
+
+| Dataset | Key | SelfSim | CtxSim | LabelHit | DegreeGap | Hamming |
+| --- | --- | ---: | ---: | ---: | ---: | ---: |
+| Cora | self_only | 0.8696 | 0.8373 | 54.87% | 0.6400 | 0.0859 |
+| Cora | graph_context | 0.8332 | 0.8901 | 74.56% | 0.6147 | 0.0490 |
+| PubMed | self_only | 0.9279 | 0.9065 | 71.00% | 0.8016 | 0.0641 |
+| PubMed | graph_context | 0.9170 | 0.9484 | 74.64% | 0.9463 | 0.0414 |
+| Arxiv | self_only | 0.8848 | 0.9147 | 46.84% | 0.8897 | 0.0723 |
+| Arxiv | graph_context | 0.8817 | 0.9400 | 52.68% | 0.8816 | 0.0460 |
+
+结论：
+
+```text
+graph_context key 会略微降低纯 self similarity，
+但显著提高 neighborhood context similarity 和 label agreement。
+```
+
+这说明 `0.5 self + 0.5 neighbor` 不是为了找到“文本最像”的 anchor，而是为了找到更接近 GNN execution semantics 的 anchor：
+
+```text
+self_only:
+    text-similar anchor
+
+graph_context:
+    text- and local-context-similar anchor
+```
+
 ## Paper Wording
 
 English draft:

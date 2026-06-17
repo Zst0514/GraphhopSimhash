@@ -9,7 +9,12 @@ def build_parser():
         description="Compact paper-style runner for graph hash reuse experiments."
     )
 
-    parser.add_argument("--datasets", nargs="+", default=["cora"], choices=["cora", "pubmed", "arxiv", "wikics"])
+    parser.add_argument(
+        "--datasets",
+        nargs="+",
+        default=["cora"],
+        choices=["cora", "pubmed", "arxiv", "wikics", "tape_products", "tape_arxiv23"],
+    )
     parser.add_argument("--runs", type=int, default=1)
     parser.add_argument(
         "--experiment_suite",
@@ -1079,6 +1084,21 @@ def build_parser():
             "Config names to export when --precision_depth_trace_export_dir is set. "
             "Use 'all' to export every precision-depth config."
         ),
+    )
+    parser.add_argument(
+        "--reuse_decision_trace_export_dir",
+        type=str,
+        default="",
+        help=(
+            "Optional directory for per-node SimHash/CAM reuse decision traces. "
+            "The trace contains candidate IDs, support, distance, and graph-risk fields."
+        ),
+    )
+    parser.add_argument(
+        "--reuse_decision_trace_tag",
+        type=str,
+        default="",
+        help="Optional tag inserted into reuse decision trace filenames.",
     )
     parser.add_argument("--token_compaction_reference_tag", type=str, default="W4A16")
     parser.add_argument("--token_compaction_full_tag", type=str, default="W4A8")

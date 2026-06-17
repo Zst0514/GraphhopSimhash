@@ -1,4 +1,5 @@
 import os
+import csv
 import json
 import time
 from copy import deepcopy
@@ -1331,6 +1332,65 @@ def summarize_reuse_real_quant_execution(actions, hit_mask, errors, fp_embs, fin
     }
 
 
+def export_reuse_decision_trace(decision_rows, output_dir, ds_key, tag, run_idx, seed):
+    """Write per-node candidate/reuse metadata without embedding payloads."""
+    if not decision_rows:
+        return ""
+    os.makedirs(output_dir, exist_ok=True)
+    safe_tag = "".join(ch if ch.isalnum() or ch in ("-", "_", ".") else "_" for ch in str(tag))
+    path = os.path.join(
+        output_dir,
+        f"{ds_key}_{safe_tag}_run{int(run_idx)}_seed{int(seed)}_reuse_decisions.tsv",
+    )
+    preferred_fields = [
+        "dataset",
+        "tag",
+        "run",
+        "seed",
+        "node_id",
+        "hit",
+        "candidate_found",
+        "source_id",
+        "support",
+        "route_hit_count",
+        "base_route_hit_count",
+        "winning_base_table_hit_count",
+        "min_dist",
+        "kind",
+        "route",
+        "score_gate_checked",
+        "score_gate_allow",
+        "score_error_q",
+        "score_risk",
+        "score_reason",
+        "sensitivity_q",
+        "propagation_q",
+        "graph_context_q",
+        "low_unique_q",
+        "rarity_q",
+        "route_idx",
+        "route_name",
+        "base_route_idx",
+        "base_route_name",
+        "route_weight",
+        "route_score",
+        "timestamp",
+    ]
+    observed = set()
+    for row in decision_rows:
+        if row:
+            observed.update(row.keys())
+    fieldnames = preferred_fields + sorted(observed.difference(preferred_fields))
+    with open(path, "w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames, delimiter="\t", extrasaction="ignore")
+        writer.writeheader()
+        for row in decision_rows:
+            out = dict(row or {})
+            out.update({"dataset": ds_key, "tag": safe_tag, "run": int(run_idx), "seed": int(seed)})
+            writer.writerow(out)
+    return path
+
+
 def run_residual_reuse_experiment(args):
     target_datasets = args.datasets if args.datasets else ["cora"]
     log_dir = os.path.join("output", "residual_reuse")
@@ -1451,6 +1511,18 @@ def run_residual_reuse_experiment(args):
                     target_features,
                 )
                 trace = controller.last_query_trace
+                export_dir = str(getattr(run_args, "reuse_decision_trace_export_dir", "") or "")
+                if export_dir:
+                    trace_tag = str(getattr(run_args, "reuse_decision_trace_tag", "") or "reuse")
+                    trace_path = export_reuse_decision_trace(
+                        controller.last_query_decisions,
+                        export_dir,
+                        ds_key,
+                        trace_tag,
+                        run_idx + 1,
+                        seed,
+                    )
+                    log_important(f"[ReuseDecisionTrace] wrote {trace_path}")
                 if args.residual_anchor_mode == "random":
                     trace, direct_features, anchor_info = replace_reuse_anchors_with_random(
                         trace,

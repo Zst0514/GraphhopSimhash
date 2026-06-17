@@ -38,9 +38,10 @@ ST_CACHE = {
 }
 
 LLAMA_CACHE = {
-    "cora": ROOT / "cache_data" / "cora_llama2_7b_oracle_W4A8.pt",
-    "pubmed": ROOT / "cache_data" / "pubmed_llama2_7b_oracle_W4A8.pt",
-    "arxiv": ROOT / "cache_data" / "arxiv_llama2_7b_oracle_W4A8.pt",
+    "cora": ROOT / "cache_data" / "cora_llama2_7b_oracle_W4BFPA8_B128.pt",
+    "pubmed": ROOT / "cache_data" / "pubmed_llama2_7b_oracle_W4BFPA8_B128.pt",
+    "arxiv": ROOT / "cache_data" / "arxiv_llama2_7b_oracle_W4BFPA8_B128.pt",
+    "wikics": ROOT / "cache_data" / "wikics_llama2_7b_oracle_W4BFPA8_B128.pt",
 }
 
 
@@ -74,7 +75,7 @@ def load_embedding_tensor(dataset: str, source: str) -> torch.Tensor:
     if source == "llama":
         path = LLAMA_CACHE.get(ds)
         if path is None or not path.exists():
-            raise FileNotFoundError(f"Missing LLaMA W4A8 cache for {dataset}: {path}")
+            raise FileNotFoundError(f"Missing LLaMA W4BFPA8_B128 cache for {dataset}: {path}")
         x = torch.load(path, map_location="cpu")
         if isinstance(x, dict):
             for key in ("x", "embeddings", "features"):
@@ -414,7 +415,8 @@ def write_markdown(path: Path, payload: dict[str, Any]) -> None:
             "",
             f"- Summary JSON: `{payload['summary_json']}`",
             f"- CDF TSV: `{payload['cdf_tsv']}`",
-            f"- CDF figure: `{payload['cdf_png']}`",
+            f"- CDF figure PDF: `{payload['cdf_pdf']}`",
+            f"- CDF figure PNG: `{payload['cdf_png']}`",
             "",
             "Interpretation:",
             "",
@@ -499,6 +501,7 @@ def main() -> None:
 
     cdf_tsv = output_dir / "cdf.tsv"
     summary_json = output_dir / "summary.json"
+    cdf_pdf = output_dir / "cdf.pdf"
     cdf_png = output_dir / "cdf.png"
     summary_md = output_dir / "summary.md"
     payload = {
@@ -509,16 +512,20 @@ def main() -> None:
         "summary": summary,
         "summary_json": str(summary_json),
         "cdf_tsv": str(cdf_tsv),
+        "cdf_pdf": str(cdf_pdf),
         "cdf_png": str(cdf_png),
     }
     write_cdf_tsv(cdf_tsv, all_cdf)
     write_json(summary_json, payload)
+    maybe_plot(cdf_pdf, all_cdf, completed)
     maybe_plot(cdf_png, all_cdf, completed)
     write_markdown(summary_md, payload)
 
     print(f"wrote {summary_json}")
     print(f"wrote {cdf_tsv}")
     print(f"wrote {summary_md}")
+    if cdf_pdf.exists():
+        print(f"wrote {cdf_pdf}")
     if cdf_png.exists():
         print(f"wrote {cdf_png}")
 

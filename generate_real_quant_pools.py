@@ -25,28 +25,72 @@ MODEL_SPECS = {
         "path": "models/llama-7b/modelscope/Llama-2-7b-ms",
         "env": "GRAPHHOP_LLAMA2_7B_PATH",
         "model_class": "llama",
+        "pooling": "mean",
+        "max_batch_size": 4,
     },
     "llama2_13b": {
-        "path": "meta-llama/Llama-2-13b-hf",
+        "path": "models/llama-13b/modelscope/Llama-2-13b-ms",
         "env": "GRAPHHOP_LLAMA2_13B_PATH",
         "model_class": "llama",
+        "pooling": "mean",
+        "max_batch_size": 1,
     },
     "ST": {
         "path": "models/multi-qa-distilbert-cos-v1",
         "env": "GRAPHHOP_ST_PATH",
         "model_class": "auto",
+        "pooling": "mean",
     },
     "BERT": {
         "path": "models/bert-base-uncased",
         "env": "GRAPHHOP_BERT_PATH",
         "model_class": "auto",
+        "pooling": "cls",
     },
-    "e5": {
-        "path": "intfloat/e5-large-v2",
-        "env": "GRAPHHOP_E5_PATH",
+    "e5_large": {
+        "path": "models/e5-large-v2",
+        "env": "GRAPHHOP_E5_LARGE_PATH",
         "model_class": "auto",
+        "pooling": "mean",
+        "input_prefix": "passage: ",
+        "max_batch_size": 8,
     },
 }
+
+MODEL_ALIASES = {
+    "bert": "BERT",
+    "bert-base": "BERT",
+    "bert-base-uncased": "BERT",
+    "st": "ST",
+    "sentence-transformer": "ST",
+    "sentence_transformer": "ST",
+    "sentence-transformers": "ST",
+    "multi-qa-distilbert-cos-v1": "ST",
+    "e5": "e5_large",
+    "e5-large": "e5_large",
+    "e5-large-v2": "e5_large",
+    "e5_large": "e5_large",
+    "e5_large_v2": "e5_large",
+    "llama2-7b": "llama2_7b",
+    "llama2_7b": "llama2_7b",
+    "llama-2-7b": "llama2_7b",
+    "llama2-13b": "llama2_13b",
+    "llama2_13b": "llama2_13b",
+    "llama-2-13b": "llama2_13b",
+}
+
+
+def canonical_model_name(llm_name):
+    raw = str(llm_name).strip()
+    if raw in MODEL_SPECS:
+        return raw
+    key = raw.lower().replace(" ", "").replace("/", "-")
+    if key in MODEL_ALIASES:
+        return MODEL_ALIASES[key]
+    raise ValueError(
+        f"Unknown llm_name={llm_name!r}. "
+        f"Available: {sorted(MODEL_SPECS)}; aliases: {sorted(MODEL_ALIASES)}"
+    )
 
 CONFIG_SPECS = {
     "fp16": {"tag": "FP16", "kind": "bnb", "w_bit": 16, "a_bit": 16},
@@ -86,6 +130,14 @@ CONFIG_SPECS = {
         "bfp_mantissa_bit": 8,
         "bfp_block_size": 256,
     },
+    "W4BFPA8_B512": {
+        "tag": "W4BFPA8_B512",
+        "kind": "awq_act_bfp",
+        "w_bit": 4,
+        "a_bit": 8,
+        "bfp_mantissa_bit": 8,
+        "bfp_block_size": 512,
+    },
     "W4BFPA7_B128": {
         "tag": "W4BFPA7_B128",
         "kind": "awq_act_bfp",
@@ -117,6 +169,22 @@ CONFIG_SPECS = {
         "a_bit": 4,
         "bfp_mantissa_bit": 4,
         "bfp_block_size": 128,
+    },
+    "W4BFPA4_B256": {
+        "tag": "W4BFPA4_B256",
+        "kind": "awq_act_bfp",
+        "w_bit": 4,
+        "a_bit": 4,
+        "bfp_mantissa_bit": 4,
+        "bfp_block_size": 256,
+    },
+    "W4BFPA4_B512": {
+        "tag": "W4BFPA4_B512",
+        "kind": "awq_act_bfp",
+        "w_bit": 4,
+        "a_bit": 4,
+        "bfp_mantissa_bit": 4,
+        "bfp_block_size": 512,
     },
     "W4BFPA4_B128_T16X8": {
         "tag": "W4BFPA4_B128_T16X8",
@@ -184,11 +252,27 @@ CONFIG_SPECS = {
     "W4A4_FAKE": {"tag": "W4A4_FAKE", "kind": "fake_wa", "w_bit": 4, "a_bit": 4},
 }
 
+for _mantissa in (6, 5, 3):
+    for _block_size in (256, 512):
+        _tag = f"W4BFPA{_mantissa}_B{_block_size}"
+        CONFIG_SPECS.setdefault(
+            _tag,
+            {
+                "tag": _tag,
+                "kind": "awq_act_bfp",
+                "w_bit": 4,
+                "a_bit": _mantissa,
+                "bfp_mantissa_bit": _mantissa,
+                "bfp_block_size": _block_size,
+            },
+        )
+
 AWQ_SUPPORTED_CLASS_NAMES = {
     "LlamaForCausalLM",
     "Qwen2ForCausalLM",
     "OPTForCausalLM",
     "BloomForCausalLM",
+    "BertModel",
     "DistilBertModel",
 }
 
@@ -423,6 +507,29 @@ def mean_pool(last_hidden_state, attention_mask):
     summed = (last_hidden_state * mask).sum(dim=1)
     denom = mask.sum(dim=1).clamp(min=1e-6)
     return F.normalize(summed / denom, p=2, dim=1)
+
+
+def pool_hidden_states(last_hidden_state, attention_mask, pooling="mean"):
+    pooling = str(pooling or "mean").lower()
+    if pooling == "cls":
+        return F.normalize(last_hidden_state[:, 0, :].to(torch.float32), p=2, dim=1)
+    if pooling != "mean":
+        raise ValueError(f"Unsupported embedding pooling mode: {pooling}")
+    return mean_pool(last_hidden_state, attention_mask)
+
+
+def apply_model_input_prefix(batch, model_spec):
+    prefix = str((model_spec or {}).get("input_prefix", "") or "")
+    if not prefix:
+        return batch
+    prefixed = []
+    for text in batch:
+        value = str(text)
+        if value.startswith("query: ") or value.startswith("passage: "):
+            prefixed.append(value)
+        else:
+            prefixed.append(prefix + value)
+    return prefixed
 
 
 def resolve_config(config_name):
@@ -1064,7 +1171,8 @@ def maybe_install_ffn_channel_gating(model, tokenizer, texts, batch_size, max_le
     print(f"[FFNGate] Collecting FFN activation energy on {len(calib_texts)} calibration texts...")
     controller.collect = True
     controller.enabled = False
-    _ = encode_texts(model, tokenizer, calib_texts, batch_size, max_length, device)
+    model_spec = MODEL_SPECS.get(canonical_model_name(llm_name), {})
+    _ = encode_texts(model, tokenizer, calib_texts, batch_size, max_length, device, model_spec=model_spec)
     controller.collect = False
     controller.build_masks()
     controller.enabled = True
@@ -1098,34 +1206,38 @@ def maybe_install_ffn_channel_gating(model, tokenizer, texts, batch_size, max_le
 
 
 def load_model_and_tokenizer(llm_name, config_name, cache_dir, force_cpu=False):
-    from transformers import AutoModel, AutoTokenizer, LlamaForCausalLM, LlamaTokenizer
+    from transformers import AutoModel, AutoModelForCausalLM, AutoTokenizer
 
-    if llm_name not in MODEL_SPECS:
-        raise ValueError(f"Unknown llm_name={llm_name}. Available: {sorted(MODEL_SPECS)}")
+    llm_name = canonical_model_name(llm_name)
 
     spec = MODEL_SPECS[llm_name]
     model_path = resolve_model_path(spec["path"], spec.get("env"))
     quant_config, tag = build_quant_config(config_name)
 
     if spec["model_class"] == "llama":
-        model_cls = LlamaForCausalLM
-        tokenizer_cls = LlamaTokenizer
+        model_cls = AutoModelForCausalLM
     else:
         model_cls = AutoModel
-        tokenizer_cls = AutoTokenizer
 
     kwargs = {
         "cache_dir": cache_dir,
         "output_hidden_states": False,
+        "trust_remote_code": True,
     }
     if spec["model_class"] == "llama" and not force_cpu:
         kwargs["device_map"] = "auto"
+        kwargs["low_cpu_mem_usage"] = True
     if quant_config is None:
         kwargs["torch_dtype"] = torch.float16
     else:
         kwargs["quantization_config"] = quant_config
 
     model = model_cls.from_pretrained(model_path, **kwargs)
+    if spec["model_class"] == "llama" and hasattr(model.config, "pretraining_tp"):
+        # AWQ calibration relies on Linear module hooks. Some ModelScope LLaMA
+        # checkpoints set pretraining_tp > 1, which routes projections through
+        # functional linear calls and hides q/k/v inputs from those hooks.
+        model.config.pretraining_tp = 1
     if force_cpu:
         model = model.to("cpu")
     elif "device_map" not in kwargs:
@@ -1135,7 +1247,12 @@ def load_model_and_tokenizer(llm_name, config_name, cache_dir, force_cpu=False):
     if hasattr(model.config, "use_cache"):
         model.config.use_cache = False
 
-    tokenizer = tokenizer_cls.from_pretrained(model_path, cache_dir=cache_dir, add_eos_token=False)
+    tokenizer = AutoTokenizer.from_pretrained(
+        model_path,
+        cache_dir=cache_dir,
+        add_eos_token=False,
+        trust_remote_code=True,
+    )
     if llm_name.startswith("llama2"):
         tokenizer.pad_token = tokenizer.bos_token
     tokenizer.padding_side = "right"
@@ -1160,11 +1277,12 @@ def _forward_last_hidden_state(model, tokens):
 _forward_hidden_states = _forward_last_hidden_state
 
 
-def encode_texts(model, tokenizer, texts, batch_size, max_length, device):
+def encode_texts(model, tokenizer, texts, batch_size, max_length, device, model_spec=None):
     all_embs = []
     with torch.no_grad():
         for start in tqdm(range(0, len(texts), batch_size), desc="Encoding"):
             batch = texts[start : start + batch_size]
+            batch = apply_model_input_prefix(batch, model_spec)
             tokens = tokenizer(
                 batch,
                 return_tensors="pt",
@@ -1174,7 +1292,11 @@ def encode_texts(model, tokenizer, texts, batch_size, max_length, device):
             )
             tokens = {key: value.to(device) for key, value in tokens.items()}
             hidden = _forward_last_hidden_state(model, tokens)
-            embs = mean_pool(hidden, tokens["attention_mask"]).cpu()
+            embs = pool_hidden_states(
+                hidden,
+                tokens["attention_mask"],
+                pooling=(model_spec or {}).get("pooling", "mean"),
+            ).cpu()
             all_embs.append(embs)
     return torch.cat(all_embs, dim=0)
 
@@ -1288,9 +1410,9 @@ def apply_official_awq_w4(model, tokenizer, texts, dataset, llm_name, args, acti
 
     awq_already_applied = False
     mse_range = not bool(args.awq_disable_mse_clip)
-    if model.__class__.__name__ == "DistilBertModel" and not bool(getattr(args, "awq_force_mse_clip", False)):
+    if model.__class__.__name__ in {"BertModel", "DistilBertModel"} and not bool(getattr(args, "awq_force_mse_clip", False)):
         if mse_range:
-            print("[AWQ] DistilBERT adapter disables MSE clip by default to avoid large activation-clip memory spikes.")
+            print("[AWQ] BERT-family adapter disables MSE clip by default to avoid large activation-clip memory spikes.")
         mse_range = False
 
     if os.path.exists(awq_results_path) and not bool(args.awq_overwrite_results):
@@ -1490,6 +1612,8 @@ def load_activation_outlier_clip_config(dataset, llm_name, a_bit, args):
 
 
 def generate_pool(dataset, llm_name, config_name, args):
+    llm_name = canonical_model_name(llm_name)
+    model_spec = MODEL_SPECS[llm_name]
     _canonical, config_spec = resolve_config(config_name)
     base_tag = config_spec["tag"]
     tag_suffix = str(getattr(args, "tag_suffix", "") or "").strip().strip("_")
@@ -1507,9 +1631,10 @@ def generate_pool(dataset, llm_name, config_name, args):
     print(f"{'=' * 72}")
     texts = load_raw_texts(dataset)
     batch_size = args.batch_size
-    if llm_name.startswith("llama2") and batch_size > 4:
-        print("[Info] Reducing LLaMA batch_size to 4 to avoid OOM.")
-        batch_size = 4
+    max_model_batch = int(model_spec.get("max_batch_size", batch_size))
+    if batch_size > max_model_batch:
+        print(f"[Info] Reducing {llm_name} batch_size to {max_model_batch} to avoid OOM.")
+        batch_size = max_model_batch
 
     awq_kinds = ("awq", "awq_act", "awq_act_trunc", "awq_act_bfp")
     load_config_name = "fp16" if config_spec["kind"] in ("fake_wa", *awq_kinds) else config_name
@@ -1537,7 +1662,15 @@ def generate_pool(dataset, llm_name, config_name, args):
         calib_count = min(len(texts), int(args.w4a_calib_samples))
         if calib_count > 0:
             print(f"[FakeWA] Running calibration pass on {calib_count} node texts...")
-            _ = encode_texts(model, tokenizer, texts[:calib_count], batch_size, args.max_length, device)
+            _ = encode_texts(
+                model,
+                tokenizer,
+                texts[:calib_count],
+                batch_size,
+                args.max_length,
+                device,
+                model_spec=model_spec,
+            )
     elif config_spec["kind"] in awq_kinds:
         trunc_bit = config_spec.get("trunc_bit")
         if config_spec["kind"] == "awq_act_trunc":
@@ -1628,7 +1761,15 @@ def generate_pool(dataset, llm_name, config_name, args):
         llm_name,
         tag,
     )
-    embs = encode_texts(model, tokenizer, encode_texts_input, batch_size, args.max_length, device)
+    embs = encode_texts(
+        model,
+        tokenizer,
+        encode_texts_input,
+        batch_size,
+        args.max_length,
+        device,
+        model_spec=model_spec,
+    )
     if encode_order is not None:
         restored = torch.empty_like(embs)
         restored[encode_order] = embs
@@ -1647,8 +1788,22 @@ def generate_pool(dataset, llm_name, config_name, args):
 
 def main():
     parser = argparse.ArgumentParser(description="Generate FP16/INT8/INT4 or W4A16/W4A8/W4A4 node embedding pools.")
-    parser.add_argument("--datasets", nargs="+", default=["cora"], choices=["cora", "pubmed", "arxiv"])
-    parser.add_argument("--llm_name", type=str, default="llama2_7b", choices=sorted(MODEL_SPECS.keys()))
+    parser.add_argument(
+        "--datasets",
+        nargs="+",
+        default=["cora"],
+        choices=["cora", "pubmed", "arxiv", "wikics", "tape_products", "tape_arxiv23"],
+    )
+    parser.add_argument(
+        "--llm_name",
+        type=str,
+        default="llama2_7b",
+        help=(
+            "Encoder model name. Canonical names: "
+            f"{', '.join(sorted(MODEL_SPECS.keys()))}. Common aliases such as "
+            "bert, ST, E5, Llama2-7B, and Llama2-13B are accepted."
+        ),
+    )
     parser.add_argument("--configs", nargs="+", default=["fp16", "int8", "int4"], choices=sorted(CONFIG_SPECS.keys()))
     parser.add_argument("--batch_size", type=int, default=64)
     parser.add_argument("--max_length", type=int, default=500)
@@ -1830,6 +1985,11 @@ def main():
         parser.error("--ffn_gate_calib_samples must be positive")
     if args.ffn_gate_seed < 0:
         parser.error("--ffn_gate_seed must be >= 0")
+
+    try:
+        args.llm_name = canonical_model_name(args.llm_name)
+    except ValueError as exc:
+        parser.error(str(exc))
 
     for dataset in args.datasets:
         for config_name in args.configs:

@@ -41,11 +41,10 @@ Main command:
 ```bash
 /home/zhangshangtong/.conda/envs/OFA/bin/python \
   scripts/profile_semantic_locality.py \
-  --datasets cora pubmed arxiv \
+  --datasets cora pubmed arxiv wikics \
   --embedding-source llama \
   --sample-pairs 30000 \
   --hash-bits 128 \
-  --chunk-size 512 \
   --output-dir output/semantic_locality_profile
 ```
 
@@ -66,10 +65,12 @@ Output files:
 ```text
 output/semantic_locality_profile/llama/summary.md
 output/semantic_locality_profile/llama/cdf.tsv
+output/semantic_locality_profile/llama/cdf.pdf
 output/semantic_locality_profile/llama/cdf.png
 
 output/semantic_locality_profile/st/summary.md
 output/semantic_locality_profile/st/cdf.tsv
+output/semantic_locality_profile/st/cdf.pdf
 output/semantic_locality_profile/st/cdf.png
 ```
 
@@ -78,27 +79,30 @@ output/semantic_locality_profile/st/cdf.png
 Reference embedding source:
 
 ```text
-W4A8 LLaMA-7B embedding pools
+W4BFPA8_B128 LLaMA-7B reference embedding pools
 ```
 
 Summary:
 
 | Dataset | Pair | Cos mean | Cos p50 | Ham mean | Ham <=0.25 | Ham <=0.30 |
 | --- | --- | ---: | ---: | ---: | ---: | ---: |
-| Cora | neighbor | 0.7391 | 0.8495 | 0.2211 | 70.3% | 76.5% |
-| Cora | random | 0.6585 | 0.7465 | 0.2631 | 59.1% | 72.5% |
-| PubMed | neighbor | 0.8978 | 0.9089 | 0.1381 | 99.1% | 99.9% |
-| PubMed | random | 0.8079 | 0.8130 | 0.1994 | 86.9% | 98.0% |
-| Arxiv | neighbor | 0.8801 | 0.8921 | 0.1426 | 98.1% | 99.7% |
-| Arxiv | random | 0.7394 | 0.7466 | 0.2193 | 77.2% | 94.9% |
+| Cora | neighbor | 0.7291 | 0.8466 | 0.2231 | 69.9% | 75.3% |
+| Cora | random | 0.6473 | 0.7409 | 0.2644 | 59.8% | 72.1% |
+| PubMed | neighbor | 0.8964 | 0.9077 | 0.1392 | 98.9% | 99.9% |
+| PubMed | random | 0.8047 | 0.8102 | 0.2015 | 85.5% | 97.6% |
+| Arxiv | neighbor | 0.8780 | 0.8903 | 0.1418 | 98.3% | 99.7% |
+| Arxiv | random | 0.7349 | 0.7426 | 0.2185 | 77.6% | 95.0% |
+| Wiki-CS | neighbor | 0.8488 | 0.8568 | 0.1822 | 91.7% | 98.3% |
+| Wiki-CS | random | 0.7599 | 0.7678 | 0.2385 | 63.6% | 89.7% |
 
 Neighbor-vs-random gap:
 
 | Dataset | Cos mean lift | Hamming mean reduction | Ham <=0.30 lift |
 | --- | ---: | ---: | ---: |
-| Cora | 0.0806 | 0.0420 | 4.0% |
-| PubMed | 0.0899 | 0.0614 | 1.9% |
-| Arxiv | 0.1407 | 0.0767 | 4.7% |
+| Cora | 0.0817 | 0.0413 | 3.2% |
+| PubMed | 0.0917 | 0.0623 | 2.3% |
+| Arxiv | 0.1431 | 0.0767 | 4.6% |
+| Wiki-CS | 0.0890 | 0.0562 | 8.6% |
 
 Interpretation:
 
@@ -152,10 +156,10 @@ Recommended figure:
 Figure: Semantic locality CDF
 
 (a) LLaMA cosine CDF:
-    neighbor vs random pairs on Cora/PubMed/Arxiv
+    neighbor vs random pairs on Cora/PubMed/Arxiv/Wiki-CS
 
 (b) LLaMA SimHash Hamming CDF:
-    neighbor vs random pairs on Cora/PubMed/Arxiv
+    neighbor vs random pairs on Cora/PubMed/Arxiv/Wiki-CS
 
 optional supplement:
     products feature-proxy CDF

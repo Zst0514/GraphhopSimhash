@@ -9,6 +9,37 @@ from .features import _compute_neighbor_mean, build_hash_features
 from .scoring import build_node_risk_scores, build_random_matrix
 
 
+MODEL_ALIASES = {
+    "bert": "BERT",
+    "bert-base": "BERT",
+    "bert-base-uncased": "BERT",
+    "st": "ST",
+    "sentence-transformer": "ST",
+    "sentence_transformer": "ST",
+    "sentence-transformers": "ST",
+    "multi-qa-distilbert-cos-v1": "ST",
+    "e5": "e5_large",
+    "e5-large": "e5_large",
+    "e5-large-v2": "e5_large",
+    "e5_large": "e5_large",
+    "e5_large_v2": "e5_large",
+    "llama2-7b": "llama2_7b",
+    "llama2_7b": "llama2_7b",
+    "llama-2-7b": "llama2_7b",
+    "llama2-13b": "llama2_13b",
+    "llama2_13b": "llama2_13b",
+    "llama-2-13b": "llama2_13b",
+}
+
+
+def canonical_model_name(model_name):
+    raw = str(model_name).strip()
+    if raw in {"BERT", "ST", "e5_large", "llama2_7b", "llama2_13b"}:
+        return raw
+    key = raw.lower().replace(" ", "").replace("/", "-")
+    return MODEL_ALIASES.get(key, raw)
+
+
 @dataclass
 class RealQuantPools:
     fp: torch.Tensor
@@ -20,11 +51,12 @@ class RealQuantPools:
 
 
 def default_pool_path(ds_key, model_name, tag):
+    model_name = canonical_model_name(model_name)
     return os.path.join("cache_data", f"{ds_key}_{model_name}_oracle_{tag}.pt")
 
 
 def resolve_pool_paths(ds_key, args):
-    model_name = args.real_quant_model_name
+    model_name = canonical_model_name(args.real_quant_model_name)
     fp_path = args.real_quant_fp_path or default_pool_path(ds_key, model_name, args.real_quant_fp_tag)
     int8_path = args.real_quant_int8_path or default_pool_path(ds_key, model_name, args.real_quant_int8_tag)
     int4_path = args.real_quant_int4_path or default_pool_path(ds_key, model_name, args.real_quant_int4_tag)
@@ -60,15 +92,19 @@ def _resolve_generation_config_name(tag):
 def regenerate_real_quant_pools(ds_key, args, log_fn=print):
     from .generate_real_quant_pools import generate_pool
 
+    args.real_quant_model_name = canonical_model_name(args.real_quant_model_name)
     fp_path, int8_path, int4_path = resolve_pool_paths(ds_key, args)
     is_st_model = str(args.real_quant_model_name).upper() == "ST"
     awq_calib_samples = 16 if is_st_model else 128
     awq_seqlen = 128 if is_st_model else 512
-    jobs = [
-        ("FP", args.real_quant_fp_tag, fp_path),
-        ("INT8", args.real_quant_int8_tag, int8_path),
-        ("INT4", args.real_quant_int4_tag, int4_path),
-    ]
+    if bool(getattr(args, "reuse_real_quant_allfp_only", False)):
+        jobs = [("FP", args.real_quant_fp_tag, fp_path)]
+    else:
+        jobs = [
+            ("FP", args.real_quant_fp_tag, fp_path),
+            ("INT8", args.real_quant_int8_tag, int8_path),
+            ("INT4", args.real_quant_int4_tag, int4_path),
+        ]
     gen_args = SimpleNamespace(
         batch_size=64,
         max_length=500,
@@ -124,9 +160,18 @@ def load_tensor_pool(path, device):
 
 def load_real_quant_pools(ds_key, args, data, device):
     fp_path, int8_path, int4_path = resolve_pool_paths(ds_key, args)
-    missing = [path for path in (fp_path, int8_path, int4_path) if not os.path.exists(path)]
+    allfp_only = bool(getattr(args, "reuse_real_quant_allfp_only", False))
+    required_paths = (fp_path,) if allfp_only else (fp_path, int8_path, int4_path)
+    missing = [path for path in required_paths if not os.path.exists(path)]
     if missing:
         msg = "\n".join(f"  - {path}" for path in missing)
+        if allfp_only:
+            raise FileNotFoundError(
+                "Full-precision embedding pool is missing for all-FP reuse evaluation:\n"
+                f"{msg}\n"
+                "Generate it with generate_real_quant_pools.py --configs fp16, or pass "
+                "--real_quant_fp_path explicitly."
+            )
         raise FileNotFoundError(
             "Real quantization pools are missing:\n"
             f"{msg}\n"
@@ -137,10 +182,13 @@ def load_real_quant_pools(ds_key, args, data, device):
             "for the AWQ-family path, or --real_quant_fp_tag FP16 for a clean full-precision reference."
         )
 
+    fp_tensor = load_tensor_pool(fp_path, device)
+    int8_tensor = fp_tensor if allfp_only and not os.path.exists(int8_path) else load_tensor_pool(int8_path, device)
+    int4_tensor = fp_tensor if allfp_only and not os.path.exists(int4_path) else load_tensor_pool(int4_path, device)
     pools = RealQuantPools(
-        fp=load_tensor_pool(fp_path, device),
-        int8=load_tensor_pool(int8_path, device),
-        int4=load_tensor_pool(int4_path, device),
+        fp=fp_tensor,
+        int8=int8_tensor,
+        int4=int4_tensor,
         fp_path=fp_path,
         int8_path=int8_path,
         int4_path=int4_path,

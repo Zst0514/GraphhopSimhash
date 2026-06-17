@@ -9,6 +9,7 @@ from typing import List
 from transformers.models.bloom.modeling_bloom import BloomForCausalLM
 from transformers.models.opt.modeling_opt import OPTForCausalLM
 from transformers.models.llama.modeling_llama import LlamaForCausalLM
+from transformers.models.bert.modeling_bert import BertModel
 from transformers.models.distilbert.modeling_distilbert import DistilBertModel
 try:
     from tinychat.models import LlavaLlamaForCausalLM
@@ -36,6 +37,8 @@ def get_blocks(model):
         layers = model.model.layers
     elif isinstance(model, DistilBertModel):
         layers = model.transformer.layer
+    elif isinstance(model, BertModel):
+        layers = model.encoder.layer
     elif model.__class__.__name__ == "InternVL3":
         layers = model.language_model.model.layers
         # layers = [model.language_model.model.layers, model.vision_model.encoder.layers]
@@ -67,6 +70,8 @@ def move_embed(model, device):
         if hasattr(model.model, "rotary_emb"):
             model.model.rotary_emb = model.model.rotary_emb.to(device)
     elif isinstance(model, DistilBertModel):
+        model.embeddings = model.embeddings.to(device)
+    elif isinstance(model, BertModel):
         model.embeddings = model.embeddings.to(device)
     elif model.__class__.__name__ == "InternVL3":
         model.language_model.model.embed_tokens = (

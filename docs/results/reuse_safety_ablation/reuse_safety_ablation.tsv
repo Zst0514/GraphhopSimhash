@@ -1,0 +1,11 @@
+dataset	threshold	method	reuse	direct	residual	compute	acc	drop	avg_err	hit_err	source
+cora	31	No reuse	0	0	0	1	0.7007	0	0	0	tser/cora_T31_runs3.log
+cora	31	Direct only	0.158	0.158	0	0.842	0.6929	0.0077	0.0316	0.20039	tser/cora_T31_runs3.log
+cora	31	Soft direct reuse	0.604	0.604	0	0.396	0.6636	0.0371	0.14728	0.24388	no_tser/cora_T31_runs3.log
+cora	31	TSER filtering	0.517	0.517	0	0.483	0.6749	0.0258	0.12053	0.23322	tser/cora_T31_runs3.log
+cora	31	TSER + residual repair	0.39	0.049527326	0.34047267	0.61	0.6826	0.0181	0.06754	0.17273	tser/cora_T31_runs3.log
+pubmed	24	No reuse	0	0	0	1	0.7522	0	0	0	tser/pubmed_T24_runs3.log
+pubmed	24	Direct only	0.299	0.299	0	0.701	0.7373	0.0149	0.03812	0.12706	tser/pubmed_T24_runs3.log
+pubmed	24	Soft direct reuse	0.902	0.902	0	0.098	0.6751	0.077	0.12587	0.13946	no_tser/pubmed_T24_runs3.log
+pubmed	24	TSER filtering	0.609	0.609	0	0.391	0.7089	0.0433	0.08063	0.13225	tser/pubmed_T24_runs3.log
+pubmed	24	TSER + residual repair	0.331	0.052154334	0.27884567	0.669	0.7363	0.0159	0.04162	0.12526	tser/pubmed_T24_runs3.log
