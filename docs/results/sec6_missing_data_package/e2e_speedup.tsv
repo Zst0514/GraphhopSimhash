@@ -1,0 +1,25 @@
+task	dataset	platform	time_s	normalized_time	speedup_vs_gpu	reuse_pct	raw_drop_pct	target_drop_pct	note
+CN	cora	A100-GPU-BFPA5-proxy	108.0	1.0	1.0	0.0	0.0	0.0	normalized GPU BFPA5 baseline; current seconds parsed from local BFPA5 logs
+CN	cora	HEAT-style-bitserial	638.3080230411105	5.910259472602875	0.16919730929505208	0.0	nan	nan	path-level W8A10/W4A2 bit-serial reconstruction
+CN	cora	GFMEngine-PQ-M128-BW64	75.62620147718751	0.7002426062702547	1.428076485271814	0.0	nan	nan	quality/lookup-heavy PQ sensitivity point
+CN	cora	GRACE-TSER40-BFPLift20	57.7687185632658	0.5348955422524612	1.8695238995430212	39.9	0.98	0.98	GPU-calibrated trace composition; loader double-buffered
+CL	cora	A100-GPU-BFPA5-proxy	108.0	1.0	1.0	0.0	0.0	0.0	normalized GPU BFPA5 baseline; current seconds parsed from local BFPA5 logs
+CL	cora	HEAT-style-bitserial	638.3080230411105	5.910259472602875	0.16919730929505208	0.0	nan	nan	path-level W8A10/W4A2 bit-serial reconstruction
+CL	cora	GFMEngine-PQ-M128-BW64	75.62620147718751	0.7002426062702547	1.428076485271814	0.0	nan	nan	quality/lookup-heavy PQ sensitivity point
+CL	cora	GRACE-TSER40-BFPLift20	58.19164775716662	0.5388115533070983	1.855936447283351	39.46	1.96	1.59	GPU-calibrated trace composition; loader double-buffered
+PN	pubmed	A100-GPU-BFPA5-proxy	1396.0	1.0	1.0	0.0	0.0	0.0	normalized GPU BFPA5 baseline; current seconds parsed from local BFPA5 logs
+PN	pubmed	HEAT-style-bitserial	8249.772517547952	5.909579167297959	0.16921678713329272	0.0	nan	nan	path-level W8A10/W4A2 bit-serial reconstruction
+PN	pubmed	GFMEngine-PQ-M128-BW64	946.5922241654266	0.6780746591442884	1.4747638575108712	0.0	nan	nan	quality/lookup-heavy PQ sensitivity point
+PN	pubmed	GRACE-TSER40-BFPLift20	746.7114285005919	0.5348935734244927	1.8695307808575927	39.9	1.95	1.67	GPU-calibrated trace composition; loader double-buffered
+PL	pubmed	A100-GPU-BFPA5-proxy	1396.0	1.0	1.0	0.0	0.0	0.0	normalized GPU BFPA5 baseline; current seconds parsed from local BFPA5 logs
+PL	pubmed	HEAT-style-bitserial	8249.772517547952	5.909579167297959	0.16921678713329272	0.0	nan	nan	path-level W8A10/W4A2 bit-serial reconstruction
+PL	pubmed	GFMEngine-PQ-M128-BW64	946.5922241654266	0.6780746591442884	1.4747638575108712	0.0	nan	nan	quality/lookup-heavy PQ sensitivity point
+PL	pubmed	GRACE-TSER40-BFPLift20	716.1473455482115	0.512999531194994	1.9493195201768996	42.36	1.67	1.51	GPU-calibrated trace composition; loader double-buffered
+AR	arxiv	A100-GPU-BFPA5-proxy	7787.0	1.0	1.0	0.0	0.0	0.0	normalized GPU BFPA5 baseline; current seconds parsed from local BFPA5 logs
+AR	arxiv	HEAT-style-bitserial	46017.82751827128	5.909570761303619	0.16921702783357576	0.0	nan	nan	path-level W8A10/W4A2 bit-serial reconstruction
+AR	arxiv	GFMEngine-PQ-M128-BW64	5413.184481280148	0.6951566047618015	1.4385247772229028	0.0	nan	nan	quality/lookup-heavy PQ sensitivity point
+AR	arxiv	GRACE-TSER40-BFPLift20	4179.7959859918965	0.5367658900721582	1.8630095885294955	39.69	2.62	1.47	GPU-calibrated trace composition; loader double-buffered
+WK	wikics	A100-GPU-BFPA5-proxy	797.0	1.0	1.0	0.0	0.0	0.0	normalized GPU BFPA5 baseline; current seconds parsed from local BFPA5 logs
+WK	wikics	HEAT-style-bitserial	4710.0229909853515	5.909690076518634	0.1692136113826623	0.0	nan	nan	path-level W8A10/W4A2 bit-serial reconstruction
+WK	wikics	GFMEngine-PQ-M128-BW64	541.5338166081596	0.6794652655058464	1.4717455781282989	0.0	nan	nan	quality/lookup-heavy PQ sensitivity point
+WK	wikics	GRACE-TSER40-BFPLift20	433.4088382804125	0.5438002989716594	1.838910353471718	38.9	1.15	1.15	GPU-calibrated trace composition; loader double-buffered

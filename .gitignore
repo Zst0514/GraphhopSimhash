@@ -16,6 +16,7 @@ saved_exp/
 cache_data/
 data/
 models/
+cacti/
 ONNXim/compile_commands.json
 ONNXim/ext/
 ONNXim/extern/booksim/

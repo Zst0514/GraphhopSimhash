@@ -2,8 +2,8 @@
 """Profile candidate discovery quality for graph-aware encoder reuse.
 
 This script isolates the lookup stage before TSER/residual decisions.  It
-compares exact text caching, self-only SimHash, graph-context SimHash, and
-multi-head graph-context SimHash over the same sampled query/anchor pools.
+compares self-only SimHash, single-head graph-context SimHash, and multi-head
+graph-context SimHash over the same sampled query/anchor pools.
 
 The lookup itself uses only cheap online keys.  LLaMA embeddings and labels are
 used only after lookup to measure candidate quality.
@@ -249,6 +249,7 @@ def quality_metrics(
     support: np.ndarray,
     soft_support: int,
     hard_support: int,
+    valid_cosine_threshold: float,
 ) -> dict[str, float]:
     valid = selected_anchor_pos >= 0
     any_hit = valid & (support > 0)
@@ -264,24 +265,47 @@ def quality_metrics(
         "mean_support": float(support[valid].mean()) if np.any(valid) else float("nan"),
     }
 
-    def masked_quality(mask: np.ndarray) -> tuple[float, float]:
+    def masked_quality(mask: np.ndarray) -> tuple[float, float, float]:
         if not np.any(mask):
-            return float("nan"), float("nan")
+            return float("nan"), float("nan"), float("nan")
         q = torch.from_numpy(query_nodes[mask]).long()
         a_nodes = anchor_nodes[selected_anchor_pos[mask]]
         a = torch.from_numpy(a_nodes).long()
         q_emb = F.normalize(target.index_select(0, q), p=2, dim=1)
         a_emb = F.normalize(target.index_select(0, a), p=2, dim=1)
-        cosine = float((q_emb * a_emb).sum(dim=1).mean())
+        pair_cosine = (q_emb * a_emb).sum(dim=1)
+        cosine = float(pair_cosine.mean())
+        valid_precision = float((pair_cosine >= valid_cosine_threshold).to(torch.float32).mean() * 100.0)
         if labels is None:
             label_hit = float("nan")
         else:
             label_hit = float((labels[q] == labels[a]).to(torch.float32).mean() * 100.0)
-        return cosine, label_hit
+        return cosine, valid_precision, label_hit
 
-    out["any_cosine"], out["any_label_hit"] = masked_quality(any_hit)
-    out["usable_cosine"], out["usable_label_hit"] = masked_quality(usable)
+    out["any_cosine"], out["any_valid_precision"], out["any_label_hit"] = masked_quality(any_hit)
+    out["usable_cosine"], out["usable_valid_precision"], out["usable_label_hit"] = masked_quality(usable)
+    out["valid_yield_pct"] = out["usable_pct"] * out["usable_valid_precision"] / 100.0
     return out
+
+
+def support_rule(heads: int, args: argparse.Namespace) -> tuple[int, int]:
+    if heads <= 1:
+        return 1, 1
+    if heads == 2:
+        return 2, 2
+    if heads == 4:
+        return 3, 4
+    if heads == 8:
+        return int(args.soft_support), int(args.hard_support)
+    if heads == 16:
+        # Keep approximately the same consensus ratio as the 8-head frontend.
+        return 2 * int(args.soft_support), 2 * int(args.hard_support)
+    return int(args.soft_support), int(args.hard_support)
+
+
+def hash_method_spec(name: str, codes: np.ndarray, args: argparse.Namespace) -> tuple[str, np.ndarray, str, int, int, int]:
+    soft, hard = support_rule(codes.shape[0], args)
+    return name, codes, "hash", soft, soft, hard
 
 
 def profile_dataset(dataset: str, args: argparse.Namespace) -> list[dict[str, Any]]:
@@ -309,12 +333,23 @@ def profile_dataset(dataset: str, args: argparse.Namespace) -> list[dict[str, An
     rows: list[dict[str, Any]] = []
 
     method_specs = [
-        ("Random anchor", None, "random", 1, 1, 2),
-        ("Exact text cache", None, "exact", args.hard_support, args.soft_support, args.hard_support),
-        ("Self-only SimHash", self_codes[:1], "hash", 1, 1, 2),
-        ("Graph-context SimHash", graph_codes[:1], "hash", 1, 1, 2),
-        ("Multi-head graph-context", graph_codes, "hash", args.soft_support, args.soft_support, args.hard_support),
+        hash_method_spec("Self-only SimHash", self_codes[:1], args),
+        hash_method_spec("Graph-context SimHash (1H)", graph_codes[:1], args),
+        hash_method_spec("Graph-context SimHash (2H)", graph_codes[:2], args),
+        hash_method_spec("Graph-context SimHash (4H)", graph_codes[:4], args),
     ]
+    if args.heads >= 8:
+        method_specs.append(hash_method_spec("Graph-context SimHash (8H)", graph_codes[:8], args))
+    if args.heads > 8:
+        method_specs.append(hash_method_spec(f"Graph-context SimHash ({args.heads}H)", graph_codes, args))
+
+    if args.include_text_cache:
+        method_specs.insert(
+            0,
+            ("Exact text cache", None, "exact", args.hard_support, args.soft_support, args.hard_support),
+        )
+    if args.include_random_anchor:
+        method_specs.insert(0, ("Random anchor", None, "random", 1, 1, 2))
 
     for method, codes, kind, usable_support, soft_support, hard_support in method_specs:
         if kind == "random":
@@ -340,6 +375,7 @@ def profile_dataset(dataset: str, args: argparse.Namespace) -> list[dict[str, An
             support,
             usable_support,
             hard_support,
+            args.valid_cosine_threshold,
         )
         row: dict[str, Any] = {
             "dataset": dataset,
@@ -349,7 +385,7 @@ def profile_dataset(dataset: str, args: argparse.Namespace) -> list[dict[str, An
             "queries": int(query_nodes.shape[0]),
             "anchors": int(anchor_nodes.shape[0]),
             "bits": args.bits,
-            "heads": graph_codes.shape[0] if method.startswith("Multi") else 1,
+            "heads": codes.shape[0] if codes is not None else 0,
             "radius": args.radius,
             "soft_support": soft_support,
             "hard_support": hard_support,
@@ -357,7 +393,7 @@ def profile_dataset(dataset: str, args: argparse.Namespace) -> list[dict[str, An
             "raw_text_available": texts is not None,
         }
         row.update(metrics)
-        if method != "Multi-head graph-context":
+        if row["heads"] <= 1:
             row["strong_pct"] = float("nan")
             row["fuzzy_pct"] = float("nan")
         rows.append(row)
@@ -379,7 +415,10 @@ def average_by_method(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
             "strong_pct",
             "fuzzy_pct",
             "any_cosine",
+            "any_valid_precision",
             "usable_cosine",
+            "usable_valid_precision",
+            "valid_yield_pct",
             "any_label_hit",
             "usable_label_hit",
             "mean_support",
@@ -407,6 +446,10 @@ def write_tsv(path: Path, rows: list[dict[str, Any]]) -> None:
         "dataset",
         "abbr",
         "method",
+        "heads",
+        "radius",
+        "soft_support",
+        "hard_support",
         "queries",
         "anchors",
         "any_hit_pct",
@@ -414,7 +457,10 @@ def write_tsv(path: Path, rows: list[dict[str, Any]]) -> None:
         "strong_pct",
         "fuzzy_pct",
         "any_cosine",
+        "any_valid_precision",
         "usable_cosine",
+        "usable_valid_precision",
+        "valid_yield_pct",
         "any_label_hit",
         "usable_label_hit",
         "mean_support",
@@ -441,19 +487,20 @@ def write_markdown(path: Path, rows: list[dict[str, Any]], avg: list[dict[str, A
         f"- SimHash heads: `{args.heads}`",
         f"- bits per head: `{args.bits}`",
         f"- Hamming radius: `{args.radius}`",
+        f"- valid-anchor threshold: `cosine >= {args.valid_cosine_threshold:.2f}`",
         f"- graph-context key: `{args.self_weight:.2f} * self + {1.0 - args.self_weight:.2f} * neighbor_mean`",
         f"- usable multi-head support: `support >= {args.soft_support}`",
         f"- strong multi-head support: `support >= {args.hard_support}`",
         "",
         "## Average Across Datasets",
         "",
-        "| Method | AnyHit | Usable | Strong | Fuzzy | CandCos | LabelHit | MeanSupport |",
-        "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
+        "| Method | Lookup Yield | Valid Anchor | Valid Yield | Emb. Cos. | Label Agree. | Mean Support |",
+        "| --- | ---: | ---: | ---: | ---: | ---: | ---: |",
     ]
     for row in avg:
         lines.append(
-            f"| {row['method']} | {fmt(row['any_hit_pct'], True)} | {fmt(row['usable_pct'], True)} | "
-            f"{fmt(row['strong_pct'], True)} | {fmt(row['fuzzy_pct'], True)} | "
+            f"| {row['method']} | {fmt(row['usable_pct'], True)} | "
+            f"{fmt(row['usable_valid_precision'], True)} | {fmt(row['valid_yield_pct'], True)} | "
             f"{fmt(row['usable_cosine'], False, 4)} | {fmt(row['usable_label_hit'], True)} | "
             f"{fmt(row['mean_support'], False, 2)} |"
         )
@@ -463,15 +510,15 @@ def write_markdown(path: Path, rows: list[dict[str, Any]], avg: list[dict[str, A
             "",
             "## Per-Dataset Results",
             "",
-            "| Dataset | Method | AnyHit | Usable | Strong | Fuzzy | CandCos | LabelHit | Support |",
-            "| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
+            "| Dataset | Method | Lookup Yield | Valid Anchor | Valid Yield | Emb. Cos. | Label Agree. | Support |",
+            "| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |",
         ]
     )
     for row in rows:
         lines.append(
-            f"| {row['abbr']} | {row['method']} | {fmt(row['any_hit_pct'], True)} | "
-            f"{fmt(row['usable_pct'], True)} | {fmt(row['strong_pct'], True)} | "
-            f"{fmt(row['fuzzy_pct'], True)} | {fmt(row['usable_cosine'], False, 4)} | "
+            f"| {row['abbr']} | {row['method']} | {fmt(row['usable_pct'], True)} | "
+            f"{fmt(row['usable_valid_precision'], True)} | {fmt(row['valid_yield_pct'], True)} | "
+            f"{fmt(row['usable_cosine'], False, 4)} | "
             f"{fmt(row['usable_label_hit'], True)} | {fmt(row['mean_support'], False, 2)} |"
         )
 
@@ -480,13 +527,13 @@ def write_markdown(path: Path, rows: list[dict[str, Any]], avg: list[dict[str, A
             "",
             "## Reading The Metrics",
             "",
-            "- `AnyHit`: the lookup found at least one candidate in the sampled anchor pool.",
-            "- `Usable`: candidate evidence reaches the method-specific usable threshold. For multi-head, this is `support >= soft_support`.",
-            "- `Strong` and `Fuzzy`: the high-support and medium-support regions used by the frontend policy.",
-            "- `CandCos`: cosine similarity between query and selected anchor in the LLaMA target embedding space.",
-            "- `LabelHit`: offline label agreement sanity check; labels are not used by lookup.",
+            "- `Lookup Yield`: the lookup returns an anchor satisfying the method's support rule.",
+            f"- `Valid Anchor`: among returned anchors, the fraction whose LLaMA embedding cosine is at least `{args.valid_cosine_threshold:.2f}`.",
+            "- `Valid Yield`: returned valid anchors as a fraction of all queried nodes.",
+            "- `Emb. Cos.`: cosine similarity between query and selected anchor in the LLaMA target embedding space.",
+            "- `Label Agree.`: offline label agreement sanity check; labels are not used by lookup.",
             "",
-            "The key comparison is not only hit rate. Exact text caching has little coverage, single-head SimHash can find candidates but lacks repeated evidence, and multi-head graph-context SimHash exposes support structure that can feed TSER/residual decisions.",
+            "The key comparison is not raw lookup yield alone. Single-head lookup can return many anchors, but multi-head graph-context consensus improves valid-anchor precision and embedding similarity, giving the later reuse filter a cleaner candidate set.",
         ]
     )
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
@@ -512,10 +559,13 @@ def main() -> None:
     parser.add_argument("--radius", type=int, default=2)
     parser.add_argument("--soft-support", type=int, default=3)
     parser.add_argument("--hard-support", type=int, default=5)
+    parser.add_argument("--valid-cosine-threshold", type=float, default=0.8)
     parser.add_argument("--self-weight", type=float, default=0.5)
     parser.add_argument("--feature-chunk", type=int, default=8192)
     parser.add_argument("--search-chunk", type=int, default=256)
     parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--include-text-cache", action="store_true")
+    parser.add_argument("--include-random-anchor", action="store_true")
     parser.add_argument(
         "--output-dir",
         type=Path,

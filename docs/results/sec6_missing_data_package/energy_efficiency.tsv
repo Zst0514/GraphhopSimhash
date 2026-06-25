@@ -1,0 +1,25 @@
+task	platform	time_s	power_w	energy_j	energy_efficiency_vs_gpu	note
+CN	A100-GPU-BFPA5-proxy	108.0	400.0	43200.0	1.0	power-model input; replace with RTL power after synthesis
+CN	HEAT-style-bitserial	638.3080230411105	10.5	6702.23424193166	6.44561178266865	power-model input; replace with RTL power after synthesis
+CN	GFMEngine-PQ-M128-BW64	75.62620147718751	98.0	7411.367744764376	5.828883613354343	power-model input; replace with RTL power after synthesis
+CN	GRACE-TSER40-BFPLift20	57.7687185632658	36.0	2079.673868277569	20.772487772700234	power-model input; replace with RTL power after synthesis
+CL	A100-GPU-BFPA5-proxy	108.0	400.0	43200.0	1.0	power-model input; replace with RTL power after synthesis
+CL	HEAT-style-bitserial	638.3080230411105	10.5	6702.23424193166	6.44561178266865	power-model input; replace with RTL power after synthesis
+CL	GFMEngine-PQ-M128-BW64	75.62620147718751	98.0	7411.367744764376	5.828883613354343	power-model input; replace with RTL power after synthesis
+CL	GRACE-TSER40-BFPLift20	58.19164775716662	36.0	2094.8993192579983	20.621516080926124	power-model input; replace with RTL power after synthesis
+PN	A100-GPU-BFPA5-proxy	1396.0	400.0	558400.0	1.0	power-model input; replace with RTL power after synthesis
+PN	HEAT-style-bitserial	8249.772517547952	10.5	86622.6114342535	6.446353795554007	power-model input; replace with RTL power after synthesis
+PN	GFMEngine-PQ-M128-BW64	946.5922241654266	98.0	92766.03796821181	6.019444316370904	power-model input; replace with RTL power after synthesis
+PN	GRACE-TSER40-BFPLift20	746.7114285005919	36.0	26881.611426021307	20.77256423175103	power-model input; replace with RTL power after synthesis
+PL	A100-GPU-BFPA5-proxy	1396.0	400.0	558400.0	1.0	power-model input; replace with RTL power after synthesis
+PL	HEAT-style-bitserial	8249.772517547952	10.5	86622.6114342535	6.446353795554007	power-model input; replace with RTL power after synthesis
+PL	GFMEngine-PQ-M128-BW64	946.5922241654266	98.0	92766.03796821181	6.019444316370904	power-model input; replace with RTL power after synthesis
+PL	GRACE-TSER40-BFPLift20	716.1473455482115	36.0	25781.304439735617	21.659105779743328	power-model input; replace with RTL power after synthesis
+AR	A100-GPU-BFPA5-proxy	7787.0	400.0	3114800.0	1.0	power-model input; replace with RTL power after synthesis
+AR	HEAT-style-bitserial	46017.82751827128	10.5	483187.18894184846	6.4463629650886	power-model input; replace with RTL power after synthesis
+AR	GFMEngine-PQ-M128-BW64	5413.184481280148	98.0	530492.0791654545	5.871529702950625	power-model input; replace with RTL power after synthesis
+AR	GRACE-TSER40-BFPLift20	4179.7959859918965	36.0	150472.65549570828	20.700106539216616	power-model input; replace with RTL power after synthesis
+WK	A100-GPU-BFPA5-proxy	797.0	400.0	318800.0	1.0	power-model input; replace with RTL power after synthesis
+WK	HEAT-style-bitserial	4710.0229909853515	10.5	49455.24140534619	6.446232814577612	power-model input; replace with RTL power after synthesis
+WK	GFMEngine-PQ-M128-BW64	541.5338166081596	98.0	53070.314027599634	6.007124808686934	power-model input; replace with RTL power after synthesis
+WK	GRACE-TSER40-BFPLift20	433.4088382804125	36.0	15602.71817809485	20.432337260796867	power-model input; replace with RTL power after synthesis

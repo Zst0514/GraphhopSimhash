@@ -1,90 +1,123 @@
-# TSER Equal-Reuse Ablation
+# TSER No-Repair Iso-Reuse Ablation
 
-This file records the TSER component ablation under comparable reuse rates.
-The purpose is to avoid the unfair comparison where all policies use the same
-threshold but produce different reuse rates.
+This file records the updated TSER component ablation after removing residual
+repair from the frontend path.  Older `ResidualReuse` rows should not be used
+for the paper's TSER component figure.
 
-Current status:
+## Protocol
 
-- Finished: Cora / LLaMA2-7B / W4BFPA8 target pool.
-- Pending: PubMed, OGBN-Arxiv, Wiki-CS, Products subset, TAPE-Arxiv23.
-- Output root: `output/llama7b_tser_equal_reuse_sweep_cora/`.
-
-## Method
-
-The SimHash-CAM candidate discovery configuration is fixed. For each risk
-policy, the score threshold is swept, and the closest point to each target
-reuse rate is selected.
+The goal is to compare graph-risk scoring policies at the same accepted-reuse
+budget.  Candidate discovery is fixed, and accepted anchors are reused directly
+without residual correction.
 
 Policies:
 
-| Policy | Risk Terms | Meaning |
+| Policy | Risk terms | Meaning |
 | --- | --- | --- |
-| Hash only | none | Uses SimHash support/distance without graph-risk scoring. |
-| P only | P | Uses propagation risk only. |
-| P+C | P+C | Adds graph-context/boundary risk. |
+| Hash only | none | Candidate score from SimHash evidence only. |
+| P | P | Propagation / fanout risk only. |
+| P+C | P+C | Adds graph-context / boundary risk. |
 | P+U | P+U | Adds low-degree uniqueness risk. |
-| Full TSER | P+C+U | Uses all three TSER risk terms. |
+| TSER full | P+C+U | Uses all three graph-risk terms. |
 
-## Cora: Complete Frontend Path
+Node tasks (`CN`, `PN`, `AR`, `WK`) use exact 40% no-repair trace replay.  Link
+tasks (`CL`, `PL`) use separate no-repair link-transfer evaluation, because
+their metric is AUC and cannot be taken from node-classification replay.
 
-This table uses the `ResidualReuse` row, so it reflects the full lightweight
-frontend path after TSER filtering and residual repair.
+## Main 40% No-Repair Table
 
-### Around 40% Reuse
+Each cell reports metric drop at approximately 40% accepted reuse.  For `CN`,
+`PN`, `AR`, and `WK`, the actual reuse is exactly 40% after replay.  For `CL`
+and `PL`, `Hash only` uses exact 40% link evaluation; the graph-risk policies
+use closest measured no-repair link-transfer runs around 40%.
 
-| Policy | Actual Reuse | Drop | AvgErr | Selected T |
-| --- | ---: | ---: | ---: | ---: |
-| Hash only | 42.70% | 2.47% | 0.08724 | 35 |
-| P only | 40.80% | 1.32% | 0.08420 | 28 |
-| P+C | 40.20% | 1.76% | 0.08452 | 24 |
-| P+U | 40.30% | 1.35% | 0.08239 | 31 |
-| Full TSER | 39.90% | 0.98% | 0.08336 | 45 |
+| Dataset | Hash only | P | P+C | P+U | TSER full |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| CN | 2.19% | 1.90% | 1.79% | 1.71% | 1.53% |
+| CL | 2.13% | 1.95% | 2.69% | 1.49% | 1.95% |
+| PN | 2.82% | 3.36% | 3.11% | 3.18% | 3.01% |
+| PL | 6.09% | 1.39% | 1.51% | 1.60% | 1.60% |
+| AR | 2.78% | 2.84% | 2.70% | 2.77% | 2.70% |
+| WK | 1.94% | 1.85% | 1.59% | 1.74% | 1.49% |
+| Avg. | 2.99% | 2.22% | 2.23% | 2.08% | 2.05% |
 
-Main observation:
+Interpretation:
 
-At roughly the same reuse rate, Full TSER gives the lowest accuracy drop. This
-shows that the full `P+C+U` risk score is not merely lowering reuse to improve
-accuracy; it selects safer candidates at a comparable reuse budget.
+- Removing residual repair raises the final TSER drop compared with the old
+  repair-enabled table.
+- `TSER full` remains the best average policy, but the margin is smaller:
+  average drop falls from `2.99%` for hash-only to `2.05%`.
+- `PN` is the main weak case under no-repair: graph-risk filtering alone does
+  not recover the candidate errors as well as residual repair did.
 
-## Cora: TSER Filter Before Residual Repair
+## Source Details
 
-This table uses the `SoftDirectReuse` row, which isolates the TSER filtering
-effect before residual repair.
+Node-task exact 40% no-repair replay:
 
-### Around 50% Reuse
+```text
+output/llama7b_tser_no_repair_equal_budget_cpnwk/replay/equal_budget_replay.tsv
+output/llama7b_tser_no_repair_equal_budget_arxiv/replay/equal_budget_replay.tsv
+```
 
-| Policy | Actual Reuse | Drop | AvgErr | Selected T |
-| --- | ---: | ---: | ---: | ---: |
-| Hash only | 59.70% | 4.11% | 0.14616 | 40 |
-| P only | 55.60% | 3.19% | 0.13334 | 24 |
-| P+C | 53.20% | 2.80% | 0.12489 | 24 |
-| P+U | 52.10% | 2.64% | 0.12134 | 28 |
-| Full TSER | 51.20% | 1.95% | 0.11915 | 31 |
+Node-task no-repair tradeoff curve, exact-budget replay:
 
-This pre-repair view shows the same trend: adding graph-risk terms improves
-the quality of accepted candidates, and Full TSER is the strongest filter at a
-similar reuse rate.
+```text
+output/tser_reuse_drop_tradeoff_norepair_node_exact_budget.tsv
+```
 
-## Source Files
+Link-task no-repair measured points:
 
-- Summary markdown:
-  `output/llama7b_tser_equal_reuse_sweep_cora/llama7b_tser_equal_reuse_sweep.md`
-- Full frontier:
-  `output/llama7b_tser_equal_reuse_sweep_cora/llama7b_tser_equal_reuse_frontier.tsv`
-- Closest-point table:
-  `output/llama7b_tser_equal_reuse_sweep_cora/llama7b_tser_equal_reuse_closest.tsv`
+```text
+output/hash_only_equal_budget_40/link_norepair/cora_hash_only_equal_budget_link.md
+output/hash_only_equal_budget_40/link_norepair/pubmed_hash_only_equal_budget_link.md
+output/tser_component_link_iso40_norepair/cora_p_only_T28_link_reuse_norepair.md
+output/tser_component_link_iso40_norepair/cora_p_c_T36_link_reuse_norepair.md
+output/tser_component_link_iso40_norepair/cora_p_u_T36_link_reuse_norepair.md
+output/tser_component_link_iso40_norepair/cora_full_tser_T36_link_reuse_norepair.md
+output/tser_component_link_iso40_norepair/pubmed_p_only_T10_link_reuse_norepair.md
+output/tser_component_link_iso40_norepair/pubmed_p_c_T14_link_reuse_norepair.md
+output/tser_component_link_iso40_norepair/pubmed_p_u_T20_link_reuse_norepair.md
+output/tser_component_link_iso40_norepair/pubmed_full_tser_T24_link_reuse_norepair.md
+```
 
-## Pending Plot Plan
+## Link-Task Values
 
-After the remaining five datasets finish, draw a unified figure with one of the
-following layouts:
+| Dataset | Policy | T | Reuse | AUC drop |
+| --- | --- | ---: | ---: | ---: |
+| CL | Hash only | exact budget | 39.99% | 2.13% |
+| CL | P | 28 | 39.92% | 1.95% |
+| CL | P+C | 36 | 39.81% | 2.69% |
+| CL | P+U | 36 | 39.06% | 1.49% |
+| CL | TSER full | 36 | 39.45% | 1.95% |
+| PL | Hash only | exact budget | 40.00% | 6.09% |
+| PL | P | 10 | 39.83% | 1.39% |
+| PL | P+C | 14 | 41.29% | 1.51% |
+| PL | P+U | 20 | 38.28% | 1.60% |
+| PL | TSER full | 24 | 42.16% | 1.60% |
 
-1. Bar chart at fixed target reuse:
-   x-axis is policy; y-axis is accuracy drop; one grouped bar per dataset.
-2. Drop-vs-reuse frontier:
-   x-axis is reuse rate; y-axis is accuracy drop; one curve per policy.
+## Copyable Table
 
-The current preferred paper figure is the fixed-target grouped bar chart at
-around 30% or 40% reuse, because it directly answers which TSER component gives
-the lowest drop at the same reuse budget.
+```text
+Dataset	hash only	P	P+C	P+U	TSER full
+CN	2.19	1.90	1.79	1.71	1.53
+CL	2.13	1.95	2.69	1.49	1.95
+PN	2.82	3.36	3.11	3.18	3.01
+PL	6.09	1.39	1.51	1.60	1.60
+AR	2.78	2.84	2.70	2.77	2.70
+WK	1.94	1.85	1.59	1.74	1.49
+Avg.	2.99	2.22	2.23	2.08	2.05
+```
+
+## No-Repair Full-TSER Tradeoff Curve
+
+This table reports exact-budget trace replay for node tasks only.  Link tasks
+need separate link-prediction evaluation and are not included in this exact
+node-task replay table.
+
+```text
+Dataset	10%	20%	30%	40%	50%	60%
+CN	0.35	0.95	1.29	1.53	2.45	3.58
+PN	0.74	1.50	2.22	3.01	3.61	4.15
+AR	0.59	1.33	1.93	2.69	3.36	4.24
+WK	0.29	0.66	1.00	1.49	1.92	2.80
+```

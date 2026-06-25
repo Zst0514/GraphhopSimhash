@@ -307,6 +307,9 @@ def load_text_selection_edge_index(dataset):
         candidates.append(
             os.path.join("data", "single_graph", "arxiv", "ogbn_arxiv", "processed", "geometric_data_processed.pt")
         )
+    elif ds_key == "wikics":
+        candidates.append(os.path.join("cache_data", "wikics", "ST", "processed", "geometric_data_processed.pt"))
+        candidates.append(os.path.join("data", "single_graph", "wikics", "processed", "geometric_data_processed.pt"))
     for path in candidates:
         if os.path.exists(path):
             data = torch.load(path, map_location="cpu")
@@ -1260,6 +1263,14 @@ def load_model_and_tokenizer(llm_name, config_name, cache_dir, force_cpu=False):
     return model, tokenizer, tag
 
 
+def infer_model_device(model):
+    """Return the device that should receive input tokens for this model."""
+    for param in model.parameters():
+        if param.device.type != "meta":
+            return param.device
+    return torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+
 def _forward_last_hidden_state(model, tokens):
     target_model = model
     if hasattr(model, "model") and model.__class__.__name__.endswith("ForCausalLM"):
@@ -1445,8 +1456,10 @@ def apply_official_awq_w4(model, tokenizer, texts, dataset, llm_name, args, acti
         print(f"[AWQ] Applying cached AWQ scales/clips and pseudo-quantizing weights to W4A{int(activation_bit)}.")
         apply_awq(model, awq_results)
     pseudo_quantize_model_weight(model, w_bit=4, q_config=q_config)
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    model = model.to(device)
+    device = infer_model_device(model)
+    if not hasattr(model, "hf_device_map"):
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        model = model.to(device)
     model.eval()
     return model, device
 
@@ -1642,9 +1655,9 @@ def generate_pool(dataset, llm_name, config_name, args):
         llm_name,
         load_config_name,
         args.cache_dir,
-        force_cpu=config_spec["kind"] in awq_kinds,
+        force_cpu=config_spec["kind"] in awq_kinds and bool(args.awq_force_cpu),
     )
-    device = next(model.parameters()).device
+    device = infer_model_device(model)
 
     if config_spec["kind"] == "fake_wa":
         print(
@@ -1864,6 +1877,15 @@ def main():
     parser.add_argument("--awq_force_mse_clip", action="store_true")
     parser.add_argument("--awq_results_path", type=str, default=None)
     parser.add_argument("--awq_overwrite_results", action="store_true")
+    parser.add_argument(
+        "--awq_force_cpu",
+        action="store_true",
+        help=(
+            "Load the FP model on CPU for official AWQ search. Default keeps "
+            "the model on the normal GPU/auto device path, which is much faster "
+            "when memory is sufficient."
+        ),
+    )
     parser.add_argument(
         "--activation_outlier_clip",
         action="store_true",

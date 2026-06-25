@@ -1,11 +1,15 @@
 #!/usr/bin/env python3
-"""Generate and evaluate graph-aware dynamic BFPA4/BFPA6 embeddings.
+"""Generate and evaluate BFPA4/BFPA6 block-lift embeddings.
 
-This is the first full encoder-side validation for the policy:
+The default mode validates the online graph-aware policy:
 
     default: BFPA4 activation blocks
     refine: BFPA6 activation blocks when graph_risk(node) * activation_stress(block)
             exceeds a threshold
+
+The script also supports profiling-only block selection policies such as random
+and oracle-error lift.  Those modes are useful for motivation studies that ask
+whether BFPA4 loss is concentrated in a small subset of activation blocks.
 
 Unlike pool-level routing, this script performs the BFPA4/BFPA6 decision inside
 each Linear wrapper during the LLaMA forward pass.
@@ -41,7 +45,7 @@ from GraphhopSimhash.generate_real_quant_pools import (  # noqa: E402
     load_text_selection_edge_index,
     mean_pool,
 )
-from GraphhopSimhash.real_quant import default_pool_path, load_tensor_pool  # noqa: E402
+from GraphhopSimhash.real_quant import build_real_quant_scores, default_pool_path, load_tensor_pool  # noqa: E402
 from GraphhopSimhash.runner import evaluate_gnn_embeddings, train_baseline_model  # noqa: E402
 
 
@@ -65,6 +69,43 @@ def build_degree_risk(dataset: str, num_nodes: int) -> torch.Tensor:
     return _normalize(torch.log1p(deg))
 
 
+def build_graph_risk(
+    dataset: str,
+    num_nodes: int,
+    risk_mode: str,
+    top_risk_frac: float,
+    seed: int,
+) -> torch.Tensor:
+    """Build a deployable node-risk vector for dynamic BFP refinement."""
+    mode = str(risk_mode).lower()
+    if mode in {"degree", "prop", "propagation"}:
+        risk = build_degree_risk(dataset, num_nodes)
+    else:
+        run_args = _make_eval_args(seed)
+        _conf, data, verify_features, device = load_run_state(dataset, run_args, seed)
+        scores = build_real_quant_scores(verify_features, data, run_args, device)
+        if mode == "tser":
+            risk = scores["sensitivity_q"].detach().to(torch.float32).cpu()
+        elif mode in {"context", "ctx"}:
+            risk = scores["graph_context_q"].detach().to(torch.float32).cpu()
+        elif mode in {"unique", "uniq", "low_unique"}:
+            risk = scores["low_degree_unique_q"].detach().to(torch.float32).cpu()
+        else:
+            raise ValueError(f"Unknown risk_mode={risk_mode}")
+        if int(risk.numel()) != int(num_nodes):
+            raise ValueError(f"risk length mismatch: risk={risk.numel()} nodes={num_nodes}")
+        risk = _normalize(risk)
+
+    frac = float(top_risk_frac)
+    if 0.0 < frac < 1.0:
+        k = max(1, int(round(frac * int(risk.numel()))))
+        idx = torch.argsort(risk, descending=True)[:k]
+        masked = torch.zeros_like(risk)
+        masked[idx] = risk[idx].clamp_min(1e-6)
+        risk = masked
+    return risk
+
+
 def _bfp_quantize_grouped(grouped: torch.Tensor, mantissa_bit: int) -> torch.Tensor:
     q_min = -(2 ** (int(mantissa_bit) - 1))
     q_max = (2 ** (int(mantissa_bit) - 1)) - 1
@@ -85,6 +126,9 @@ class GraphAwareBFPController:
         block_size: int = 128,
         base_mantissa: int = 4,
         refine_mantissa: int = 6,
+        selection_policy: str = "graph_stress",
+        lift_ratio: float = 0.2,
+        risk_boost_alpha: float = 1.0,
     ) -> None:
         self.node_risk_cpu = node_risk.detach().to(torch.float32).cpu()
         self.threshold = float(threshold)
@@ -92,10 +136,26 @@ class GraphAwareBFPController:
         self.block_size = int(block_size)
         self.base_mantissa = int(base_mantissa)
         self.refine_mantissa = int(refine_mantissa)
+        self.selection_policy = str(selection_policy).lower()
+        self.lift_ratio = float(lift_ratio)
+        self.risk_boost_alpha = float(risk_boost_alpha)
         self.current_node_ids: torch.Tensor | None = None
         self.total_blocks = 0
         self.refined_blocks = 0
         self.module_stats: dict[str, dict[str, Any]] = {}
+
+    @staticmethod
+    def _topk_mask(score: torch.Tensor, ratio: float) -> torch.Tensor:
+        flat = score.reshape(-1)
+        k = int(round(float(ratio) * int(flat.numel())))
+        if k <= 0:
+            return torch.zeros_like(score, dtype=torch.bool)
+        if k >= int(flat.numel()):
+            return torch.ones_like(score, dtype=torch.bool)
+        idx = torch.topk(flat, k=k, largest=True, sorted=False).indices
+        mask = torch.zeros_like(flat, dtype=torch.bool)
+        mask[idx] = True
+        return mask.reshape_as(score)
 
     @staticmethod
     def _new_module_stat(module_name: str, in_features: Optional[int], out_features: Optional[int]) -> dict[str, Any]:
@@ -143,11 +203,32 @@ class GraphAwareBFPController:
         node_ids = self.current_node_ids[:batch]
         risk = self.node_risk_cpu[node_ids].to(device=x.device, dtype=torch.float32)
         view_shape = [batch] + [1] * (stress_norm.dim() - 1)
-        priority = risk.view(*view_shape) * stress_norm
-        refine_mask = priority >= self.threshold
+        graph_score = risk.view(*view_shape).expand_as(stress_norm)
+        graph_stress_priority = graph_score * stress_norm
+        stress_graph_boost_priority = stress_norm * (1.0 + self.risk_boost_alpha * graph_score)
+        refine_mask = graph_stress_priority >= self.threshold
 
         q_base = _bfp_quantize_grouped(grouped, self.base_mantissa)
         q_refine = _bfp_quantize_grouped(grouped, self.refine_mantissa)
+        if self.selection_policy == "random":
+            refine_mask = torch.rand_like(stress_norm, dtype=torch.float32) < self.lift_ratio
+        elif self.selection_policy in {"stress", "stress_topk"}:
+            refine_mask = self._topk_mask(stress_norm, self.lift_ratio)
+        elif self.selection_policy in {"graph_risk", "graph_only", "risk_topk"}:
+            refine_mask = self._topk_mask(graph_score, self.lift_ratio)
+        elif self.selection_policy in {"graph_stress_topk", "graphxstress", "risk_stress_topk"}:
+            refine_mask = self._topk_mask(graph_stress_priority, self.lift_ratio)
+        elif self.selection_policy in {"stress_graph_boost", "stress_graph_boost_threshold"}:
+            refine_mask = stress_graph_boost_priority >= self.threshold
+        elif self.selection_policy in {"stress_graph_boost_topk", "stressboost_topk", "stress_risk_boost_topk"}:
+            refine_mask = self._topk_mask(stress_graph_boost_priority, self.lift_ratio)
+        elif self.selection_policy in {"oracle_error", "oracle"}:
+            base_err = (grouped.detach().to(torch.float32) - q_base.detach().to(torch.float32)).pow(2).mean(dim=-1)
+            refine_err = (grouped.detach().to(torch.float32) - q_refine.detach().to(torch.float32)).pow(2).mean(dim=-1)
+            benefit = (base_err - refine_err).clamp_min(0.0)
+            refine_mask = self._topk_mask(benefit, self.lift_ratio)
+        elif self.selection_policy not in {"graph_stress", "graph"}:
+            raise ValueError(f"Unknown selection_policy={self.selection_policy}")
         out = torch.where(refine_mask.unsqueeze(-1), q_refine, q_base)
         total_blocks = int(refine_mask.numel())
         refined_blocks = int(refine_mask.sum().item())
@@ -323,13 +404,63 @@ def evaluate_pool(dataset: str, pool: torch.Tensor, reference: torch.Tensor, run
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--dataset", default="cora", choices=["cora", "pubmed", "arxiv"])
+    parser.add_argument("--dataset", default="cora", choices=["cora", "pubmed", "arxiv", "wikics"])
     parser.add_argument("--llm_name", default="llama2_7b", choices=sorted(MODEL_SPECS.keys()))
     parser.add_argument("--threshold", type=float, default=0.35)
     parser.add_argument("--stress_scale", type=float, default=8.0)
     parser.add_argument("--block_size", type=int, default=128)
     parser.add_argument("--base_mantissa", type=int, default=4)
     parser.add_argument("--refine_mantissa", type=int, default=6)
+    parser.add_argument(
+        "--selection_policy",
+        default="graph_stress",
+        choices=[
+            "graph_stress",
+            "graph_stress_topk",
+            "graphxstress",
+            "risk_stress_topk",
+            "stress_graph_boost",
+            "stress_graph_boost_threshold",
+            "stress_graph_boost_topk",
+            "stressboost_topk",
+            "stress_risk_boost_topk",
+            "stress",
+            "stress_topk",
+            "graph_risk",
+            "graph_only",
+            "risk_topk",
+            "random",
+            "oracle_error",
+        ],
+        help="Block selection policy for BFPA4->BFPA6 lift.",
+    )
+    parser.add_argument(
+        "--lift_ratio",
+        type=float,
+        default=0.2,
+        help="Fraction of blocks lifted by random/oracle_error profiling policies.",
+    )
+    parser.add_argument(
+        "--risk_boost_alpha",
+        type=float,
+        default=1.0,
+        help=(
+            "Graph-risk boost strength for stress_graph_boost policies. "
+            "The score is activation_stress * (1 + alpha * graph_risk)."
+        ),
+    )
+    parser.add_argument(
+        "--risk_mode",
+        default="degree",
+        choices=["degree", "propagation", "tser", "context", "unique"],
+        help="Node-side graph-risk signal used to gate BFPA4->BFPA6 block lift.",
+    )
+    parser.add_argument(
+        "--top_risk_frac",
+        type=float,
+        default=1.0,
+        help="If in (0,1), only the top fraction of nodes by graph risk can trigger block lift.",
+    )
     parser.add_argument("--batch_size", type=int, default=4)
     parser.add_argument("--max_length", type=int, default=512)
     parser.add_argument("--runs", type=int, default=3)
@@ -356,11 +487,70 @@ def main() -> None:
     parser.add_argument("--awq_force_mse_clip", action="store_true")
     parser.add_argument("--awq_results_path", type=str, default=None)
     parser.add_argument("--awq_overwrite_results", action="store_true")
+    parser.add_argument(
+        "--awq_force_cpu",
+        action="store_true",
+        help=(
+            "Load the FP model on CPU for official AWQ search. Default keeps "
+            "AWQ on the GPU/auto-device path when memory is sufficient."
+        ),
+    )
     args = parser.parse_args()
 
     out_dir = Path(args.output_dir) / args.dataset
     out_dir.mkdir(parents=True, exist_ok=True)
-    default_tag = f"W4GraphBFPA{args.base_mantissa}to{args.refine_mantissa}_B{args.block_size}_deg_t{args.threshold:g}"
+    risk_suffix = str(args.risk_mode).lower()
+    if 0.0 < float(args.top_risk_frac) < 1.0:
+        risk_suffix += f"_top{int(round(float(args.top_risk_frac) * 100))}"
+    if args.selection_policy == "graph_stress":
+        default_tag = (
+            f"W4GraphBFPA{args.base_mantissa}to{args.refine_mantissa}"
+            f"_B{args.block_size}_{risk_suffix}_t{args.threshold:g}"
+        )
+    elif args.selection_policy in {"graph_stress_topk", "graphxstress", "risk_stress_topk"}:
+        ratio_suffix = int(round(float(args.lift_ratio) * 100))
+        default_tag = (
+            f"W4GraphBFPA{args.base_mantissa}to{args.refine_mantissa}"
+            f"_B{args.block_size}_{risk_suffix}_graphstress{ratio_suffix}"
+        )
+    elif args.selection_policy in {
+        "stress_graph_boost",
+        "stress_graph_boost_threshold",
+        "stress_graph_boost_topk",
+        "stressboost_topk",
+        "stress_risk_boost_topk",
+    }:
+        ratio_suffix = int(round(float(args.lift_ratio) * 100))
+        alpha_suffix = str(float(args.risk_boost_alpha)).replace(".", "p")
+        if args.selection_policy in {"stress_graph_boost", "stress_graph_boost_threshold"}:
+            default_tag = (
+                f"W4GraphBFPA{args.base_mantissa}to{args.refine_mantissa}"
+                f"_B{args.block_size}_{risk_suffix}_stressboost_t{args.threshold:g}_a{alpha_suffix}"
+            )
+        else:
+            default_tag = (
+                f"W4GraphBFPA{args.base_mantissa}to{args.refine_mantissa}"
+                f"_B{args.block_size}_{risk_suffix}_stressboost{ratio_suffix}_a{alpha_suffix}"
+            )
+    elif args.selection_policy in {"stress", "stress_topk"}:
+        ratio_suffix = int(round(float(args.lift_ratio) * 100))
+        default_tag = (
+            f"W4BlockBFPA{args.base_mantissa}to{args.refine_mantissa}"
+            f"_B{args.block_size}_stress{ratio_suffix}"
+        )
+    elif args.selection_policy in {"graph_risk", "graph_only", "risk_topk"}:
+        ratio_suffix = int(round(float(args.lift_ratio) * 100))
+        default_tag = (
+            f"W4GraphBFPA{args.base_mantissa}to{args.refine_mantissa}"
+            f"_B{args.block_size}_{risk_suffix}_graph{ratio_suffix}"
+        )
+    else:
+        ratio_suffix = int(round(float(args.lift_ratio) * 100))
+        policy_suffix = "oracle" if args.selection_policy == "oracle_error" else "random"
+        default_tag = (
+            f"W4BlockBFPA{args.base_mantissa}to{args.refine_mantissa}"
+            f"_B{args.block_size}_{policy_suffix}{ratio_suffix}"
+        )
     tag = args.cache_tag or default_tag
     if args.save_to_cache:
         out_path = Path(default_pool_path(args.dataset, args.llm_name, tag))
@@ -379,8 +569,22 @@ def main() -> None:
                 break
     else:
         texts = load_raw_texts(args.dataset)
-        risk = build_degree_risk(args.dataset, len(texts))
-        model, tokenizer, _tag = load_model_and_tokenizer(args.llm_name, "fp16", args.cache_dir, force_cpu=True)
+        risk = build_graph_risk(
+            args.dataset,
+            len(texts),
+            args.risk_mode,
+            args.top_risk_frac,
+            args.seed,
+        )
+        torch.manual_seed(int(args.seed))
+        if torch.cuda.is_available():
+            torch.cuda.manual_seed_all(int(args.seed))
+        model, tokenizer, _tag = load_model_and_tokenizer(
+            args.llm_name,
+            "fp16",
+            args.cache_dir,
+            force_cpu=bool(args.awq_force_cpu),
+        )
         model, device = apply_official_awq_w4(
             model=model,
             tokenizer=tokenizer,
@@ -397,11 +601,16 @@ def main() -> None:
             block_size=int(args.block_size),
             base_mantissa=int(args.base_mantissa),
             refine_mantissa=int(args.refine_mantissa),
+            selection_policy=str(args.selection_policy),
+            lift_ratio=float(args.lift_ratio),
+            risk_boost_alpha=float(args.risk_boost_alpha),
         )
         print(
             "[GraphAwareBFP] Installing dynamic wrappers "
             f"| base=A{args.base_mantissa} | refine=A{args.refine_mantissa} "
-            f"| block={args.block_size} | threshold={args.threshold} | stress_scale={args.stress_scale}"
+            f"| block={args.block_size} | policy={args.selection_policy} "
+            f"| lift_ratio={args.lift_ratio} | threshold={args.threshold} "
+            f"| stress_scale={args.stress_scale} | risk_boost_alpha={args.risk_boost_alpha}"
         )
         replace_linear_with_graph_bfp(model, controller, skip_names=())
         node_ids = list(range(len(texts)))
@@ -428,14 +637,36 @@ def main() -> None:
             "pool_path": str(out_path),
             "threshold": float(args.threshold),
             "stress_scale": float(args.stress_scale),
+            "risk_mode": str(args.risk_mode),
+            "top_risk_frac": float(args.top_risk_frac),
             "block_size": int(args.block_size),
             "base_mantissa": int(args.base_mantissa),
             "refine_mantissa": int(args.refine_mantissa),
+            "selection_policy": str(args.selection_policy),
+            "lift_ratio": float(args.lift_ratio),
+            "risk_boost_alpha": float(args.risk_boost_alpha),
             "total_blocks": int(controller.total_blocks),
             "refined_blocks": int(controller.refined_blocks),
             "refined_ratio": float(refined_ratio),
             "effective_bits": float(effective_bits),
-            "policy": "degree_risk(node) * activation_stress(block) >= threshold",
+            "policy": (
+                f"{args.risk_mode}_risk(node) * activation_stress(block) >= threshold; "
+                f"top_risk_frac={args.top_risk_frac}"
+                if args.selection_policy == "graph_stress"
+                else (
+                    f"activation_stress(block) * (1 + {args.risk_boost_alpha} * "
+                    f"{args.risk_mode}_risk(node)) block lift; lift_ratio={args.lift_ratio}"
+                    if args.selection_policy
+                    in {
+                        "stress_graph_boost",
+                        "stress_graph_boost_threshold",
+                        "stress_graph_boost_topk",
+                        "stressboost_topk",
+                        "stress_risk_boost_topk",
+                    }
+                    else f"{args.selection_policy} block lift; lift_ratio={args.lift_ratio}"
+                )
+            ),
             "array_trace": controller.trace_summary(),
         }
         meta_path.write_text(json.dumps(metadata, indent=2, sort_keys=True) + "\n", encoding="utf-8")
@@ -451,9 +682,10 @@ def main() -> None:
     reference = load_tensor_pool(default_pool_path(args.dataset, args.llm_name, "W4BFPA8_B128"), device).cpu()
     result = evaluate_pool(args.dataset, embs, reference, int(args.runs), int(args.seed), device)
     note = (
-        f"Graph-aware dynamic BFP pool | dataset={args.dataset} | tag={tag}\n"
+        f"BFPA4->BFPA6 block-lift pool | dataset={args.dataset} | tag={tag}\n"
         f"output={out_path}\n"
         f"metadata={meta_path}\n"
+        f"selection_policy={metadata.get('selection_policy', args.selection_policy)}\n"
         f"refined_ratio={metadata.get('refined_ratio', 'unknown')}\n"
         f"effective_bits={metadata.get('effective_bits', 'unknown')}\n"
         f"Baseline Acc: {result['baseline']:.4f}\n"

@@ -1,0 +1,4 @@
+entries	directory_area_mm2	search_energy_nj	directory_leakage_mw	hot_entries	hot_buffer_area_mm2	hot_embedding_read_nj	total_area_with_hot_mm2
+1024	0.0306	5.88	17.69	64	0.5387	8.07	0.5693
+4096	0.1339	61.18	61.75	64	0.5387	8.07	0.6726
+32768	0.9209	1777.72	449.87	64	0.5387	8.07	1.4596

@@ -1,0 +1,15 @@
+\begin{table}[t]
+\centering
+\caption{Current hardware area and power model. NPU and NDP power are model inputs pending RTL synthesis.}
+\label{tab:hardware-area}
+\begin{tabular}{lrrr}
+\toprule
+Component & Frequency & Area (mm$^2$) & Power (W) \\
+\midrule
+SH-CAM active directory + 64-entry hot buffer & 500.0 & 0.673 & 0.674 \\
+BFP NPU systolic arrays & 1000.0 & 48.000 & 34.000 \\
+NDP graph/embedding controller & 500.0 & 12.000 & 1.326 \\
+GRACE modeled total & NPU 1000.0, NDP 500.0 & 60.673 & 36.000 \\
+\bottomrule
+\end{tabular}
+\end{table}

@@ -327,6 +327,24 @@ def load_raw_texts(ds_key):
     raise ValueError(f"Dataset {ds_key} not supported for raw text loading.")
 
 
+def _distilbert_early_exit(model, encoded, layer_idx):
+    model_type = getattr(model.config, "model_type", "")
+    n_layers = int(getattr(model.config, "n_layers", getattr(model.config, "num_hidden_layers", 0)))
+    if model_type != "distilbert" or layer_idx <= 0 or layer_idx > n_layers:
+        return None
+
+    hidden = model.embeddings(input_ids=encoded["input_ids"])
+    attention_mask = encoded.get("attention_mask")
+    for layer_id in range(layer_idx):
+        hidden = model.transformer.layer[layer_id](
+            hidden,
+            attn_mask=attention_mask,
+            head_mask=None,
+            output_attentions=False,
+        )[0]
+    return hidden
+
+
 def get_distilbert_embeddings(texts, device, layer_idx=-1, batch_size=128):
     from tqdm import tqdm
     from transformers import AutoModel, AutoTokenizer
@@ -358,11 +376,15 @@ def get_distilbert_embeddings(texts, device, layer_idx=-1, batch_size=128):
                 return_tensors="pt",
             )
             encoded = {k: v.to(device) for k, v in encoded.items()}
-            outputs = model(**encoded, output_hidden_states=True)
-            if layer_idx == -1:
-                batch_embs = outputs.last_hidden_state[:, 0, :]
+            early_hidden = _distilbert_early_exit(model, encoded, layer_idx)
+            if early_hidden is not None:
+                batch_embs = early_hidden[:, 0, :]
             else:
-                batch_embs = outputs.hidden_states[layer_idx][:, 0, :]
+                outputs = model(**encoded, output_hidden_states=(layer_idx != -1))
+                if layer_idx == -1:
+                    batch_embs = outputs.last_hidden_state[:, 0, :]
+                else:
+                    batch_embs = outputs.hidden_states[layer_idx][:, 0, :]
             all_embs.append(batch_embs.cpu())
 
     return torch.cat(all_embs, dim=0).to(device)

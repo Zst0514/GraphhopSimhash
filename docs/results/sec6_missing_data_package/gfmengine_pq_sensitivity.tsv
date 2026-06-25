@@ -1,0 +1,4 @@
+scenario	avg_total_norm	avg_speedup	avg_memory_norm	avg_compute_norm	source
+GFMEngine-PQ-M16-BW256	0.23376601611780426	4.277781760613395	0.7714984629901738	0.29571256133236057	/home/zhangshangtong/Transformer/OFA/output/e2e_run_gfmengine_m16_bw256/pq_frontend_timing.json
+GFMEngine-PQ-M64-BW64	0.43515551850868245	2.298028997603181	11.172371505570162	0.45636927527801413	/home/zhangshangtong/Transformer/OFA/output/e2e_run_gfmengine_m64_bw64/pq_frontend_timing.json
+GFMEngine-PQ-M128-BW64	0.6900971783097789	1.4490712778296686	22.075879270123608	0.6705782272055524	/home/zhangshangtong/Transformer/OFA/output/e2e_run_gfmengine_m128_bw64/pq_frontend_timing.json

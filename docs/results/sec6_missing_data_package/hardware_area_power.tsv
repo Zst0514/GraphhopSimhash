@@ -1,0 +1,5 @@
+component	config	frequency_mhz	area_mm2	power_w	latency_cycles	source
+SH-CAM active directory + 64-entry hot buffer	4096 entries, 8x16b signature, 64b metadata, 4096-d FP16 hot embeddings	500.0	0.6726	0.67355	2 hit / 3 miss	docs/results/CAM_LRU_CACTI_ESTIMATE.md; dynamic power at 10 Mlookup/s
+BFP NPU systolic arrays	16 x 128x128 arrays, aggregate 262144 MAC/cycle	1000.0	48.0	34.0	trace driven	energy-model input; replace after RTL synthesis
+NDP graph/embedding controller	local DRAM 256.0 GB/s, NPU->NDP 64.0 GB/s	500.0	12.0	1.32645	streaming DMA + random local reads	energy-model input; embedding store in NDP-local DRAM
+GRACE modeled total	NPU arrays + SH-CAM/NDP control, off-chip DRAM not counted as die area	NPU 1000.0, NDP 500.0	60.6726	36.0	see latency_breakdown.tsv	sum of current model inputs

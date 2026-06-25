@@ -1,0 +1,6 @@
+hamming_radius	cam_search_cycles	select_cycles	update_cycles_on_miss	candidate_discovery_status	note
+0	1	1	1	not_measured_in_current_package	existing candidate-discovery table fixes radius=2; run profile_candidate_discovery_ablation.py --radius R for real accuracy/yield sweep
+1	1	1	1	not_measured_in_current_package	existing candidate-discovery table fixes radius=2; run profile_candidate_discovery_ablation.py --radius R for real accuracy/yield sweep
+2	1	1	1	not_measured_in_current_package	existing candidate-discovery table fixes radius=2; run profile_candidate_discovery_ablation.py --radius R for real accuracy/yield sweep
+3	1	1	1	not_measured_in_current_package	existing candidate-discovery table fixes radius=2; run profile_candidate_discovery_ablation.py --radius R for real accuracy/yield sweep
+4	1	1	1	not_measured_in_current_package	existing candidate-discovery table fixes radius=2; run profile_candidate_discovery_ablation.py --radius R for real accuracy/yield sweep

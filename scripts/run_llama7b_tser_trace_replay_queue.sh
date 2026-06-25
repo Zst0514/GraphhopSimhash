@@ -5,33 +5,21 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 OFA_DIR="${OFA_DIR:-$(cd "${REPO_DIR}/.." && pwd)}"
 PYTHON_BIN="${PYTHON_BIN:-/home/zhangshangtong/.conda/envs/OFA/bin/python}"
-OUT_DIR="${OUT_DIR:-${OFA_DIR}/output/llama7b_tser_score_ablation}"
 
+OUT_DIR="${OUT_DIR:-${OFA_DIR}/output/llama7b_tser_trace_replay}"
+DATASETS=(${DATASETS:-tape_products arxiv tape_arxiv23})
 RUNS="${RUNS:-3}"
 SEED="${SEED:-42}"
-FORCE="${FORCE:-0}"
-DATASETS=(${DATASETS:-cora pubmed})
-EXPORT_TRACE="${EXPORT_TRACE:-1}"
-POLICIES="${POLICIES:-no_graph_risk degree_only degree_context degree_unique tser}"
+FORCE_TRACE="${FORCE_TRACE:-0}"
+TRACE_THRESHOLD="${TRACE_THRESHOLD:-999}"
+REPLAY_THRESHOLDS="${REPLAY_THRESHOLDS:-16 20 24 28 31 35 40 45 50}"
+TARGET_REUSE="${TARGET_REUSE:-0.30 0.35 0.40 0.45 0.50}"
 
-mkdir -p "${OUT_DIR}/logs"
-mkdir -p "${OUT_DIR}/traces"
+mkdir -p "${OUT_DIR}/logs" "${OUT_DIR}/traces"
 cd "${OFA_DIR}"
 
 timestamp() {
   date +"%Y-%m-%d %H:%M:%S"
-}
-
-threshold_for_dataset() {
-  case "$1" in
-    cora) echo "${T_CORA:-31}" ;;
-    pubmed) echo "${T_PUBMED:-24}" ;;
-    arxiv) echo "${T_ARXIV:-18}" ;;
-    wikics) echo "${T_WIKICS:-31}" ;;
-    tape_products) echo "${T_PRODUCTS:-24}" ;;
-    tape_arxiv23) echo "${T_ARXIV23:-22}" ;;
-    *) echo "Unknown dataset: $1" >&2; return 2 ;;
-  esac
 }
 
 accept_args_for_dataset() {
@@ -50,9 +38,6 @@ accept_args_for_dataset() {
   esac
 }
 
-# Keep the candidate discovery path identical to the current LLaMA2-7B frontend
-# policy. Residual training is minimized because this experiment reads the
-# SoftDirectReuse row to isolate score-gate behavior before residual repair.
 base_args=(
   --runs "${RUNS}"
   --seed "${SEED}"
@@ -88,117 +73,68 @@ base_args=(
   --residual_embedding_source real_quant_fp
   --real_quant_model_name llama2_7b
   --real_quant_fp_tag W4BFPA8_B128
-  --residual_fit_profile llama
+  --residual_fit_profile manual
+  --enable_score_gate
+  --score_reuse_threshold "${TRACE_THRESHOLD}"
+  --score_propagation_weight 3
+  --score_graph_context_weight 1
+  --score_low_unique_weight 1
 )
 
-run_policy() {
+capture_trace() {
   local dataset="$1"
-  local policy="$2"
-  local threshold="$3"
-  shift 3
   local pool="${OFA_DIR}/cache_data/${dataset}_llama2_7b_oracle_W4BFPA8_B128.pt"
-  local tag="${dataset}_${policy}_T${threshold}_runs${RUNS}"
+  local tag="${dataset}_canonical_T${TRACE_THRESHOLD}_runs${RUNS}"
   local log_path="${OUT_DIR}/logs/${tag}.log"
   local done_path="${log_path}.done"
+  local existing
+  existing="$(find "${OUT_DIR}/traces" -maxdepth 1 -type f -name "${dataset}_canonical_T${TRACE_THRESHOLD}_run*_reuse_decisions.tsv" | wc -l)"
 
+  if [[ "${existing}" -ge "${RUNS}" && "${FORCE_TRACE}" != "1" ]]; then
+    echo "[$(timestamp)] [Trace exists] dataset=${dataset} files=${existing}"
+    return
+  fi
   if [[ ! -s "${pool}" ]]; then
     echo "[$(timestamp)] [Missing pool] ${pool}" >&2
     return 2
   fi
-  if [[ -e "${done_path}" && "${FORCE}" != "1" ]]; then
-    echo "[$(timestamp)] [Skip] ${tag}; existing ${done_path}"
+  if [[ -e "${done_path}" && "${FORCE_TRACE}" != "1" ]]; then
+    echo "[$(timestamp)] [Trace log done] ${done_path}"
     return
   fi
 
   read -r -a accept_args <<< "$(accept_args_for_dataset "${dataset}")"
-
   echo
   echo "================================================================"
-  echo "[$(timestamp)] [TSER score ablation] dataset=${dataset} policy=${policy} T=${threshold} runs=${RUNS}"
+  echo "[$(timestamp)] [Trace capture] dataset=${dataset} T=${TRACE_THRESHOLD} runs=${RUNS}"
   echo "[Log] ${log_path}"
   echo "================================================================"
-
-  trace_args=()
-  if [[ "${EXPORT_TRACE}" == "1" ]]; then
-    trace_args=(
-      --reuse_decision_trace_export_dir "${OUT_DIR}/traces"
-      --reuse_decision_trace_tag "${policy}_T${threshold}"
-    )
-  fi
-
-  set +e
   "${PYTHON_BIN}" -m GraphhopSimhash \
     "${base_args[@]}" \
     --datasets "${dataset}" \
-    --score_reuse_threshold "${threshold}" \
     --residual_embedding_path "${pool}" \
+    --reuse_decision_trace_export_dir "${OUT_DIR}/traces" \
+    --reuse_decision_trace_tag "canonical_T${TRACE_THRESHOLD}" \
     "${accept_args[@]}" \
-    "${trace_args[@]}" \
-    "$@" \
     2>&1 | tee "${log_path}"
-  local status="${PIPESTATUS[0]}"
-  set -e
-
-  if [[ "${status}" -ne 0 ]]; then
-    echo "[$(timestamp)] [Failed] dataset=${dataset} policy=${policy} status=${status}" >&2
-    return "${status}"
-  fi
   touch "${done_path}"
 }
 
-echo "[$(timestamp)] LLaMA2-7B TSER score ablation"
+echo "[$(timestamp)] LLaMA2-7B TSER trace replay queue"
 echo "OUT_DIR=${OUT_DIR}"
 echo "DATASETS=${DATASETS[*]}"
 echo "RUNS=${RUNS}"
-echo "POLICIES=${POLICIES}"
 
 for dataset in "${DATASETS[@]}"; do
-  threshold="$(threshold_for_dataset "${dataset}")"
-  for policy in ${POLICIES}; do
-    case "${policy}" in
-      no_graph_risk)
-        run_policy "${dataset}" "no_graph_risk" "${threshold}" \
-          --disable_score_gate
-        ;;
-      degree_only)
-        run_policy "${dataset}" "degree_only" "${threshold}" \
-          --enable_score_gate \
-          --score_propagation_weight 3 \
-          --score_graph_context_weight 0 \
-          --score_low_unique_weight 0
-        ;;
-      degree_context)
-        run_policy "${dataset}" "degree_context" "${threshold}" \
-          --enable_score_gate \
-          --score_propagation_weight 3 \
-          --score_graph_context_weight 1 \
-          --score_low_unique_weight 0
-        ;;
-      degree_unique)
-        run_policy "${dataset}" "degree_unique" "${threshold}" \
-          --enable_score_gate \
-          --score_propagation_weight 3 \
-          --score_graph_context_weight 0 \
-          --score_low_unique_weight 1
-        ;;
-      tser)
-        run_policy "${dataset}" "tser" "${threshold}" \
-          --enable_score_gate \
-          --score_propagation_weight 3 \
-          --score_graph_context_weight 1 \
-          --score_low_unique_weight 1
-        ;;
-      *)
-        echo "Unknown policy: ${policy}" >&2
-        exit 2
-        ;;
-    esac
-  done
+  capture_trace "${dataset}"
 done
 
-"${PYTHON_BIN}" "${REPO_DIR}/scripts/summarize_llama7b_tser_score_ablation.py" \
-  --log_dir "${OUT_DIR}/logs" \
-  --output_dir "${OUT_DIR}"
+"${PYTHON_BIN}" "${REPO_DIR}/scripts/replay_llama7b_tser_from_trace.py" \
+  --trace_dir "${OUT_DIR}/traces" \
+  --trace_tag_contains "canonical_T${TRACE_THRESHOLD}" \
+  --datasets "${DATASETS[@]}" \
+  --thresholds ${REPLAY_THRESHOLDS} \
+  --targets ${TARGET_REUSE} \
+  --output_dir "${OUT_DIR}/replay"
 
-echo
-echo "[$(timestamp)] [Done] logs=${OUT_DIR}/logs"
+echo "[$(timestamp)] [Done] ${OUT_DIR}/replay/trace_replay_summary.md"

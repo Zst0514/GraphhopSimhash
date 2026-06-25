@@ -1,0 +1,13 @@
+task	dataset	block_size	bfpa4_drop_pct	bfpa5_drop_pct	bfpa6_drop_pct	complete	source
+CN	cora	256	1.61	0.37	-0.02	yes	/home/zhangshangtong/Transformer/OFA/output/bfpa_boundary_table_runs10/all_blocks/summary.tsv
+CL	cora	256	1.61	0.37	-0.02	yes	/home/zhangshangtong/Transformer/OFA/output/bfpa_boundary_table_runs10/all_blocks/summary.tsv
+CN	cora	512	3.31	0.51	-0.30	yes	/home/zhangshangtong/Transformer/OFA/output/bfpa_boundary_table_runs10/all_blocks/summary.tsv
+CL	cora	512	3.31	0.51	-0.30	yes	/home/zhangshangtong/Transformer/OFA/output/bfpa_boundary_table_runs10/all_blocks/summary.tsv
+PN	pubmed	256	1.80	0.49	0.13	yes	/home/zhangshangtong/Transformer/OFA/output/bfpa_boundary_table_runs10/all_blocks/summary.tsv
+PL	pubmed	256	1.80	0.49	0.13	yes	/home/zhangshangtong/Transformer/OFA/output/bfpa_boundary_table_runs10/all_blocks/summary.tsv
+PN	pubmed	512	4.40	0.75	0.16	yes	/home/zhangshangtong/Transformer/OFA/output/bfpa_boundary_table_runs10/all_blocks/summary.tsv
+PL	pubmed	512	4.40	0.75	0.16	yes	/home/zhangshangtong/Transformer/OFA/output/bfpa_boundary_table_runs10/all_blocks/summary.tsv
+WK	wikics	256	1.14	0.32	0.11	yes	/home/zhangshangtong/Transformer/OFA/output/bfpa_boundary_table_runs10/all_blocks/summary.tsv
+WK	wikics	512	4.65	0.60	0.09	yes	/home/zhangshangtong/Transformer/OFA/output/bfpa_boundary_table_runs10/all_blocks/summary.tsv
+AR	arxiv	256	0.68	0.46	0.13	yes	/home/zhangshangtong/Transformer/OFA/output/bfpa_boundary_table_runs10/all_blocks/summary.tsv
+AR	arxiv	512	1.19	0.38	0.33	yes	/home/zhangshangtong/Transformer/OFA/output/bfpa_boundary_table_runs10/all_blocks/summary.tsv
